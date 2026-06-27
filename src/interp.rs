@@ -310,11 +310,17 @@ impl<'a, H: Host> Interp<'a, H> {
                 if let Some(v) = scope.get(name) {
                     return Ok(v);
                 }
-                // 내장 전역 함수(콜백 전달 가능): Boolean/String/Number.
-                if matches!(name, "Boolean" | "String" | "Number") {
-                    return Ok(Val::Native(name.to_string()));
+                match name {
+                    // 내장 전역(콜백 전달·값 사용 가능).
+                    "Boolean" | "String" | "Number" | "parseInt" | "parseFloat" | "isNaN" | "isFinite" => {
+                        Ok(Val::Native(name.to_string()))
+                    }
+                    "NaN" => Ok(Val::Num(f64::NAN)),
+                    "Infinity" => Ok(Val::Num(f64::INFINITY)),
+                    // 미정의 식별자 — JS 라면 ReferenceError. 갭으로 loud(누락 전역/오타 은폐 금지).
+                    // typeof 만 예외(UnaryExpression 에서 이 갭을 잡아 "undefined" 반환).
+                    _ => Err(format!("미정의 식별자 {name:?}")),
                 }
-                Ok(Val::Undefined)
             }
             "TemplateLiteral" => {
                 let quasis = node.get("quasis").and_then(|q| q.as_array()).cloned().unwrap_or_default();
@@ -365,14 +371,23 @@ impl<'a, H: Host> Interp<'a, H> {
             "ArrowFunctionExpression" | "FunctionExpression" => Ok(self.make_closure(node, scope)),
             "AwaitExpression" => self.eval(node.get("argument").unwrap_or(&Json::Null), scope), // eager: 이미 해소됨
             "UnaryExpression" => {
-                let arg = self.eval(node.get("argument").unwrap_or(&Json::Null), scope)?;
                 let op = node.get("operator").and_then(|o| o.as_str()).unwrap_or("");
+                let arg_node = node.get("argument").unwrap_or(&Json::Null);
+                // typeof 미선언 식별자 → "undefined"(JS: ReferenceError 안 남). 갭만 흡수, 그 외 전파.
+                if op == "typeof" {
+                    return match self.eval(arg_node, scope) {
+                        Ok(v) => Ok(Val::Str(type_of(&v).to_string())),
+                        Err(e) if e.starts_with("미정의 식별자") => Ok(Val::Str("undefined".to_string())),
+                        Err(e) => Err(e),
+                    };
+                }
+                let arg = self.eval(arg_node, scope)?;
                 Ok(match op {
                     "!" => Val::Bool(!truthy(&arg)),
                     "-" => Val::Num(-to_num(&arg)),
                     "+" => Val::Num(to_num(&arg)),
-                    "typeof" => Val::Str(type_of(&arg).to_string()),
-                    _ => Val::Undefined,
+                    "void" => Val::Undefined,
+                    _ => return Err(format!("미지원 단항 연산자: {op}")),
                 })
             }
             "BinaryExpression" => {
@@ -723,7 +738,27 @@ impl<'a, H: Host> Interp<'a, H> {
                 "Boolean" => Val::Bool(truthy(&a0)),
                 "String" => Val::Str(to_string(&a0)),
                 "Number" => Val::Num(to_num(&a0)),
-                _ => Val::Undefined,
+                "parseInt" => {
+                    let s = to_string(&a0);
+                    let radix = args.get(1).map(to_num).filter(|r| *r >= 2.0).map(|r| r as u32).unwrap_or(10);
+                    let t = s.trim();
+                    let (neg, digits) = t.strip_prefix('-').map(|d| (true, d)).unwrap_or((false, t.strip_prefix('+').unwrap_or(t)));
+                    let take: String = digits.chars().take_while(|c| c.is_digit(radix)).collect();
+                    match i64::from_str_radix(&take, radix) {
+                        Ok(n) => Val::Num(if neg { -(n as f64) } else { n as f64 }),
+                        Err(_) => Val::Num(f64::NAN),
+                    }
+                }
+                "parseFloat" => {
+                    let s = to_string(&a0);
+                    let t = s.trim();
+                    // 선두 숫자 토큰만.
+                    let end = t.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(t.len());
+                    Val::Num(t[..end].parse::<f64>().unwrap_or(f64::NAN))
+                }
+                "isNaN" => Val::Bool(to_num(&a0).is_nan()),
+                "isFinite" => Val::Bool(to_num(&a0).is_finite()),
+                _ => return Err(format!("미지원 내장 호출: {name}")),
             });
         }
         let cl = match f {
@@ -1363,5 +1398,25 @@ mod tests {
         // ok('C6')=false 로 게이트된 T2 는 미실행.
         assert!(!labels.iter().any(|l| l == "T2"), "T2 는 게이트 미실행이어야: {labels:?}");
         assert_eq!(h.calls.len(), 9, "정확히 9 agent: {labels:?}");
+    }
+
+    #[test]
+    fn undefined_identifier_is_loud_not_silent() {
+        // [기준] 미정의 식별자는 조용히 undefined 가 되면 안 된다(누락 전역/오타 은폐 = 꼼수).
+        // return NOPE  → Err("미정의 식별자 …"). 구 동작은 Undefined 를 조용히 반환했음.
+        let prog = parse(r#"{"type":"Program","body":[{"type":"ReturnStatement","argument":{"type":"Identifier","name":"NOPE"}}]}"#);
+        let mut h = RecHost { calls: vec![] };
+        match Interp::new(&mut h).run(&prog, Json::Null) {
+            Err(e) => assert!(e.starts_with("미정의 식별자"), "loud 갭이어야: {e}"),
+            Ok(_) => panic!("미정의 식별자가 조용히 통과됨(꼼수)"),
+        }
+    }
+
+    #[test]
+    fn typeof_undeclared_is_undefined_not_error() {
+        // typeof 미선언 식별자 → "undefined"(JS: ReferenceError 안 남). 갭만 흡수.
+        let prog = parse(r#"{"type":"Program","body":[{"type":"ReturnStatement","argument":{"type":"UnaryExpression","operator":"typeof","prefix":true,"argument":{"type":"Identifier","name":"NOPE"}}}]}"#);
+        let mut h = RecHost { calls: vec![] };
+        assert_eq!(to_string(&Interp::new(&mut h).run(&prog, Json::Null).unwrap()), "undefined");
     }
 }

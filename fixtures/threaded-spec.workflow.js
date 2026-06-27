@@ -19,14 +19,14 @@ const PLAN_SCHEMA = {
 };
 
 phase("Scope");
-const scope = await agent(`Break this product idea into exactly 3 distinct build angles (short strings). Idea: ${IDEA}`, {
+const scope = await agent(`Break this product idea into exactly 3 distinct build angles (short strings). Idea: ${args.IDEA}`, {
   label: "scope",
   schema: ANGLES_SCHEMA,
 });
 
 phase("Plan");
 const plan = await agent(
-  `From these candidate angles, pick the single best one and copy it verbatim into chosen_angle, then write a one-sentence build plan. Angles: ${scope.angles}. Idea: ${IDEA}`,
+  `From these candidate angles, pick the single best one and copy it verbatim into chosen_angle, then write a one-sentence build plan. Angles: ${scope.angles}. Idea: ${args.IDEA}`,
   { label: "plan", schema: PLAN_SCHEMA },
 );
 

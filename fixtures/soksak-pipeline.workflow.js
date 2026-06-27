@@ -26,7 +26,7 @@ const VERIFY_SCHEMA = {
 };
 
 phase("Spec");
-const spec = await agent(`구체화 단계. 아이디어로 빌드 스펙(한국어)을 쓰되, 아래 도메인 지시어를 전부 반영하라(아이디어에 없는 도메인 불변). 적용한 id를 applied_directive_ids에. 아이디어: ${IDEA}. 도메인 지시어(JSON): ${directives}`, { label: "spec", schema: SPEC_SCHEMA });
+const spec = await agent(`구체화 단계. 아이디어로 빌드 스펙(한국어)을 쓰되, 아래 도메인 지시어를 전부 반영하라(아이디어에 없는 도메인 불변). 적용한 id를 applied_directive_ids에. 아이디어: ${args.IDEA}. 도메인 지시어(JSON): ${JSON.stringify(args.directives)}`, { label: "spec", schema: SPEC_SCHEMA });
 
 phase("Research");
 const research = await agent(`지식습득 단계. 이 스펙을 구현할 기술 스택을 확정하고 근거와 핵심 리스크를 제시하라. 스펙: ${spec.spec}`, { label: "research", schema: RESEARCH_SCHEMA });

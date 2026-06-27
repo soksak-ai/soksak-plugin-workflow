@@ -19,13 +19,13 @@ const PLAN_SCHEMA = {
 };
 
 phase("Scope");
-const scope = await agent(`Break this product idea into exactly 3 short build angles. Idea: ${IDEA}`, {
+const scope = await agent(`Break this product idea into exactly 3 short build angles. Idea: ${args.IDEA}`, {
   label: "scope",
   schema: ANGLES_SCHEMA,
 });
 
 phase("Plan");
-const plan = await agent(`Write a single-sentence build plan for this idea. Idea: ${IDEA}`, {
+const plan = await agent(`Write a single-sentence build plan for this idea. Idea: ${args.IDEA}`, {
   label: "plan",
   schema: PLAN_SCHEMA,
 });
