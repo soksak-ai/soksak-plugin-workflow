@@ -3,6 +3,8 @@
 //! 인증 프로필 env(ANTHROPIC_*)는 호출자가 export(코어가 위임하는 형태). 결과 JSON 을 stdout 으로.
 
 use serde_json::{json, Map, Value};
+use soksak_plugin::derive_directive::synth_directives;
+use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec::{run_skeleton, AgentInvocation};
 use soksak_plugin::provider::{run_agent, AgentRequest};
 use soksak_plugin::skeleton::Skeleton;
@@ -45,6 +47,14 @@ fn real_main() -> Result<(), String> {
 
     let raw = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let skel = Skeleton::from_json(&raw)?;
+
+    // ③파생: IDEA 에서 도메인 지시어 합성 → context 에 directives 주입(워크플로가 ${directives} 로 사용).
+    if let Some(Value::String(idea)) = args.get("IDEA").cloned() {
+        let directives = synth_directives(&idea, &builtin_library());
+        let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
+        eprintln!("[soksak-run] ③파생: 도메인 {:?} → 지시어 {}개 주입", matched, directives.len());
+        args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
+    }
     eprintln!("[soksak-run] {} — steps={} agents 실행 시작", skel.meta.name, skel.steps.len());
 
     // 인증 프로필 env 수집(호출자가 export 한 ANTHROPIC_* 전부 전달).

@@ -1,0 +1,71 @@
+{
+  "ir": "workflow-skeleton@1",
+  "source": {
+    "name": "domain-spec",
+    "file": "domain-spec.workflow.js",
+    "sha256": "e6f4fd0063c14123506a8cc33ac611bedfd799cd1db1df2928ed286262d13ab7"
+  },
+  "meta": {
+    "name": "domain-spec",
+    "description": "③파생 도메인 지시어를 반영한 빌드 스펙.",
+    "phases": [
+      {
+        "title": "Spec"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "index": 0,
+      "kind": "phase",
+      "phase": "Spec",
+      "title": "Spec"
+    },
+    {
+      "index": 1,
+      "kind": "agent",
+      "label": "spec",
+      "schema": "SPEC_SCHEMA",
+      "model": null,
+      "effort": null,
+      "isolation": null,
+      "phase": "Spec",
+      "directiveRef": 0,
+      "promptStatic": false
+    }
+  ],
+  "directives": [
+    {
+      "index": 0,
+      "text": "You are a product spec writer. Write a concise build spec (Korean) for the idea. You MUST incorporate EVERY domain directive listed below — these encode domain invariants that are NOT stated in the plain idea. List the directive ids you applied in applied_directive_ids. Idea: ${IDEA}. Mandatory domain directives (JSON): ${directives}",
+      "static": false,
+      "placeholders": [
+        "IDEA",
+        "IDEA",
+        "directives",
+        "directives"
+      ]
+    }
+  ],
+  "schemas": {
+    "SPEC_SCHEMA": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spec": {
+          "type": "string"
+        },
+        "applied_directive_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "spec",
+        "applied_directive_ids"
+      ]
+    }
+  }
+}
