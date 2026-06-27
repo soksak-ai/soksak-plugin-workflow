@@ -1,0 +1,166 @@
+//! exec — 골격 실행기. steps 를 순서대로 walk, agent 를 runner 로 실행한다.
+//! runner 주입식 — e2e 는 claude -p(provider), 단위테스트는 fake. directive 프롬프트의
+//! ${placeholder} 를 args 로 바인딩 + schema 본문을 출력 형식 지시로 append.
+//! 현재: 순차(parallel/pipeline 내부 agent 도 순서 실행). 동시성은 다음 단계.
+
+use crate::skeleton::Skeleton;
+use serde_json::{Map, Value};
+
+const SCHEMA_INSTRUCTION: &str =
+    "\n\n## Output format\nReturn ONLY a JSON object — no markdown fence, no prose, no explanation — conforming to this JSON Schema:\n";
+
+/// AgentInvocation — runner 에 넘기는 한 agent 의 실행 사양.
+pub struct AgentInvocation {
+    pub label: String,
+    pub schema: Option<String>,
+    pub model: String,
+    pub prompt: String,
+}
+
+/// AgentResult — 한 agent 의 실행 결과.
+#[derive(Debug, Clone)]
+pub struct AgentResult {
+    pub label: String,
+    pub phase: Option<String>,
+    pub schema: Option<String>,
+    pub output: Value,
+}
+
+/// bind_placeholders — directive 텍스트의 ${KEY} 를 args[KEY] 로 치환.
+/// 객체/배열 값은 JSON 직렬화. 미바인딩 ${...} 는 그대로 둔다(fan-out item 컨텍스트 등).
+pub fn bind_placeholders(text: &str, args: &Map<String, Value>) -> String {
+    let mut out = text.to_string();
+    for (k, v) in args {
+        let needle = format!("${{{k}}}");
+        let val = match v {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        out = out.replace(&needle, &val);
+    }
+    out
+}
+
+/// run_skeleton — steps 순차 실행. runner(inv, schema_body) → agent 출력.
+pub fn run_skeleton<F>(skel: &Skeleton, args: &Map<String, Value>, mut runner: F) -> Result<Vec<AgentResult>, String>
+where
+    F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
+{
+    let mut results: Vec<AgentResult> = vec![];
+    for step in &skel.steps {
+        match step.kind.as_str() {
+            "agent" => {
+                let r = run_one(skel, step.label.clone(), step.directive_ref, &step.schema, &step.model, step.phase.clone(), args, &mut runner)?;
+                results.push(r);
+            }
+            "parallel" | "pipeline" => {
+                if let Some(agents) = &step.agents {
+                    for a in agents {
+                        let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), args, &mut runner)?;
+                        results.push(r);
+                    }
+                }
+            }
+            _ => {} // phase / log / workflow — 오케스트레이션 마커(no-op)
+        }
+    }
+    Ok(results)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_one<F>(
+    skel: &Skeleton,
+    label: Option<String>,
+    directive_ref: Option<usize>,
+    schema: &Option<String>,
+    model: &Option<String>,
+    phase: Option<String>,
+    args: &Map<String, Value>,
+    runner: &mut F,
+) -> Result<AgentResult, String>
+where
+    F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
+{
+    let dir = skel.directive_text(directive_ref).unwrap_or("");
+    let mut prompt = bind_placeholders(dir, args);
+    let schema_body = skel.schema_body(schema);
+    if let Some(body) = schema_body {
+        prompt.push_str(SCHEMA_INSTRUCTION);
+        prompt.push_str(&serde_json::to_string_pretty(body).unwrap_or_default());
+    }
+    let label = label.unwrap_or_else(|| "agent".to_string());
+    let model = model.clone().unwrap_or_else(|| "sonnet".to_string());
+    let inv = AgentInvocation { label: label.clone(), schema: schema.clone(), model, prompt };
+    let output = runner(&inv, schema_body).map_err(|e| format!("agent {label:?}: {e}"))?;
+    Ok(AgentResult { label, phase, schema: schema.clone(), output })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn demo_skeleton() -> Skeleton {
+        let raw = serde_json::to_vec(&json!({
+            "ir": "workflow-skeleton@1",
+            "meta": { "name": "demo" },
+            "steps": [
+                { "index": 0, "kind": "phase", "phase": "A", "title": "A" },
+                { "index": 1, "kind": "agent", "label": "scope", "schema": "SCOPE_SCHEMA", "directiveRef": 0, "phase": "A" },
+                { "index": 2, "kind": "pipeline", "phase": "A", "stages": 1, "agents": [
+                    { "label": "synth", "schema": "REPORT_SCHEMA", "directiveRef": 1, "phase": "A" }
+                ]}
+            ],
+            "directives": [
+                { "index": 0, "text": "Decompose ${QUESTION}", "placeholders": ["QUESTION"] },
+                { "index": 1, "text": "Synthesize report", "placeholders": [] }
+            ],
+            "schemas": {
+                "SCOPE_SCHEMA": { "type": "object", "properties": { "angles": { "type": "array" } } },
+                "REPORT_SCHEMA": { "type": "object", "properties": { "report": { "type": "string" } } }
+            }
+        }))
+        .unwrap();
+        Skeleton::from_json(&raw).unwrap()
+    }
+
+    #[test]
+    fn binds_placeholder() {
+        let mut args = Map::new();
+        args.insert("QUESTION".into(), json!("How does X work?"));
+        assert_eq!(bind_placeholders("Decompose ${QUESTION}", &args), "Decompose How does X work?");
+        // 미바인딩은 보존.
+        assert_eq!(bind_placeholders("${angle.label}", &args), "${angle.label}");
+    }
+
+    #[test]
+    fn runs_agents_in_order_with_fake_runner() {
+        let skel = demo_skeleton();
+        let mut args = Map::new();
+        args.insert("QUESTION".into(), json!("Q"));
+        let mut seen_prompts: Vec<String> = vec![];
+        let results = run_skeleton(&skel, &args, |inv, schema_body| {
+            seen_prompts.push(inv.prompt.clone());
+            // schema 본문이 전달됨.
+            assert!(schema_body.is_some(), "agent 에 schema 본문 전달");
+            // label 별 가짜 출력.
+            Ok(json!({ "from": inv.label }))
+        })
+        .unwrap();
+        // agent(scope) + pipeline 내부 agent(synth) = 2 결과.
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].label, "scope");
+        assert_eq!(results[1].label, "synth");
+        // scope 프롬프트: placeholder 바인딩 + schema 지시 포함.
+        assert!(seen_prompts[0].contains("Decompose Q"));
+        assert!(seen_prompts[0].contains("Output format"));
+        assert!(seen_prompts[0].contains("angles"));
+    }
+
+    #[test]
+    fn runner_error_propagates() {
+        let skel = demo_skeleton();
+        let r = run_skeleton(&skel, &Map::new(), |_inv, _s| Err("boom".to_string()));
+        assert!(r.is_err());
+    }
+}
