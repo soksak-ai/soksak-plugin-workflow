@@ -101,10 +101,14 @@ fn value_to_str(v: &Value) -> String {
     }
 }
 
-/// run_skeleton — steps 순차 실행. runner(inv, schema_body) → agent 출력.
-pub fn run_skeleton<F>(skel: &Skeleton, args: &Map<String, Value>, mut runner: F) -> Result<Vec<AgentResult>, String>
+/// 동시 실행 상한(glm-5.2 의 8-concurrent 에 맞춤).
+const FANOUT_CONCURRENCY: usize = 8;
+
+/// run_skeleton — steps 실행. 순차 agent 는 inline, fan-out 은 청크(≤8) 동시 실행.
+/// runner 는 Fn+Sync — claude -p provider 는 stateless·thread-safe(프로세스 spawn).
+pub fn run_skeleton<F>(skel: &Skeleton, args: &Map<String, Value>, runner: F) -> Result<Vec<AgentResult>, String>
 where
-    F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
+    F: Fn(&AgentInvocation, Option<&Value>) -> Result<Value, String> + Sync,
 {
     // ctx = args + 앞선 agent 출력(label 키). threading 의 단일 진실.
     let mut ctx: Map<String, Value> = args.clone();
@@ -112,7 +116,7 @@ where
     for step in &skel.steps {
         match step.kind.as_str() {
             "agent" => {
-                let r = run_one(skel, step.label.clone(), step.directive_ref, &step.schema, &step.model, step.phase.clone(), &ctx, &mut runner)?;
+                let r = run_one(skel, step.label.clone(), step.directive_ref, &step.schema, &step.model, step.phase.clone(), &ctx, &runner)?;
                 ctx.insert(r.label.clone(), r.output.clone());
                 results.push(r);
             }
@@ -126,13 +130,24 @@ where
                     .and_then(|v| v.as_array().cloned());
                 match (fanned, &step.item_param) {
                     (Some(items), Some(item_param)) if !items.is_empty() => {
-                        // label → fan-out 출력 배열(downstream threading 용).
+                        // item 별 step.agents 실행 — 청크(≤FANOUT_CONCURRENCY) 동시. 순서 보존.
+                        let mut per_item: Vec<Vec<AgentResult>> = Vec::with_capacity(items.len());
+                        for chunk in items.chunks(FANOUT_CONCURRENCY) {
+                            let chunk_out: Vec<Result<Vec<AgentResult>, String>> = std::thread::scope(|s| {
+                                let handles: Vec<_> = chunk
+                                    .iter()
+                                    .map(|item| s.spawn(|| run_item(skel, &agents, item_param, item, step.phase.as_ref(), &ctx, &runner)))
+                                    .collect();
+                                handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("fan-out thread panic".to_string()))).collect()
+                            });
+                            for r in chunk_out {
+                                per_item.push(r?);
+                            }
+                        }
+                        // 결과를 label→배열 로 context 누적(downstream threading). 순서 = item 순.
                         let mut collected: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
-                        for item in &items {
-                            let mut item_ctx = ctx.clone();
-                            item_ctx.insert(item_param.clone(), item.clone());
-                            for a in &agents {
-                                let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &item_ctx, &mut runner)?;
+                        for item_res in per_item {
+                            for r in item_res {
                                 collected.entry(r.label.clone()).or_default().push(r.output.clone());
                                 results.push(r);
                             }
@@ -144,7 +159,7 @@ where
                     _ => {
                         // axis 없음/미해소 → 선언된 agent 1회씩.
                         for a in &agents {
-                            let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &ctx, &mut runner)?;
+                            let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &ctx, &runner)?;
                             ctx.insert(r.label.clone(), r.output.clone());
                             results.push(r);
                         }
@@ -157,6 +172,29 @@ where
     Ok(results)
 }
 
+/// run_item — fan-out 한 element 에 대해 step 의 agents 전부 실행(item_param 바인딩).
+fn run_item<F>(
+    skel: &Skeleton,
+    agents: &[crate::skeleton::Agent],
+    item_param: &str,
+    item: &Value,
+    step_phase: Option<&String>,
+    ctx: &Map<String, Value>,
+    runner: &F,
+) -> Result<Vec<AgentResult>, String>
+where
+    F: Fn(&AgentInvocation, Option<&Value>) -> Result<Value, String> + Sync,
+{
+    let mut item_ctx = ctx.clone();
+    item_ctx.insert(item_param.to_string(), item.clone());
+    let mut out = vec![];
+    for a in agents {
+        let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step_phase.cloned()), &item_ctx, runner)?;
+        out.push(r);
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_one<F>(
     skel: &Skeleton,
@@ -166,10 +204,10 @@ fn run_one<F>(
     model: &Option<String>,
     phase: Option<String>,
     ctx: &Map<String, Value>,
-    runner: &mut F,
+    runner: &F,
 ) -> Result<AgentResult, String>
 where
-    F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
+    F: Fn(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
 {
     let prompt = build_prompt(skel, directive_ref, schema, ctx);
     let schema_body = skel.schema_body(schema);
@@ -314,9 +352,9 @@ mod tests {
         let skel = Skeleton::from_json(&raw).unwrap();
         let mut args = Map::new();
         args.insert("IDEA".into(), json!("a tracker"));
-        let mut prompts: Vec<String> = vec![];
+        let prompts: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
         run_skeleton(&skel, &args, |inv, _s| {
-            prompts.push(inv.prompt.clone());
+            prompts.lock().unwrap().push(inv.prompt.clone());
             // scope 는 angles 출력, plan 은 아무거나.
             if inv.label == "scope" {
                 Ok(json!({ "angles": ["x", "y"] }))
@@ -325,6 +363,7 @@ mod tests {
             }
         })
         .unwrap();
+        let prompts = prompts.into_inner().unwrap();
         // scope 프롬프트: IDEA 바인딩.
         assert!(prompts[0].contains("Decompose a tracker"));
         // plan 프롬프트: scope 출력이 threading 됨.
@@ -336,15 +375,16 @@ mod tests {
         let skel = demo_skeleton();
         let mut args = Map::new();
         args.insert("QUESTION".into(), json!("Q"));
-        let mut seen_prompts: Vec<String> = vec![];
+        let seen_prompts: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
         let results = run_skeleton(&skel, &args, |inv, schema_body| {
-            seen_prompts.push(inv.prompt.clone());
+            seen_prompts.lock().unwrap().push(inv.prompt.clone());
             // schema 본문이 전달됨.
             assert!(schema_body.is_some(), "agent 에 schema 본문 전달");
             // label 별 가짜 출력.
             Ok(json!({ "from": inv.label }))
         })
         .unwrap();
+        let seen_prompts = seen_prompts.into_inner().unwrap();
         // agent(scope) + pipeline 내부 agent(synth) = 2 결과.
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].label, "scope");
@@ -377,26 +417,30 @@ mod tests {
         let skel = Skeleton::from_json(&raw).unwrap();
         let mut args = Map::new();
         args.insert("IDEA".into(), json!("x"));
-        let mut search_prompts: Vec<String> = vec![];
-        let mut synth_prompt = String::new();
+        let search_prompts: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(vec![]);
+        let synth_prompt: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
         let results = run_skeleton(&skel, &args, |inv, _s| match inv.label.as_str() {
             "scope" => Ok(json!({ "angles": [{ "label": "a1" }, { "label": "a2" }, { "label": "a3" }] })),
             "search" => {
-                search_prompts.push(inv.prompt.clone());
+                search_prompts.lock().unwrap().push(inv.prompt.clone());
                 Ok(json!({ "found": inv.label }))
             }
             "synth" => {
-                synth_prompt = inv.prompt.clone();
+                *synth_prompt.lock().unwrap() = inv.prompt.clone();
                 Ok(json!({ "ok": true }))
             }
             _ => Ok(json!({})),
         })
         .unwrap();
-        // search 가 angle 3개에 대해 3회 실행(fan-out) + 각 angle.label 바인딩.
+        let search_prompts = search_prompts.into_inner().unwrap();
+        let synth_prompt = synth_prompt.into_inner().unwrap();
+        // search 가 angle 3개에 대해 3회 실행(fan-out). 동시 실행이라 순서 비결정 → 집합 검증.
         assert_eq!(search_prompts.len(), 3);
-        assert!(search_prompts[0].contains("search angle a1"));
-        assert!(search_prompts[2].contains("search angle a3"));
-        // synth: search fan-out 출력이 배열로 threading.
+        let joined = search_prompts.join("|");
+        assert!(joined.contains("search angle a1"));
+        assert!(joined.contains("search angle a2"));
+        assert!(joined.contains("search angle a3"));
+        // synth: search fan-out 출력이 배열로 threading(item 순서 보존 — 결정적).
         assert!(synth_prompt.contains("synth from ["), "synth threading: {synth_prompt}");
         // scope(1) + search(3) + synth(1) = 5.
         assert_eq!(results.len(), 5);
