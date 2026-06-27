@@ -1,0 +1,113 @@
+{
+  "ir": "workflow-skeleton@1",
+  "source": {
+    "name": "threaded-spec",
+    "file": "threaded-spec.workflow.js",
+    "sha256": "48b4fdc464a65a108fa4614bfb8a4c2e277e4633d8b6ec4fe7282c9094e4f8a3"
+  },
+  "meta": {
+    "name": "threaded-spec",
+    "description": "Threading e2e — scope 출력을 plan 이 받는다.",
+    "phases": [
+      {
+        "title": "Scope"
+      },
+      {
+        "title": "Plan"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "index": 0,
+      "kind": "phase",
+      "phase": "Scope",
+      "title": "Scope"
+    },
+    {
+      "index": 1,
+      "kind": "agent",
+      "label": "scope",
+      "schema": "ANGLES_SCHEMA",
+      "model": null,
+      "effort": null,
+      "isolation": null,
+      "phase": "Scope",
+      "directiveRef": 0,
+      "promptStatic": false
+    },
+    {
+      "index": 2,
+      "kind": "phase",
+      "phase": "Plan",
+      "title": "Plan"
+    },
+    {
+      "index": 3,
+      "kind": "agent",
+      "label": "plan",
+      "schema": "PLAN_SCHEMA",
+      "model": null,
+      "effort": null,
+      "isolation": null,
+      "phase": "Plan",
+      "directiveRef": 1,
+      "promptStatic": false
+    }
+  ],
+  "directives": [
+    {
+      "index": 0,
+      "text": "Break this product idea into exactly 3 distinct build angles (short strings). Idea: ${IDEA}",
+      "static": false,
+      "placeholders": [
+        "IDEA",
+        "IDEA"
+      ]
+    },
+    {
+      "index": 1,
+      "text": "From these candidate angles, pick the single best one and copy it verbatim into chosen_angle, then write a one-sentence build plan. Angles: ${scope.angles}. Idea: ${IDEA}",
+      "static": false,
+      "placeholders": [
+        "scope.angles",
+        "scope.angles",
+        "IDEA",
+        "IDEA"
+      ]
+    }
+  ],
+  "schemas": {
+    "ANGLES_SCHEMA": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "angles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "angles"
+      ]
+    },
+    "PLAN_SCHEMA": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "chosen_angle": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chosen_angle",
+        "plan"
+      ]
+    }
+  }
+}

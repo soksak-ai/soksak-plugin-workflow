@@ -26,19 +26,79 @@ pub struct AgentResult {
     pub output: Value,
 }
 
-/// bind_placeholders — directive 텍스트의 ${KEY} 를 args[KEY] 로 치환.
-/// 객체/배열 값은 JSON 직렬화. 미바인딩 ${...} 는 그대로 둔다(fan-out item 컨텍스트 등).
-pub fn bind_placeholders(text: &str, args: &Map<String, Value>) -> String {
-    let mut out = text.to_string();
-    for (k, v) in args {
-        let needle = format!("${{{k}}}");
-        let val = match v {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        out = out.replace(&needle, &val);
+/// bind_context — directive 텍스트의 `${expr}` 를 context(args + 앞선 agent 출력)에서 해소.
+/// expr 이 단순 dot-path(`scope.angles`)면 해당 값으로 치환(객체/배열은 JSON). 메서드콜·연산
+/// (`Q.slice(0,80)`) 등 비-path 는 미바인딩으로 보존(${expr} 그대로). UTF-8 안전.
+pub fn bind_context(text: &str, ctx: &Map<String, Value>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("${") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        match find_close_brace(after) {
+            Some(close) => {
+                let expr = &after[..close];
+                match resolve_path(ctx, expr) {
+                    Some(v) => out.push_str(&value_to_str(&v)),
+                    None => {
+                        out.push_str("${");
+                        out.push_str(expr);
+                        out.push('}');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str("${");
+                rest = after;
+            }
+        }
     }
+    out.push_str(rest);
     out
+}
+
+/// find_close_brace — `${` 직후 문자열에서 균형 잡힌 닫는 `}` 의 byte 인덱스.
+fn find_close_brace(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut depth = 1i32;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// resolve_path — 단순 dot-path 만 context 에서 해소. 그 외(공백·괄호·연산자)는 None.
+fn resolve_path(ctx: &Map<String, Value>, expr: &str) -> Option<Value> {
+    let expr = expr.trim();
+    if expr.is_empty() || !expr.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.') {
+        return None;
+    }
+    let mut parts = expr.split('.');
+    let first = parts.next()?;
+    let mut cur = ctx.get(first)?.clone();
+    for p in parts {
+        cur = cur.get(p)?.clone();
+    }
+    Some(cur)
+}
+
+fn value_to_str(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
 }
 
 /// run_skeleton — steps 순차 실행. runner(inv, schema_body) → agent 출력.
@@ -46,17 +106,21 @@ pub fn run_skeleton<F>(skel: &Skeleton, args: &Map<String, Value>, mut runner: F
 where
     F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
 {
+    // ctx = args + 앞선 agent 출력(label 키). threading 의 단일 진실.
+    let mut ctx: Map<String, Value> = args.clone();
     let mut results: Vec<AgentResult> = vec![];
     for step in &skel.steps {
         match step.kind.as_str() {
             "agent" => {
-                let r = run_one(skel, step.label.clone(), step.directive_ref, &step.schema, &step.model, step.phase.clone(), args, &mut runner)?;
+                let r = run_one(skel, step.label.clone(), step.directive_ref, &step.schema, &step.model, step.phase.clone(), &ctx, &mut runner)?;
+                ctx.insert(r.label.clone(), r.output.clone());
                 results.push(r);
             }
             "parallel" | "pipeline" => {
                 if let Some(agents) = &step.agents {
                     for a in agents {
-                        let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), args, &mut runner)?;
+                        let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &ctx, &mut runner)?;
+                        ctx.insert(r.label.clone(), r.output.clone());
                         results.push(r);
                     }
                 }
@@ -75,14 +139,14 @@ fn run_one<F>(
     schema: &Option<String>,
     model: &Option<String>,
     phase: Option<String>,
-    args: &Map<String, Value>,
+    ctx: &Map<String, Value>,
     runner: &mut F,
 ) -> Result<AgentResult, String>
 where
     F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
 {
     let dir = skel.directive_text(directive_ref).unwrap_or("");
-    let mut prompt = bind_placeholders(dir, args);
+    let mut prompt = bind_context(dir, ctx);
     let schema_body = skel.schema_body(schema);
     if let Some(body) = schema_body {
         prompt.push_str(SCHEMA_INSTRUCTION);
@@ -125,12 +189,55 @@ mod tests {
     }
 
     #[test]
-    fn binds_placeholder() {
+    fn binds_context_path_and_preserves_unbound() {
+        let mut ctx = Map::new();
+        ctx.insert("QUESTION".into(), json!("How does X work?"));
+        ctx.insert("scope".into(), json!({ "angles": ["a", "b"] }));
+        // 단순 키.
+        assert_eq!(bind_context("Decompose ${QUESTION}", &ctx), "Decompose How does X work?");
+        // dot-path → 앞선 agent 출력(객체는 JSON).
+        assert_eq!(bind_context("Use ${scope.angles}", &ctx), r#"Use ["a","b"]"#);
+        // 미해소(컨텍스트에 없음) 보존.
+        assert_eq!(bind_context("${angle.label}", &ctx), "${angle.label}");
+        // 비-path(메서드콜)는 보존.
+        assert_eq!(bind_context("${QUESTION.slice(0, 80)}", &ctx), "${QUESTION.slice(0, 80)}");
+    }
+
+    #[test]
+    fn threads_prior_agent_output_to_next_prompt() {
+        // scope 출력을 plan 프롬프트가 ${scope.angles} 로 받는다.
+        let raw = serde_json::to_vec(&json!({
+            "ir": "workflow-skeleton@1",
+            "meta": { "name": "thread" },
+            "steps": [
+                { "index": 0, "kind": "agent", "label": "scope", "schema": "S", "directiveRef": 0 },
+                { "index": 1, "kind": "agent", "label": "plan", "schema": "S", "directiveRef": 1 }
+            ],
+            "directives": [
+                { "index": 0, "text": "Decompose ${IDEA}" },
+                { "index": 1, "text": "Plan using angles: ${scope.angles}" }
+            ],
+            "schemas": { "S": { "type": "object" } }
+        }))
+        .unwrap();
+        let skel = Skeleton::from_json(&raw).unwrap();
         let mut args = Map::new();
-        args.insert("QUESTION".into(), json!("How does X work?"));
-        assert_eq!(bind_placeholders("Decompose ${QUESTION}", &args), "Decompose How does X work?");
-        // 미바인딩은 보존.
-        assert_eq!(bind_placeholders("${angle.label}", &args), "${angle.label}");
+        args.insert("IDEA".into(), json!("a tracker"));
+        let mut prompts: Vec<String> = vec![];
+        run_skeleton(&skel, &args, |inv, _s| {
+            prompts.push(inv.prompt.clone());
+            // scope 는 angles 출력, plan 은 아무거나.
+            if inv.label == "scope" {
+                Ok(json!({ "angles": ["x", "y"] }))
+            } else {
+                Ok(json!({ "ok": true }))
+            }
+        })
+        .unwrap();
+        // scope 프롬프트: IDEA 바인딩.
+        assert!(prompts[0].contains("Decompose a tracker"));
+        // plan 프롬프트: scope 출력이 threading 됨.
+        assert!(prompts[1].contains(r#"angles: ["x","y"]"#), "plan 프롬프트에 scope 출력 threading: {}", prompts[1]);
     }
 
     #[test]
