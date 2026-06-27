@@ -1,0 +1,639 @@
+{
+  "ir": "workflow-skeleton@1",
+  "source": {
+    "name": "soksak-spec",
+    "file": "soksak-spec.workflow.js",
+    "sha256": "dac7b73799dd5ff662cc925457ad78f0c3ddbe1b4b0c81bca3a50365452ea67a"
+  },
+  "meta": {
+    "name": "soksak-spec",
+    "description": "idea+③파생 → 스펙",
+    "phases": [
+      {
+        "title": "Spec"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "index": 0,
+      "kind": "phase",
+      "phase": "Spec",
+      "title": "Spec"
+    },
+    {
+      "index": 1,
+      "kind": "agent",
+      "label": "spec",
+      "schema": "SPEC_SCHEMA",
+      "model": null,
+      "effort": null,
+      "isolation": null,
+      "phase": "Spec",
+      "directiveRef": 0,
+      "promptStatic": false
+    }
+  ],
+  "directives": [
+    {
+      "index": 0,
+      "text": "빌드 스펙(한국어)을 쓰되, 아래 도메인 지시어를 전부 반영하고 적용한 id 를 applied 에.\n아이디어: ${args.IDEA}\n도메인 지시어:\n${directiveText}",
+      "static": false,
+      "placeholders": [
+        "args.IDEA",
+        "args.IDEA",
+        "directiveText",
+        "directiveText"
+      ]
+    }
+  ],
+  "schemas": {
+    "SPEC_SCHEMA": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "spec",
+        "applied"
+      ],
+      "properties": {
+        "spec": {
+          "type": "string"
+        },
+        "applied": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "program": {
+    "type": "Program",
+    "body": [
+      {
+        "type": "ExportNamedDeclaration",
+        "declaration": {
+          "type": "VariableDeclaration",
+          "declarations": [
+            {
+              "type": "VariableDeclarator",
+              "id": {
+                "type": "Identifier",
+                "name": "meta"
+              },
+              "init": {
+                "type": "ObjectExpression",
+                "properties": [
+                  {
+                    "type": "Property",
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "name": "name"
+                    },
+                    "value": {
+                      "type": "Literal",
+                      "value": "soksak-spec",
+                      "raw": "'soksak-spec'"
+                    },
+                    "kind": "init"
+                  },
+                  {
+                    "type": "Property",
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "name": "description"
+                    },
+                    "value": {
+                      "type": "Literal",
+                      "value": "idea+③파생 → 스펙",
+                      "raw": "'idea+③파생 → 스펙'"
+                    },
+                    "kind": "init"
+                  },
+                  {
+                    "type": "Property",
+                    "method": false,
+                    "shorthand": false,
+                    "computed": false,
+                    "key": {
+                      "type": "Identifier",
+                      "name": "phases"
+                    },
+                    "value": {
+                      "type": "ArrayExpression",
+                      "elements": [
+                        {
+                          "type": "ObjectExpression",
+                          "properties": [
+                            {
+                              "type": "Property",
+                              "method": false,
+                              "shorthand": false,
+                              "computed": false,
+                              "key": {
+                                "type": "Identifier",
+                                "name": "title"
+                              },
+                              "value": {
+                                "type": "Literal",
+                                "value": "Spec",
+                                "raw": "'Spec'"
+                              },
+                              "kind": "init"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "kind": "init"
+                  }
+                ]
+              }
+            }
+          ],
+          "kind": "const"
+        },
+        "specifiers": [],
+        "source": null,
+        "attributes": []
+      },
+      {
+        "type": "VariableDeclaration",
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "id": {
+              "type": "Identifier",
+              "name": "SPEC_SCHEMA"
+            },
+            "init": {
+              "type": "ObjectExpression",
+              "properties": [
+                {
+                  "type": "Property",
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "name": "type"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "value": "object",
+                    "raw": "'object'"
+                  },
+                  "kind": "init"
+                },
+                {
+                  "type": "Property",
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "name": "additionalProperties"
+                  },
+                  "value": {
+                    "type": "Literal",
+                    "value": false,
+                    "raw": "false"
+                  },
+                  "kind": "init"
+                },
+                {
+                  "type": "Property",
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "name": "required"
+                  },
+                  "value": {
+                    "type": "ArrayExpression",
+                    "elements": [
+                      {
+                        "type": "Literal",
+                        "value": "spec",
+                        "raw": "'spec'"
+                      },
+                      {
+                        "type": "Literal",
+                        "value": "applied",
+                        "raw": "'applied'"
+                      }
+                    ]
+                  },
+                  "kind": "init"
+                },
+                {
+                  "type": "Property",
+                  "method": false,
+                  "shorthand": false,
+                  "computed": false,
+                  "key": {
+                    "type": "Identifier",
+                    "name": "properties"
+                  },
+                  "value": {
+                    "type": "ObjectExpression",
+                    "properties": [
+                      {
+                        "type": "Property",
+                        "method": false,
+                        "shorthand": false,
+                        "computed": false,
+                        "key": {
+                          "type": "Identifier",
+                          "name": "spec"
+                        },
+                        "value": {
+                          "type": "ObjectExpression",
+                          "properties": [
+                            {
+                              "type": "Property",
+                              "method": false,
+                              "shorthand": false,
+                              "computed": false,
+                              "key": {
+                                "type": "Identifier",
+                                "name": "type"
+                              },
+                              "value": {
+                                "type": "Literal",
+                                "value": "string",
+                                "raw": "'string'"
+                              },
+                              "kind": "init"
+                            }
+                          ]
+                        },
+                        "kind": "init"
+                      },
+                      {
+                        "type": "Property",
+                        "method": false,
+                        "shorthand": false,
+                        "computed": false,
+                        "key": {
+                          "type": "Identifier",
+                          "name": "applied"
+                        },
+                        "value": {
+                          "type": "ObjectExpression",
+                          "properties": [
+                            {
+                              "type": "Property",
+                              "method": false,
+                              "shorthand": false,
+                              "computed": false,
+                              "key": {
+                                "type": "Identifier",
+                                "name": "type"
+                              },
+                              "value": {
+                                "type": "Literal",
+                                "value": "array",
+                                "raw": "'array'"
+                              },
+                              "kind": "init"
+                            },
+                            {
+                              "type": "Property",
+                              "method": false,
+                              "shorthand": false,
+                              "computed": false,
+                              "key": {
+                                "type": "Identifier",
+                                "name": "items"
+                              },
+                              "value": {
+                                "type": "ObjectExpression",
+                                "properties": [
+                                  {
+                                    "type": "Property",
+                                    "method": false,
+                                    "shorthand": false,
+                                    "computed": false,
+                                    "key": {
+                                      "type": "Identifier",
+                                      "name": "type"
+                                    },
+                                    "value": {
+                                      "type": "Literal",
+                                      "value": "string",
+                                      "raw": "'string'"
+                                    },
+                                    "kind": "init"
+                                  }
+                                ]
+                              },
+                              "kind": "init"
+                            }
+                          ]
+                        },
+                        "kind": "init"
+                      }
+                    ]
+                  },
+                  "kind": "init"
+                }
+              ]
+            }
+          }
+        ],
+        "kind": "const"
+      },
+      {
+        "type": "ExpressionStatement",
+        "expression": {
+          "type": "CallExpression",
+          "callee": {
+            "type": "Identifier",
+            "name": "phase"
+          },
+          "arguments": [
+            {
+              "type": "Literal",
+              "value": "Spec",
+              "raw": "'Spec'"
+            }
+          ],
+          "optional": false
+        }
+      },
+      {
+        "type": "VariableDeclaration",
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "id": {
+              "type": "Identifier",
+              "name": "directiveText"
+            },
+            "init": {
+              "type": "CallExpression",
+              "callee": {
+                "type": "MemberExpression",
+                "object": {
+                  "type": "CallExpression",
+                  "callee": {
+                    "type": "MemberExpression",
+                    "object": {
+                      "type": "LogicalExpression",
+                      "left": {
+                        "type": "MemberExpression",
+                        "object": {
+                          "type": "Identifier",
+                          "name": "args"
+                        },
+                        "property": {
+                          "type": "Identifier",
+                          "name": "directives"
+                        },
+                        "computed": false,
+                        "optional": false
+                      },
+                      "operator": "||",
+                      "right": {
+                        "type": "ArrayExpression",
+                        "elements": []
+                      }
+                    },
+                    "property": {
+                      "type": "Identifier",
+                      "name": "map"
+                    },
+                    "computed": false,
+                    "optional": false
+                  },
+                  "arguments": [
+                    {
+                      "type": "ArrowFunctionExpression",
+                      "id": null,
+                      "expression": true,
+                      "generator": false,
+                      "async": false,
+                      "params": [
+                        {
+                          "type": "Identifier",
+                          "name": "d"
+                        }
+                      ],
+                      "body": {
+                        "type": "BinaryExpression",
+                        "left": {
+                          "type": "BinaryExpression",
+                          "left": {
+                            "type": "BinaryExpression",
+                            "left": {
+                              "type": "Literal",
+                              "value": "- ",
+                              "raw": "'- '"
+                            },
+                            "operator": "+",
+                            "right": {
+                              "type": "MemberExpression",
+                              "object": {
+                                "type": "Identifier",
+                                "name": "d"
+                              },
+                              "property": {
+                                "type": "Identifier",
+                                "name": "id"
+                              },
+                              "computed": false,
+                              "optional": false
+                            }
+                          },
+                          "operator": "+",
+                          "right": {
+                            "type": "Literal",
+                            "value": ": ",
+                            "raw": "': '"
+                          }
+                        },
+                        "operator": "+",
+                        "right": {
+                          "type": "MemberExpression",
+                          "object": {
+                            "type": "Identifier",
+                            "name": "d"
+                          },
+                          "property": {
+                            "type": "Identifier",
+                            "name": "directive"
+                          },
+                          "computed": false,
+                          "optional": false
+                        }
+                      }
+                    }
+                  ],
+                  "optional": false
+                },
+                "property": {
+                  "type": "Identifier",
+                  "name": "join"
+                },
+                "computed": false,
+                "optional": false
+              },
+              "arguments": [
+                {
+                  "type": "Literal",
+                  "value": "\n",
+                  "raw": "'\\n'"
+                }
+              ],
+              "optional": false
+            }
+          }
+        ],
+        "kind": "const"
+      },
+      {
+        "type": "VariableDeclaration",
+        "declarations": [
+          {
+            "type": "VariableDeclarator",
+            "id": {
+              "type": "Identifier",
+              "name": "spec"
+            },
+            "init": {
+              "type": "AwaitExpression",
+              "argument": {
+                "type": "CallExpression",
+                "callee": {
+                  "type": "Identifier",
+                  "name": "agent"
+                },
+                "arguments": [
+                  {
+                    "type": "TemplateLiteral",
+                    "expressions": [
+                      {
+                        "type": "MemberExpression",
+                        "object": {
+                          "type": "Identifier",
+                          "name": "args"
+                        },
+                        "property": {
+                          "type": "Identifier",
+                          "name": "IDEA"
+                        },
+                        "computed": false,
+                        "optional": false
+                      },
+                      {
+                        "type": "Identifier",
+                        "name": "directiveText"
+                      }
+                    ],
+                    "quasis": [
+                      {
+                        "type": "TemplateElement",
+                        "value": {
+                          "raw": "빌드 스펙(한국어)을 쓰되, 아래 도메인 지시어를 전부 반영하고 적용한 id 를 applied 에.\\n아이디어: ",
+                          "cooked": "빌드 스펙(한국어)을 쓰되, 아래 도메인 지시어를 전부 반영하고 적용한 id 를 applied 에.\n아이디어: "
+                        },
+                        "tail": false
+                      },
+                      {
+                        "type": "TemplateElement",
+                        "value": {
+                          "raw": "\\n도메인 지시어:\\n",
+                          "cooked": "\n도메인 지시어:\n"
+                        },
+                        "tail": false
+                      },
+                      {
+                        "type": "TemplateElement",
+                        "value": {
+                          "raw": "",
+                          "cooked": ""
+                        },
+                        "tail": true
+                      }
+                    ]
+                  },
+                  {
+                    "type": "ObjectExpression",
+                    "properties": [
+                      {
+                        "type": "Property",
+                        "method": false,
+                        "shorthand": false,
+                        "computed": false,
+                        "key": {
+                          "type": "Identifier",
+                          "name": "label"
+                        },
+                        "value": {
+                          "type": "Literal",
+                          "value": "spec",
+                          "raw": "'spec'"
+                        },
+                        "kind": "init"
+                      },
+                      {
+                        "type": "Property",
+                        "method": false,
+                        "shorthand": false,
+                        "computed": false,
+                        "key": {
+                          "type": "Identifier",
+                          "name": "schema"
+                        },
+                        "value": {
+                          "type": "Identifier",
+                          "name": "SPEC_SCHEMA"
+                        },
+                        "kind": "init"
+                      }
+                    ]
+                  }
+                ],
+                "optional": false
+              }
+            }
+          }
+        ],
+        "kind": "const"
+      },
+      {
+        "type": "ReturnStatement",
+        "argument": {
+          "type": "ObjectExpression",
+          "properties": [
+            {
+              "type": "Property",
+              "method": false,
+              "shorthand": true,
+              "computed": false,
+              "key": {
+                "type": "Identifier",
+                "name": "spec"
+              },
+              "value": {
+                "type": "Identifier",
+                "name": "spec"
+              },
+              "kind": "init"
+            }
+          ]
+        }
+      }
+    ],
+    "sourceType": "module"
+  }
+}
