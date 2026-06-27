@@ -5,5 +5,6 @@
 pub mod derive_directive;
 pub mod domain_lib;
 pub mod exec;
+pub mod interp;
 pub mod provider;
 pub mod skeleton;
