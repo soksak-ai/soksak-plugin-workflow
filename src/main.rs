@@ -5,7 +5,7 @@
 use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
-use soksak_plugin::exec::{run_skeleton, AgentInvocation};
+use soksak_plugin::exec::{plan_skeleton, run_skeleton, AgentInvocation};
 use soksak_plugin::provider::{run_agent, AgentRequest};
 use soksak_plugin::skeleton::Skeleton;
 use std::collections::HashSet;
@@ -46,6 +46,7 @@ fn real_main() -> Result<(), String> {
     let path = &argv[0];
     let mut args: Map<String, Value> = Map::new();
     let mut allow_tools: Vec<String> = vec![];
+    let mut dry_run = false;
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -60,6 +61,7 @@ fn real_main() -> Result<(), String> {
                 let t = argv.get(i).ok_or("--allow-tools 값 누락")?;
                 allow_tools = t.split_whitespace().map(|s| s.to_string()).collect();
             }
+            "--dry-run" => dry_run = true,
             other => return Err(format!("미지 인자 {other:?}")),
         }
         i += 1;
@@ -81,6 +83,13 @@ fn real_main() -> Result<(), String> {
         let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
         eprintln!("[soksak-run] ③파생: 도메인 {:?} → 지시어 {}개 주입", matched, directives.len());
         args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
+    }
+    // dry-run: 실행 계획만 출력(LLM 호출 없음). fan-out item/이전 출력 placeholder 는 ${...} 보존.
+    if dry_run {
+        let plan = plan_skeleton(&skel, &args);
+        eprintln!("[soksak-run] dry-run — {} agent 실행 예정(LLM 미호출)", plan.len());
+        println!("{}", serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?);
+        return Ok(());
     }
     eprintln!("[soksak-run] {} — steps={} agents 실행 시작", skel.meta.name, skel.steps.len());
 

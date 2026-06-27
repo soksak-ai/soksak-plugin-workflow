@@ -171,18 +171,83 @@ fn run_one<F>(
 where
     F: FnMut(&AgentInvocation, Option<&Value>) -> Result<Value, String>,
 {
-    let dir = skel.directive_text(directive_ref).unwrap_or("");
-    let mut prompt = bind_context(dir, ctx);
+    let prompt = build_prompt(skel, directive_ref, schema, ctx);
     let schema_body = skel.schema_body(schema);
-    if let Some(body) = schema_body {
-        prompt.push_str(SCHEMA_INSTRUCTION);
-        prompt.push_str(&serde_json::to_string_pretty(body).unwrap_or_default());
-    }
     let label = label.unwrap_or_else(|| "agent".to_string());
-    let model = model.clone().unwrap_or_else(|| "sonnet".to_string());
+    let model = effective_model(model);
     let inv = AgentInvocation { label: label.clone(), schema: schema.clone(), model, prompt };
     let output = runner(&inv, schema_body).map_err(|e| format!("agent {label:?}: {e}"))?;
     Ok(AgentResult { label, phase, schema: schema.clone(), output })
+}
+
+/// build_prompt — directive(${placeholder} 바인딩) + schema 본문 출력 지시.
+fn build_prompt(skel: &Skeleton, directive_ref: Option<usize>, schema: &Option<String>, ctx: &Map<String, Value>) -> String {
+    let dir = skel.directive_text(directive_ref).unwrap_or("");
+    let mut prompt = bind_context(dir, ctx);
+    if let Some(body) = skel.schema_body(schema) {
+        prompt.push_str(SCHEMA_INSTRUCTION);
+        prompt.push_str(&serde_json::to_string_pretty(body).unwrap_or_default());
+    }
+    prompt
+}
+
+/// effective_model — 골격 model 또는 기본 opus(인증 프로필 에서 glm-5.2 로 매핑).
+fn effective_model(model: &Option<String>) -> String {
+    model.clone().unwrap_or_else(|| "opus".to_string())
+}
+
+/// AgentPlan — dry-run 실행 계획의 한 agent(실행 없이 미리보기).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentPlan {
+    pub step_index: usize,
+    pub label: String,
+    pub phase: Option<String>,
+    pub model: String,
+    pub schema: Option<String>,
+    pub prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fanout_axis: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fanout_item: Option<String>,
+}
+
+/// plan_skeleton — 실행 없이 실행 계획 산출(dry-run). 각 agent 의 resolved 프롬프트(args·
+/// ③파생 바인딩, fan-out item/이전 출력 placeholder 는 ${...} 보존)·model·schema·fan-out 표시.
+pub fn plan_skeleton(skel: &Skeleton, args: &Map<String, Value>) -> Vec<AgentPlan> {
+    let ctx = args.clone();
+    let mut plan: Vec<AgentPlan> = vec![];
+    for step in &skel.steps {
+        match step.kind.as_str() {
+            "agent" => plan.push(AgentPlan {
+                step_index: step.index,
+                label: step.label.clone().unwrap_or_else(|| "agent".into()),
+                phase: step.phase.clone(),
+                model: effective_model(&step.model),
+                schema: step.schema.clone(),
+                prompt: build_prompt(skel, step.directive_ref, &step.schema, &ctx),
+                fanout_axis: None,
+                fanout_item: None,
+            }),
+            "parallel" | "pipeline" => {
+                if let Some(agents) = &step.agents {
+                    for a in agents {
+                        plan.push(AgentPlan {
+                            step_index: step.index,
+                            label: a.label.clone().unwrap_or_else(|| "agent".into()),
+                            phase: a.phase.clone().or_else(|| step.phase.clone()),
+                            model: effective_model(&a.model),
+                            schema: a.schema.clone(),
+                            prompt: build_prompt(skel, a.directive_ref, &a.schema, &ctx),
+                            fanout_axis: step.axis.clone(),
+                            fanout_item: step.item_param.clone(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    plan
 }
 
 #[cfg(test)]
