@@ -112,15 +112,24 @@ fn real_main() -> Result<(), String> {
 
     let results = run_skeleton(&skel, &args, runner)?;
 
-    // 출력 = label → output(중복 label 은 첫 것 유지, 나머지 인덱스 접미).
-    let mut used: HashSet<String> = HashSet::new();
-    let mut out_map = Map::new();
-    for (idx, r) in results.iter().enumerate() {
-        let mut key = r.label.clone();
-        if !used.insert(key.clone()) {
-            key = format!("{}#{idx}", r.label);
+    // 출력 = label → 결과. 단일은 객체, fan-out(동일 label 다중)은 배열(실행 순서 보존).
+    let mut order: Vec<String> = vec![];
+    let mut by_label: std::collections::BTreeMap<String, Vec<&_>> = std::collections::BTreeMap::new();
+    for r in &results {
+        if !by_label.contains_key(&r.label) {
+            order.push(r.label.clone());
         }
-        out_map.insert(key, json!({ "phase": r.phase, "schema": r.schema, "output": r.output }));
+        by_label.entry(r.label.clone()).or_default().push(r);
+    }
+    let entry = |r: &soksak_plugin::exec::AgentResult| json!({ "phase": r.phase, "schema": r.schema, "output": r.output });
+    let mut out_map = Map::new();
+    for label in order {
+        let rs = &by_label[&label];
+        if rs.len() == 1 {
+            out_map.insert(label, entry(rs[0]));
+        } else {
+            out_map.insert(label, Value::Array(rs.iter().map(|r| entry(r)).collect()));
+        }
     }
     println!("{}", serde_json::to_string_pretty(&Value::Object(out_map)).map_err(|e| e.to_string())?);
     Ok(())
