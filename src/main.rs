@@ -20,7 +20,27 @@ fn main() {
 fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
-        eprintln!("usage: soksak-run <workflow.json> [--arg KEY=VALUE ...] [--allow-tools \"T1 T2\"]");
+        eprintln!("usage:");
+        eprintln!("  soksak-run <workflow.json> --arg IDEA=... [--arg K=V ...] [--allow-tools \"T1 T2\"]   # 골격 실행(claude -p)");
+        eprintln!("  soksak-run synth --idea \"...\"                                                       # ③파생 도메인 지시어만");
+        return Ok(());
+    }
+    // synth 서브커맨드 — ③파생만(LLM 호출 없음). 플러그인 directive.synth 용.
+    if argv[0] == "synth" {
+        let mut idea = String::new();
+        let mut i = 1;
+        while i < argv.len() {
+            if argv[i] == "--idea" {
+                i += 1;
+                idea = argv.get(i).cloned().ok_or("--idea 값 누락")?;
+            }
+            i += 1;
+        }
+        if idea.is_empty() {
+            return Err("synth: --idea 필수".to_string());
+        }
+        let directives = synth_directives(&idea, &builtin_library());
+        println!("{}", serde_json::to_string_pretty(&directives).map_err(|e| e.to_string())?);
         return Ok(());
     }
     let path = &argv[0];
@@ -45,7 +65,14 @@ fn real_main() -> Result<(), String> {
         i += 1;
     }
 
-    let raw = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
+    // 골격 입력: "-" 면 stdin(플러그인이 추출기 출력을 파이프), 그 외는 파일.
+    let raw = if path == "-" {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).map_err(|e| format!("read stdin: {e}"))?;
+        buf
+    } else {
+        std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?
+    };
     let skel = Skeleton::from_json(&raw)?;
 
     // ③파생: IDEA 에서 도메인 지시어 합성 → context 에 directives 주입(워크플로가 ${directives} 로 사용).

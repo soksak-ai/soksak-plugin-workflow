@@ -1,0 +1,51 @@
+{
+  "spec": "soksak-spec-plugin@0.0.1",
+  "id": "soksak-workflow",
+  "name": {
+    "ko": "soksak 워크플로",
+    "en": "soksak workflow"
+  },
+  "version": "0.0.1",
+  "description": {
+    "ko": "워크플로 골격(추출기 추출)을 ③파생 도메인 지시어와 함께 실행. agent 는 claude -p 위임. rust 사이드카(soksak-run) + 추출기(node) 오케스트레이션.",
+    "en": "Runs 워크플로 skeletons (extracted by 추출기) with ③-derived domain directives. Agents delegate to claude -p. Orchestrates a rust sidecar (soksak-run) + 추출기 (node)."
+  },
+  "entry": "main.js",
+  "permissions": [
+    "commands",
+    "process",
+    "fs:write"
+  ],
+  "config": {
+    "soksakRunBin": {
+      "type": "string",
+      "description": "soksak-run 바이너리 경로",
+      "default": "soksak-run"
+    },
+    "추출기Cli": {
+      "type": "string",
+      "description": "추출기 src/cli.js 경로(node 로 실행)"
+    },
+    "tmpDir": {
+      "type": "string",
+      "description": "임시 골격 파일 디렉토리",
+      "default": "/tmp"
+    },
+    "인증 프로필Env": {
+      "type": "object",
+      "description": "agent 실행기(claude -p)에 주입할 ANTHROPIC_* env (인증 프로필)"
+    }
+  },
+  "contributes": {
+    "commands": [
+      {
+        "name": "directive.synth",
+        "title": "도메인 지시어 생성(③파생)"
+      },
+      {
+        "name": "workflow.run",
+        "title": "워크플로 실행(아이디어→③파생→agent)"
+      }
+    ]
+  }
+}
