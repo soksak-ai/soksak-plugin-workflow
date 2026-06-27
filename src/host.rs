@@ -32,6 +32,8 @@ fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>) -> String {
 }
 
 /// 스키마 required 를 통과값으로 채운 stub(dry-run). status 는 done/validated/partial.
+/// 배열은 데이터 의존 fan-out 이 dry-run 에서도 한 번 타도록 샘플 1개를 채운다(실 카운트는
+/// 실행 시 agent 출력이 정함 — dry-run 은 구조 미리보기).
 fn stub_from_schema(schema: Option<&Val>) -> Val {
     let sj = schema.map(val_to_json).unwrap_or(Json::Null);
     Val::Obj(std::rc::Rc::new(std::cell::RefCell::new(stub_obj(&sj))))
@@ -43,7 +45,7 @@ fn stub_obj(schema: &Json) -> BTreeMap<String, Val> {
     for k in req {
         let key = k.as_str().unwrap_or("").to_string();
         let p = props.and_then(|m| m.get(&key));
-        let ty = p.and_then(|x| x.get("type")).and_then(|t| t.as_str()).unwrap_or("string");
+        let ptype = p.and_then(|x| x.get("type")).and_then(|t| t.as_str());
         let v = if key == "status" {
             let en = p.and_then(|x| x.get("enum")).and_then(|e| e.as_array());
             let pick = ["done", "validated", "partial"]
@@ -52,18 +54,47 @@ fn stub_obj(schema: &Json) -> BTreeMap<String, Val> {
                 .copied()
                 .unwrap_or("done");
             Val::Str(pick.to_string())
+        } else if ptype == Some("boolean") {
+            // status enum 을 pass 값으로 고르듯, boolean 도 필드명 의미로 success 경로를 탄다
+            // (dry-run 은 전체 구조 미리보기 — 게이트가 부정 플래그로 조기차단되면 하류 미관측).
+            Val::Bool(stub_bool(&key))
         } else {
-            match ty {
-                "array" => Val::Arr(std::rc::Rc::new(std::cell::RefCell::new(vec![]))),
-                "object" => Val::Obj(std::rc::Rc::new(std::cell::RefCell::new(p.map(stub_obj).unwrap_or_default()))),
-                "number" | "integer" => Val::Num(0.0),
-                "boolean" => Val::Bool(true),
-                _ => Val::Str(format!("<{key}>")),
-            }
+            stub_value(p.unwrap_or(&Json::Null))
         };
         o.insert(key, v);
     }
     o
+}
+/// boolean stub — 부정 의미 필드명(refuted/failed/blocked…)은 false, 그 외 true.
+/// dry-run 이 success 경로를 타 전체 fan-out 구조를 관측하게 한다(status enum pass-pick 과 동형).
+fn stub_bool(key: &str) -> bool {
+    const NEGATIVE: [&str; 16] = [
+        "refuted", "failed", "fail", "error", "blocked", "skip", "skipped", "dead", "invalid",
+        "missing", "broken", "stale", "dropped", "killed", "rejected", "duplicate",
+    ];
+    let lk = key.to_lowercase();
+    !NEGATIVE.iter().any(|n| lk.contains(n))
+}
+fn stub_value(schema: &Json) -> Val {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    match schema.get("type").and_then(|t| t.as_str()).unwrap_or("string") {
+        "object" => Val::Obj(Rc::new(RefCell::new(stub_obj(schema)))),
+        "array" => {
+            // 샘플 1개 — fan-out/.map 등이 dry-run 에서도 한 번 실행되도록.
+            let one = schema.get("items").map(stub_value).unwrap_or(Val::Str("<item>".into()));
+            Val::Arr(Rc::new(RefCell::new(vec![one])))
+        }
+        "number" | "integer" => Val::Num(0.0),
+        "boolean" => Val::Bool(true),
+        _ => {
+            if let Some(en) = schema.get("enum").and_then(|e| e.as_array()).and_then(|a| a.first()).and_then(|v| v.as_str()) {
+                Val::Str(en.to_string())
+            } else {
+                Val::Str("<v>".to_string())
+            }
+        }
+    }
 }
 
 /// ClaudeHost — agent 를 claude -p(인증 프로필)로 실행.
@@ -154,6 +185,36 @@ mod tests {
         assert_eq!(agents.len(), 9, "dry-run 도 실행이라 전 agent: {agents:?}");
         for id in ["S0", "C1", "C2", "C3", "SPK-b", "SPK-c", "SPK-d", "T1", "T3"] {
             assert!(agents.iter().any(|a| a == id), "{id} 누락");
+        }
+    }
+
+    #[test]
+    fn stub_host_dry_run_deep_research_full_structure() {
+        // deep-research 는 데이터의존 fan-out(pipeline/Map/Set/Array.from/UpdateExpr/try-catch/
+        // Promise then-catch-finally) 워크플로. dry-run 이 갭(미지원) 없이 전 단계를 관통해야 한다:
+        // scope → search → fetch → 3-vote verify → synthesize. 하나라도 조용히 삼키면 단계 누락.
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/deep-research.skeleton.json")).unwrap();
+        let program = skeleton.get("program").unwrap();
+        let mut h = StubHost::new("opus".into());
+        // args 는 cc 계약대로 verbatim — 질문 문자열.
+        Interp::new(&mut h)
+            .run(program, Json::String("How does Rust async work?".into()))
+            .expect("갭 없이 해석 — 미지원 구문/메서드면 Err 로 터진다");
+        let labels: Vec<String> = h
+            .trace
+            .iter()
+            .filter_map(|t| t.get("label").and_then(|l| l.as_str()).map(String::from))
+            .filter(|l| !l.is_empty())
+            .collect();
+        // 전 단계 agent 타입이 trace 에(데이터 샘플 1개씩 → 최소 fan-out 구조).
+        assert!(labels.iter().any(|l| l == "scope"), "scope 누락: {labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("search:")), "search 누락: {labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("fetch:")), "fetch 누락(pipeline stage2): {labels:?}");
+        assert_eq!(labels.iter().filter(|l| l.starts_with("v")).count(), 3, "3-vote verify 누락: {labels:?}");
+        assert!(labels.iter().any(|l| l == "synthesize"), "synthesize 누락(verify 게이트 통과 실패): {labels:?}");
+        let phases: Vec<String> = h.trace.iter().filter_map(|t| t.get("phase").and_then(|p| p.as_str()).map(String::from)).collect();
+        for ph in ["Scope", "Verify", "Synthesize"] {
+            assert!(phases.iter().any(|p| p == ph), "phase {ph} 미도달: {phases:?}");
         }
     }
 

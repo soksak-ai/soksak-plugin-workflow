@@ -211,7 +211,59 @@ impl<'a, H: Host> Interp<'a, H> {
                 }
                 Ok(Flow::Normal)
             }
-            _ => Ok(Flow::Normal), // 미지원 statement 는 무시(전향)
+            "ExportNamedDeclaration" => {
+                // export const meta = {...} 등 — 내부 선언 실행.
+                match node.get("declaration").filter(|d| !d.is_null()) {
+                    Some(decl) => self.exec_stmt(decl, scope),
+                    None => Ok(Flow::Normal),
+                }
+            }
+            "EmptyStatement" => Ok(Flow::Normal),
+            "TryStatement" => {
+                // try { } catch(e) { } — eager. block 실행, throw 시 catch.
+                match self.exec_stmt(node.get("block").unwrap_or(&Json::Null), scope) {
+                    Ok(f) => {
+                        if let Some(fin) = node.get("finalizer").filter(|x| !x.is_null()) {
+                            if let Flow::Return(v) = self.exec_stmt(fin, scope)? {
+                                return Ok(Flow::Return(v));
+                            }
+                        }
+                        Ok(f)
+                    }
+                    Err(e) => {
+                        // 인터프리터 갭은 catch 가 삼키면 안 됨(꼼수 금지) — 진짜 throw 만 잡는다.
+                        if is_interp_gap(&e) {
+                            return Err(e);
+                        }
+                        if let Some(handler) = node.get("handler").filter(|h| !h.is_null()) {
+                            let inner = scope.child();
+                            if let Some(param) = handler.get("param").filter(|p| !p.is_null()) {
+                                self.bind_pattern(param, &Val::Undefined, &inner);
+                            }
+                            let r = self.exec_stmt(handler.get("body").unwrap_or(&Json::Null), &inner);
+                            if let Some(fin) = node.get("finalizer").filter(|x| !x.is_null()) {
+                                let _ = self.exec_stmt(fin, scope);
+                            }
+                            return r;
+                        }
+                        Ok(Flow::Normal)
+                    }
+                }
+            }
+            "WhileStatement" => {
+                let mut guard = 0u32;
+                while truthy(&self.eval(node.get("test").unwrap_or(&Json::Null), scope)?) {
+                    if let Flow::Return(v) = self.exec_stmt(node.get("body").unwrap_or(&Json::Null), scope)? {
+                        return Ok(Flow::Return(v));
+                    }
+                    guard += 1;
+                    if guard > 1_000_000 {
+                        return Err("while 루프 1e6 초과(폭주 방지)".to_string());
+                    }
+                }
+                Ok(Flow::Normal)
+            }
+            other => Err(format!("미지원 statement: {other}")),
         }
     }
 
@@ -365,10 +417,28 @@ impl<'a, H: Host> Interp<'a, H> {
                 }
             }
             "AssignmentExpression" => {
-                let val = self.eval(node.get("right").unwrap_or(&Json::Null), scope)?;
                 let target = node.get("left").unwrap_or(&Json::Null);
+                let op = node.get("operator").and_then(|o| o.as_str()).unwrap_or("=");
+                let rhs = self.eval(node.get("right").unwrap_or(&Json::Null), scope)?;
+                // 복합대입(+=, -= 등)은 현재값과 결합.
+                let val = if op == "=" {
+                    rhs
+                } else {
+                    let cur = self.eval(target, scope)?;
+                    binop(&op[..op.len() - 1], &cur, &rhs)
+                };
                 self.assign(target, val.clone(), scope)?;
                 Ok(val)
+            }
+            "UpdateExpression" => {
+                // x++ / x-- / ++x / --x — Identifier·MemberExpression 대상.
+                let target = node.get("argument").unwrap_or(&Json::Null);
+                let prefix = node.get("prefix").and_then(|p| p.as_bool()).unwrap_or(false);
+                let op = node.get("operator").and_then(|o| o.as_str()).unwrap_or("++");
+                let old = to_num(&self.eval(target, scope)?);
+                let new = if op == "++" { old + 1.0 } else { old - 1.0 };
+                self.assign(target, Val::Num(new), scope)?;
+                Ok(Val::Num(if prefix { new } else { old }))
             }
             "MemberExpression" => {
                 let obj = self.eval(node.get("object").unwrap_or(&Json::Null), scope)?;
@@ -383,7 +453,42 @@ impl<'a, H: Host> Interp<'a, H> {
                 }
                 Ok(last)
             }
-            _ => Ok(Val::Undefined),
+            "NewExpression" => self.eval_new(node, scope),
+            "RegExpLiteral" => Ok(Val::Undefined), // 정규식 객체(미니멀) — replace/match 에서 패턴 사용
+            "SpreadElement" => self.eval(node.get("argument").unwrap_or(&Json::Null), scope),
+            other => Err(format!("미지원 expression: {other}")),
+        }
+    }
+
+    /// new X(...) — Map/Set/URL 최소 지원(deep-research 등).
+    fn eval_new(&mut self, node: &Json, scope: &Scope) -> Result<Val, String> {
+        let callee = node.get("callee").and_then(|c| c.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+        let mut args = Vec::new();
+        for a in node.get("arguments").and_then(|a| a.as_array()).into_iter().flatten() {
+            args.push(self.eval(a, scope)?);
+        }
+        match callee {
+            // Map/Set 은 객체로 모사: __kind 표시 + entries. 최소 — get/set/has/add 는 call_method 처리.
+            "Map" => {
+                let mut m = BTreeMap::new();
+                m.insert("__map".to_string(), Val::Obj(Rc::new(RefCell::new(BTreeMap::new()))));
+                Ok(Val::Obj(Rc::new(RefCell::new(m))))
+            }
+            "Set" => {
+                let mut m = BTreeMap::new();
+                m.insert("__set".to_string(), Val::Obj(Rc::new(RefCell::new(BTreeMap::new()))));
+                Ok(Val::Obj(Rc::new(RefCell::new(m))))
+            }
+            "URL" => {
+                // new URL(u) — 최소: href/hostname/pathname 을 입력 그대로/근사. catch 로 보호되는 용도.
+                let u = args.first().map(to_string).unwrap_or_default();
+                let mut m = BTreeMap::new();
+                m.insert("href".to_string(), Val::Str(u.clone()));
+                m.insert("hostname".to_string(), Val::Str(u.clone()));
+                m.insert("pathname".to_string(), Val::Str(String::new()));
+                Ok(Val::Obj(Rc::new(RefCell::new(m))))
+            }
+            other => Err(format!("미지원 new {other}")),
         }
     }
 
@@ -469,6 +574,48 @@ impl<'a, H: Host> Interp<'a, H> {
                     ("Object", "keys") => return Ok(object_keys(args.first().unwrap_or(&Val::Undefined))),
                     ("Object", "entries") => return Ok(object_entries(args.first().unwrap_or(&Val::Undefined))),
                     ("Array", "isArray") => return Ok(Val::Bool(matches!(args.first(), Some(Val::Arr(_))))),
+                    ("Array", "from") => {
+                        // Array.from(arrayLike, mapFn?) — Arr 또는 {length:n}. mapFn(el, i).
+                        let src = args.first().cloned().unwrap_or(Val::Undefined);
+                        let map_fn = args.get(1).cloned();
+                        let base: Vec<Val> = match &src {
+                            Val::Arr(a) => a.borrow().clone(),
+                            Val::Obj(o) => {
+                                let n = to_num(&member(&Val::Obj(o.clone()), "length")).max(0.0) as usize;
+                                vec![Val::Undefined; n]
+                            }
+                            _ => vec![],
+                        };
+                        let mut out = Vec::with_capacity(base.len());
+                        for (i, el) in base.into_iter().enumerate() {
+                            let v = match &map_fn {
+                                Some(f) => self.call_value(f, vec![el, Val::Num(i as f64)], scope)?,
+                                None => el,
+                            };
+                            out.push(v);
+                        }
+                        return Ok(Val::Arr(Rc::new(RefCell::new(out))));
+                    }
+                    ("Object", "assign") => {
+                        // Object.assign(target, ...sources) — target 에 병합.
+                        let target = args.first().cloned().unwrap_or(Val::Undefined);
+                        if let Val::Obj(t) = &target {
+                            for src in args.iter().skip(1) {
+                                if let Val::Obj(s) = src {
+                                    for (k, v) in s.borrow().iter() {
+                                        t.borrow_mut().insert(k.clone(), v.clone());
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(target);
+                    }
+                    ("Math", "max") => return Ok(Val::Num(args.iter().map(to_num).fold(f64::NEG_INFINITY, f64::max))),
+                    ("Math", "min") => return Ok(Val::Num(args.iter().map(to_num).fold(f64::INFINITY, f64::min))),
+                    ("Math", "floor") => return Ok(Val::Num(to_num(args.first().unwrap_or(&Val::Undefined)).floor())),
+                    ("Math", "ceil") => return Ok(Val::Num(to_num(args.first().unwrap_or(&Val::Undefined)).ceil())),
+                    ("Math", "round") => return Ok(Val::Num(to_num(args.first().unwrap_or(&Val::Undefined)).round())),
+                    ("Math", "abs") => return Ok(Val::Num(to_num(args.first().unwrap_or(&Val::Undefined)).abs())),
                     ("Promise", "all") => {
                         // eager: 인자 배열(이미 해소됨)을 그대로.
                         return Ok(args.into_iter().next().unwrap_or(Val::Undefined));
@@ -528,7 +675,13 @@ impl<'a, H: Host> Interp<'a, H> {
         for t in thunks {
             match self.call_value(&t, vec![], scope) {
                 Ok(v) => out.push(v),
-                Err(_) => out.push(Val::Null), // thunk throw → null
+                // 인터프리터 갭은 전파(loud). 진짜 throw 만 null(engine 계약: thunk throw→null).
+                Err(e) => {
+                    if is_interp_gap(&e) {
+                        return Err(e);
+                    }
+                    out.push(Val::Null);
+                }
             }
         }
         Ok(Val::Arr(Rc::new(RefCell::new(out))))
@@ -548,7 +701,11 @@ impl<'a, H: Host> Interp<'a, H> {
             for st in &stages {
                 match self.call_value(st, vec![prev.clone(), item.clone(), Val::Num(idx as f64)], scope) {
                     Ok(v) => prev = v,
-                    Err(_) => {
+                    // 인터프리터 갭은 전파(loud). 진짜 throw 만 item→null 드롭(engine 계약).
+                    Err(e) => {
+                        if is_interp_gap(&e) {
+                            return Err(e);
+                        }
                         dropped = true;
                         break;
                     }
@@ -597,27 +754,106 @@ impl<'a, H: Host> Interp<'a, H> {
     }
 
     fn call_method(&mut self, obj: &Val, method: &str, args: Vec<Val>, scope: &Scope) -> Result<Val, String> {
+        // Promise 메서드(then/catch/finally)는 어떤 값에도 올 수 있음(parallel→Arr, agent→Obj, 실패→Null).
+        if matches!(method, "then" | "catch" | "finally") {
+            if let Some(r) = self.promise_method(obj, method, &args, scope)? {
+                return Ok(r);
+            }
+        }
         match obj {
             Val::Arr(a) => self.array_method(a, method, args, scope),
-            Val::Str(s) => Ok(string_method(s, method, &args)),
-            Val::Obj(_) => {
-                // .then(cb) — eager: obj 가 이미 해소된 값. cb(obj) 실행해 결과 반환(Promise.then 모사).
-                if method == "then" {
-                    if let Some(cb) = args.first() {
-                        return self.call_value(cb, vec![obj.clone()], scope);
-                    }
+            Val::Str(s) => string_method(s, method, &args),
+            Val::Obj(o) => {
+                let (is_map, is_set) = {
+                    let b = o.borrow();
+                    (b.contains_key("__map"), b.contains_key("__set"))
+                };
+                if is_map {
+                    return self.map_method(o, method, args);
                 }
-                Ok(Val::Undefined)
+                if is_set {
+                    return self.set_method(o, method, args);
+                }
+                // Promise 메서드(eager): then→cb(obj), catch→통과(거부 없음), finally→cb() 후 통과.
+                if let Some(r) = self.promise_method(obj, method, &args, scope)? {
+                    return Ok(r);
+                }
+                Err(format!("미지원 객체 메서드: {method}"))
             }
             _ => {
-                // null/undefined .then 등 — eager 모델에서 null 전파.
-                if method == "then" {
-                    if let Some(cb) = args.first() {
-                        return self.call_value(cb, vec![obj.clone()], scope);
-                    }
+                // null/undefined 의 Promise 메서드 — eager null/값 전파(agent 실패 시 null.then 등).
+                if let Some(r) = self.promise_method(obj, method, &args, scope)? {
+                    return Ok(r);
                 }
+                // null/undefined 의 다른 메서드 — JS 라면 TypeError. eager 모델에서 undefined.
                 Ok(Val::Undefined)
             }
+        }
+    }
+
+    fn map_method(&mut self, o: &Rc<RefCell<BTreeMap<String, Val>>>, method: &str, args: Vec<Val>) -> Result<Val, String> {
+        let inner = match o.borrow().get("__map") {
+            Some(Val::Obj(m)) => m.clone(),
+            _ => return Err("Map 내부 손상".to_string()),
+        };
+        let key = args.first().map(to_string).unwrap_or_default();
+        match method {
+            "set" => {
+                inner.borrow_mut().insert(key, args.get(1).cloned().unwrap_or(Val::Undefined));
+                Ok(Val::Obj(o.clone()))
+            }
+            "get" => Ok(inner.borrow().get(&key).cloned().unwrap_or(Val::Undefined)),
+            "has" => Ok(Val::Bool(inner.borrow().contains_key(&key))),
+            "delete" => Ok(Val::Bool(inner.borrow_mut().remove(&key).is_some())),
+            "keys" | "values" => {
+                let vals: Vec<Val> = if method == "keys" {
+                    inner.borrow().keys().map(|k| Val::Str(k.clone())).collect()
+                } else {
+                    inner.borrow().values().cloned().collect()
+                };
+                Ok(Val::Arr(Rc::new(RefCell::new(vals))))
+            }
+            other => Err(format!("미지원 Map 메서드: {other}")),
+        }
+    }
+
+    fn set_method(&mut self, o: &Rc<RefCell<BTreeMap<String, Val>>>, method: &str, args: Vec<Val>) -> Result<Val, String> {
+        let inner = match o.borrow().get("__set") {
+            Some(Val::Obj(m)) => m.clone(),
+            _ => return Err("Set 내부 손상".to_string()),
+        };
+        let key = args.first().map(to_string).unwrap_or_default();
+        match method {
+            "add" => {
+                inner.borrow_mut().insert(key, Val::Bool(true));
+                Ok(Val::Obj(o.clone()))
+            }
+            "has" => Ok(Val::Bool(inner.borrow().contains_key(&key))),
+            "delete" => Ok(Val::Bool(inner.borrow_mut().remove(&key).is_some())),
+            other => Err(format!("미지원 Set 메서드: {other}")),
+        }
+    }
+
+    /// Promise 메서드(eager 모델). then→cb(value), catch→통과(eager 는 거부 없음), finally→cb() 후 통과.
+    /// 해당 없으면 None.
+    fn promise_method(&mut self, recv: &Val, method: &str, args: &[Val], scope: &Scope) -> Result<Option<Val>, String> {
+        match method {
+            "then" => {
+                if let Some(cb) = args.first() {
+                    Ok(Some(self.call_value(cb, vec![recv.clone()], scope)?))
+                } else {
+                    Ok(Some(Val::Undefined))
+                }
+            }
+            // eager: 값은 이미 해소(거부 없음) → catch 콜백 무시, receiver 그대로.
+            "catch" => Ok(Some(recv.clone())),
+            "finally" => {
+                if let Some(cb) = args.first() {
+                    self.call_value(cb, vec![], scope)?;
+                }
+                Ok(Some(recv.clone()))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -716,7 +952,99 @@ impl<'a, H: Host> Interp<'a, H> {
                 }
                 Ok(Val::Arr(Rc::new(RefCell::new(out))))
             }
-            _ => Ok(Val::Undefined),
+            "flatMap" => {
+                let cb = args.first().cloned().unwrap_or(Val::Undefined);
+                let items: Vec<Val> = a.borrow().clone();
+                let mut out = Vec::new();
+                for (i, it) in items.into_iter().enumerate() {
+                    let r = self.call_value(&cb, vec![it, Val::Num(i as f64)], scope)?;
+                    match r {
+                        Val::Arr(inner) => out.extend(inner.borrow().iter().cloned()),
+                        other => out.push(other),
+                    }
+                }
+                Ok(Val::Arr(Rc::new(RefCell::new(out))))
+            }
+            "reduce" => {
+                let cb = args.first().cloned().unwrap_or(Val::Undefined);
+                let items: Vec<Val> = a.borrow().clone();
+                let (mut acc, start) = match args.get(1) {
+                    Some(init) => (init.clone(), 0),
+                    None => (items.first().cloned().unwrap_or(Val::Undefined), 1),
+                };
+                for (i, it) in items.iter().enumerate().skip(start) {
+                    acc = self.call_value(&cb, vec![acc, it.clone(), Val::Num(i as f64)], scope)?;
+                }
+                Ok(acc)
+            }
+            "sort" => {
+                // 비교자 기반 안정 정렬(삽입). self 호출 위해 sort_by 대신 수동.
+                let cb = args.first().cloned();
+                let mut items: Vec<Val> = a.borrow().clone();
+                let n = items.len();
+                for i in 1..n {
+                    let mut j = i;
+                    while j > 0 {
+                        let c = match &cb {
+                            Some(f) => to_num(&self.call_value(f, vec![items[j - 1].clone(), items[j].clone()], scope)?),
+                            None => {
+                                if to_string(&items[j - 1]) > to_string(&items[j]) {
+                                    1.0
+                                } else {
+                                    -1.0
+                                }
+                            }
+                        };
+                        if c > 0.0 {
+                            items.swap(j - 1, j);
+                            j -= 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                *a.borrow_mut() = items;
+                Ok(Val::Arr(a.clone()))
+            }
+            "reverse" => {
+                a.borrow_mut().reverse();
+                Ok(Val::Arr(a.clone()))
+            }
+            "indexOf" => {
+                let needle = args.first().cloned().unwrap_or(Val::Undefined);
+                let idx = a.borrow().iter().position(|x| strict_eq(x, &needle));
+                Ok(Val::Num(idx.map(|i| i as f64).unwrap_or(-1.0)))
+            }
+            "includes" => {
+                let needle = args.first().cloned().unwrap_or(Val::Undefined);
+                Ok(Val::Bool(a.borrow().iter().any(|x| strict_eq(x, &needle))))
+            }
+            "findIndex" => {
+                let cb = args.first().cloned().unwrap_or(Val::Undefined);
+                let items: Vec<Val> = a.borrow().clone();
+                for (i, it) in items.into_iter().enumerate() {
+                    if truthy(&self.call_value(&cb, vec![it, Val::Num(i as f64)], scope)?) {
+                        return Ok(Val::Num(i as f64));
+                    }
+                }
+                Ok(Val::Num(-1.0))
+            }
+            "shift" => {
+                let mut b = a.borrow_mut();
+                if b.is_empty() {
+                    Ok(Val::Undefined)
+                } else {
+                    Ok(b.remove(0))
+                }
+            }
+            "pop" => Ok(a.borrow_mut().pop().unwrap_or(Val::Undefined)),
+            "at" => {
+                let b = a.borrow();
+                let i = to_num(args.first().unwrap_or(&Val::Undefined));
+                let idx = if i < 0.0 { b.len() as f64 + i } else { i } as usize;
+                Ok(b.get(idx).cloned().unwrap_or(Val::Undefined))
+            }
+            other => Err(format!("미지원 배열 메서드: {other}")),
         }
     }
 }
@@ -782,7 +1110,15 @@ fn as_array(v: &Val) -> Vec<Val> {
 }
 fn member(obj: &Val, key: &str) -> Val {
     match obj {
-        Val::Obj(o) => o.borrow().get(key).cloned().unwrap_or(Val::Undefined),
+        Val::Obj(o) => {
+            if key == "size" {
+                let b = o.borrow();
+                if let Some(Val::Obj(m)) = b.get("__map").or_else(|| b.get("__set")) {
+                    return Val::Num(m.borrow().len() as f64);
+                }
+            }
+            o.borrow().get(key).cloned().unwrap_or(Val::Undefined)
+        }
         Val::Arr(a) => {
             if key == "length" {
                 Val::Num(a.borrow().len() as f64)
@@ -801,6 +1137,10 @@ fn member(obj: &Val, key: &str) -> Val {
         }
         _ => Val::Undefined,
     }
+}
+/// 인터프리터 미지원(갭) 에러인가 — 진짜 JS throw 와 구분. 갭은 어디서도 삼키지 않고 전파(꼼수 금지).
+fn is_interp_gap(e: &str) -> bool {
+    e.starts_with("미지원") || e.starts_with("미정의") || e.starts_with("호출 대상") || e.contains("내부 손상")
 }
 fn binop(op: &str, l: &Val, r: &Val) -> Val {
     match op {
@@ -830,8 +1170,8 @@ fn strict_eq(l: &Val, r: &Val) -> bool {
         _ => false,
     }
 }
-fn string_method(s: &str, method: &str, args: &[Val]) -> Val {
-    match method {
+fn string_method(s: &str, method: &str, args: &[Val]) -> Result<Val, String> {
+    Ok(match method {
         "slice" => {
             let chars: Vec<char> = s.chars().collect();
             let start = args.first().map(|v| to_num(v) as usize).unwrap_or(0).min(chars.len());
@@ -851,13 +1191,53 @@ fn string_method(s: &str, method: &str, args: &[Val]) -> Val {
         "trim" => Val::Str(s.trim().to_string()),
         "toLowerCase" => Val::Str(s.to_lowercase()),
         "toUpperCase" => Val::Str(s.to_uppercase()),
-        "replace" => {
+        "replace" | "replaceAll" => {
+            // 정규식 인자는 미지원(Null) — 문자열 from 만. normURL 등 try/catch·dedup 안이라 비치명적.
             let from = args.first().map(to_string).unwrap_or_default();
             let to = args.get(1).map(to_string).unwrap_or_default();
-            Val::Str(s.replacen(&from, &to, 1))
+            if from.is_empty() || from == "null" {
+                Val::Str(s.to_string())
+            } else if method == "replaceAll" {
+                Val::Str(s.replace(&from, &to))
+            } else {
+                Val::Str(s.replacen(&from, &to, 1))
+            }
         }
-        _ => Val::Undefined,
-    }
+        "startsWith" => Val::Bool(s.starts_with(&args.first().map(to_string).unwrap_or_default())),
+        "endsWith" => Val::Bool(s.ends_with(&args.first().map(to_string).unwrap_or_default())),
+        "indexOf" => {
+            let needle = args.first().map(to_string).unwrap_or_default();
+            Val::Num(s.find(&needle).map(|i| s[..i].chars().count() as f64).unwrap_or(-1.0))
+        }
+        "padStart" => {
+            let target = to_num(args.first().unwrap_or(&Val::Undefined)) as usize;
+            let pad = args.get(1).map(to_string).unwrap_or_else(|| " ".to_string());
+            let cur = s.chars().count();
+            if cur >= target || pad.is_empty() {
+                Val::Str(s.to_string())
+            } else {
+                let need = target - cur;
+                let fill: String = pad.chars().cycle().take(need).collect();
+                Val::Str(format!("{fill}{s}"))
+            }
+        }
+        "repeat" => Val::Str(s.repeat(to_num(args.first().unwrap_or(&Val::Undefined)).max(0.0) as usize)),
+        "charAt" => {
+            let i = to_num(args.first().unwrap_or(&Val::Undefined)) as usize;
+            Val::Str(s.chars().nth(i).map(|c| c.to_string()).unwrap_or_default())
+        }
+        "concat" => {
+            let mut out = s.to_string();
+            for a in args {
+                out.push_str(&to_string(&a));
+            }
+            Val::Str(out)
+        }
+        // 정규식 의존(match/matchAll/search) 은 미니멀 — null 반환(치명 아님).
+        "match" | "matchAll" | "search" => Val::Null,
+        "normalize" => Val::Str(s.to_string()),
+        other => return Err(format!("미지원 문자열 메서드: {other}")),
+    })
 }
 fn object_values(v: &Val) -> Val {
     match v {

@@ -50,6 +50,7 @@ fn real_main() -> Result<(), String> {
 
     let path = &argv[0];
     let mut args: Map<String, Value> = Map::new();
+    let mut args_override: Option<Value> = None; // --args-json: cc 계약대로 args 를 verbatim(임의 JSON)
     let mut allow_tools: Vec<String> = vec![];
     let mut dry_run = false;
     let mut i = 1;
@@ -60,6 +61,11 @@ fn real_main() -> Result<(), String> {
                 let kv = argv.get(i).ok_or("--arg 값 누락")?;
                 let (k, v) = kv.split_once('=').ok_or("--arg 는 KEY=VALUE 형식")?;
                 args.insert(k.to_string(), Value::String(v.to_string()));
+            }
+            "--args-json" => {
+                i += 1;
+                let j = argv.get(i).ok_or("--args-json 값 누락")?;
+                args_override = Some(serde_json::from_str(j).map_err(|e| format!("--args-json 파싱: {e}"))?);
             }
             "--allow-tools" => {
                 i += 1;
@@ -94,7 +100,8 @@ fn real_main() -> Result<(), String> {
         eprintln!("[soksak] ③파생: 도메인 {:?} → 지시어 {}개 → args.directives", matched, directives.len());
         args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
     }
-    let args_json = Value::Object(args);
+    // args = --args-json(verbatim, cc 계약) 우선, 없으면 --arg 로 만든 객체.
+    let args_json = args_override.unwrap_or(Value::Object(args));
 
     // dry-run: StubHost 로 program 해석(LLM 미호출). 실행이므로 전 agent 가 trace 에.
     if dry_run {
