@@ -7,5 +7,6 @@ pub mod domain_lib;
 pub mod exec;
 pub mod host;
 pub mod interp;
+pub mod lang;
 pub mod provider;
 pub mod skeleton;

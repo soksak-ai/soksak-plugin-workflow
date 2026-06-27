@@ -10,6 +10,7 @@ use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::host::{ClaudeHost, StubHost};
 use soksak_plugin::interp::{val_to_json, Interp};
+use soksak_plugin::lang::Language;
 use std::collections::HashSet;
 
 const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
@@ -25,8 +26,9 @@ fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
-        eprintln!("  soksak-run <skeleton.json|-> --arg K=V ... [--dry-run] [--allow-tools \"T1 T2\"]  # program 해석 실행");
-        eprintln!("  soksak-run synth --idea \"...\"                                                    # ③파생 도메인 지시어");
+        eprintln!("  soksak-run <skeleton.json|-> --arg K=V ... [--dry-run] [--lang ko|en|…] [--allow-tools \"T1 T2\"]  # program 해석 실행");
+        eprintln!("  soksak-run synth --idea \"...\"                                                                     # ③파생 도메인 지시어");
+        eprintln!("  --lang: 출력 언어 계약. 모든 agent 프롬프트에 주입 → 산출물이 그 언어로. args.lang 도 주입.");
         return Ok(());
     }
     // synth — ③파생만(LLM 미호출).
@@ -53,6 +55,7 @@ fn real_main() -> Result<(), String> {
     let mut args_override: Option<Value> = None; // --args-json: cc 계약대로 args 를 verbatim(임의 JSON)
     let mut allow_tools: Vec<String> = vec![];
     let mut dry_run = false;
+    let mut lang: Option<Language> = None; // --lang: 출력 언어 계약
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -71,6 +74,11 @@ fn real_main() -> Result<(), String> {
                 i += 1;
                 let t = argv.get(i).ok_or("--allow-tools 값 누락")?;
                 allow_tools = t.split_whitespace().map(|s| s.to_string()).collect();
+            }
+            "--lang" => {
+                i += 1;
+                let v = argv.get(i).ok_or("--lang 값 누락")?;
+                lang = Some(Language::parse(v));
             }
             "--dry-run" => dry_run = true,
             other => return Err(format!("미지 인자 {other:?}")),
@@ -101,11 +109,18 @@ fn real_main() -> Result<(), String> {
         args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
     }
     // args = --args-json(verbatim, cc 계약) 우선, 없으면 --arg 로 만든 객체.
-    let args_json = args_override.unwrap_or(Value::Object(args));
+    let mut args_json = args_override.unwrap_or(Value::Object(args));
+    // args.lang 주입 — 워크플로가 args.lang 으로 읽을 수 있게(출력 언어 계약과 별개 채널).
+    if let (Some(l), Value::Object(m)) = (&lang, &mut args_json) {
+        m.insert("lang".to_string(), Value::String(l.code.clone()));
+    }
+    if let Some(l) = &lang {
+        eprintln!("[soksak] 출력 언어: {} ({})", l.name, l.code);
+    }
 
     // dry-run: StubHost 로 program 해석(LLM 미호출). 실행이므로 전 agent 가 trace 에.
     if dry_run {
-        let mut h = StubHost::new(DEFAULT_MODEL.into());
+        let mut h = StubHost::new(DEFAULT_MODEL.into()).with_lang(lang.clone());
         Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
         let n = h.trace.iter().filter(|t| t.get("label").and_then(|l| l.as_str()).map_or(false, |s| !s.is_empty())).count();
         eprintln!("[soksak] dry-run — agent {n}회 실행 예정(LLM 미호출)");
@@ -119,7 +134,7 @@ fn real_main() -> Result<(), String> {
         return Err("ANTHROPIC_* env 미설정 — 인증 프로필 환경을 export 하고 실행하라".to_string());
     }
     eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p 인증 프로필)");
-    let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into() };
+    let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into(), lang };
     let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
     println!("{}", serde_json::to_string_pretty(&val_to_json(&result)).map_err(|e| e.to_string())?);
     Ok(())

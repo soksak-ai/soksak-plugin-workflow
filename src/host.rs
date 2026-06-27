@@ -4,6 +4,7 @@
 //! 런타임은 program 을 해석하고, LLM 효과만 이 host 로 위임한다.
 
 use crate::interp::{json_to_val, val_to_json, Host, Val};
+use crate::lang::Language;
 use crate::provider::{run_agent, AgentRequest};
 use serde_json::{json, Value as Json};
 use std::collections::BTreeMap;
@@ -18,8 +19,9 @@ fn opt_str(opts: &BTreeMap<String, Val>, key: &str) -> Option<String> {
     }
 }
 
-/// agent 프롬프트 = 본문 + (schema 있으면) 출력 형식 지시.
-fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>) -> String {
+/// agent 프롬프트 = 본문 + (schema 있으면) 출력 형식 지시 + (lang 있으면) 출력 언어 계약.
+/// 언어 계약을 schema 뒤에 둔다 — 계약이 "the schema" 를 가리키고, 모델이 마지막에 읽는다.
+fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>, lang: Option<&Language>) -> String {
     let mut full = prompt.to_string();
     if let Some(schema) = opts.get("schema") {
         let sj = val_to_json(schema);
@@ -27,6 +29,9 @@ fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>) -> String {
             full.push_str(SCHEMA_INSTRUCTION);
             full.push_str(&serde_json::to_string_pretty(&sj).unwrap_or_default());
         }
+    }
+    if let Some(l) = lang {
+        full.push_str(&l.contract());
     }
     full
 }
@@ -102,12 +107,14 @@ pub struct ClaudeHost {
     pub env: Vec<(String, String)>,
     pub allow_tools: Vec<String>,
     pub default_model: String,
+    /// 출력 언어 계약(있으면 모든 agent 프롬프트에 주입). None = 워크플로/모델 기본.
+    pub lang: Option<Language>,
 }
 impl Host for ClaudeHost {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
         let model = opt_str(opts, "model").unwrap_or_else(|| self.default_model.clone());
         let label = opt_str(opts, "label").unwrap_or_default();
-        let full = build_prompt(prompt, opts);
+        let full = build_prompt(prompt, opts, self.lang.as_ref());
         eprintln!("[soksak] agent {label:?} (model={model}) → claude -p");
         match run_agent(&AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone() }, &self.env) {
             Ok(out) => Ok(json_to_val(&out)),
@@ -130,11 +137,19 @@ impl Host for ClaudeHost {
 pub struct StubHost {
     pub trace: Vec<Json>,
     pub default_model: String,
+    /// 출력 언어 계약. dry-run 은 LLM 미호출이라 산출물 내용엔 영향 없지만, trace 에 기록해
+    /// 미리보기가 "산출물이 이 언어로 나옴" 을 충실히 보여준다(실행과 동일 계약).
+    pub lang: Option<Language>,
     seq: usize,
 }
 impl StubHost {
     pub fn new(default_model: String) -> Self {
-        StubHost { trace: vec![], default_model, seq: 0 }
+        StubHost { trace: vec![], default_model, lang: None, seq: 0 }
+    }
+    /// with_lang — 출력 언어 계약 지정(빌더).
+    pub fn with_lang(mut self, lang: Option<Language>) -> Self {
+        self.lang = lang;
+        self
     }
 }
 impl Host for StubHost {
@@ -150,6 +165,7 @@ impl Host for StubHost {
             "seq": self.seq,
             "label": label,
             "model": model,
+            "lang": self.lang.as_ref().map(|l| l.code.clone()),
             "schemaRequired": schema_required,
             "promptHead": prompt.chars().take(160).collect::<String>(),
             "promptLen": prompt.chars().count(),
@@ -216,6 +232,42 @@ mod tests {
         for ph in ["Scope", "Verify", "Synthesize"] {
             assert!(phases.iter().any(|p| p == ph), "phase {ph} 미도달: {phases:?}");
         }
+    }
+
+    #[test]
+    fn build_prompt_appends_language_contract() {
+        // [기준] lang 지정 시 agent 프롬프트 끝에 출력 언어 계약이 붙는다(execute 가 실제로 보냄).
+        let opts: BTreeMap<String, Val> = BTreeMap::new();
+        let no_lang = build_prompt("본문", &opts, None);
+        assert_eq!(no_lang, "본문", "lang 없으면 본문 그대로");
+        let en = build_prompt("body", &opts, Some(&Language::parse("en")));
+        assert!(en.starts_with("body"));
+        assert!(en.contains("Output language"));
+        assert!(en.contains("Do NOT"));
+        // schema 와 함께면: 본문 → schema → 언어 계약 순.
+        let mut o2: BTreeMap<String, Val> = BTreeMap::new();
+        o2.insert("schema".into(), json_to_val(&json!({ "type": "object", "required": ["x"] })));
+        let ko = build_prompt("body", &o2, Some(&Language::parse("ko")));
+        let i_schema = ko.find("Output format").unwrap();
+        let i_lang = ko.find("출력 언어").unwrap();
+        assert!(i_schema < i_lang, "schema 지시 뒤에 언어 계약");
+    }
+
+    #[test]
+    fn stub_host_records_lang_in_trace() {
+        // dry-run 미리보기가 출력 언어를 충실히 보여준다 — 각 agent trace 에 lang 코드.
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/cockpit.skeleton.json")).unwrap();
+        let program = skeleton.get("program").unwrap();
+        let mut h = StubHost::new("opus".into()).with_lang(Some(Language::parse("en")));
+        Interp::new(&mut h).run(program, Json::Null).unwrap();
+        let langs: Vec<String> = h
+            .trace
+            .iter()
+            .filter(|t| t.get("label").and_then(|l| l.as_str()).map_or(false, |s| !s.is_empty()))
+            .filter_map(|t| t.get("lang").and_then(|l| l.as_str()).map(String::from))
+            .collect();
+        assert_eq!(langs.len(), 9, "전 agent trace 에 lang");
+        assert!(langs.iter().all(|l| l == "en"), "전부 en: {langs:?}");
     }
 
     #[test]
