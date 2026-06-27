@@ -1,14 +1,18 @@
-//! soksak-run — 골격 실행 CLI(e2e). 골격 workflow.json 을 읽어 agent 를 claude -p 로 실행.
-//!   soksak-run <workflow.json> [--arg KEY=VALUE ...] [--allow-tools "Tool1 Tool2"]
-//! 인증 프로필 env(ANTHROPIC_*)는 호출자가 export(코어가 위임하는 형태). 결과 JSON 을 stdout 으로.
+//! soksak-run — 워크플로 실행 CLI. 추출기 가 떠낸 완전 skeleton 의 program(중립 AST)을
+//! 인터프리터로 **해석**해 실행한다. agent 는 host(claude -p 인증 프로필). 런타임은 워크플로 로직을
+//! 모름 — program 을 해석할 뿐. agent 수는 워크플로가 정함(내가 아님).
+//!   soksak-run <skeleton.json|-> --arg K=V ... [--dry-run] [--allow-tools "T1 T2"]
+//!   soksak-run synth --idea "..."        # ③파생 도메인 지시어만
+//! 인증 env(ANTHROPIC_*)는 호출자가 export.
 
 use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
-use soksak_plugin::exec::{plan_skeleton, run_skeleton, AgentInvocation};
-use soksak_plugin::provider::{run_agent, AgentRequest};
-use soksak_plugin::skeleton::Skeleton;
+use soksak_plugin::host::{ClaudeHost, StubHost};
+use soksak_plugin::interp::{val_to_json, Interp};
 use std::collections::HashSet;
+
+const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
 
 fn main() {
     if let Err(e) = real_main() {
@@ -21,11 +25,11 @@ fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
-        eprintln!("  soksak-run <workflow.json> --arg IDEA=... [--arg K=V ...] [--allow-tools \"T1 T2\"]   # 골격 실행(claude -p)");
-        eprintln!("  soksak-run synth --idea \"...\"                                                       # ③파생 도메인 지시어만");
+        eprintln!("  soksak-run <skeleton.json|-> --arg K=V ... [--dry-run] [--allow-tools \"T1 T2\"]  # program 해석 실행");
+        eprintln!("  soksak-run synth --idea \"...\"                                                    # ③파생 도메인 지시어");
         return Ok(());
     }
-    // synth 서브커맨드 — ③파생만(LLM 호출 없음). 플러그인 directive.synth 용.
+    // synth — ③파생만(LLM 미호출).
     if argv[0] == "synth" {
         let mut idea = String::new();
         let mut i = 1;
@@ -43,6 +47,7 @@ fn real_main() -> Result<(), String> {
         println!("{}", serde_json::to_string_pretty(&directives).map_err(|e| e.to_string())?);
         return Ok(());
     }
+
     let path = &argv[0];
     let mut args: Map<String, Value> = Map::new();
     let mut allow_tools: Vec<String> = vec![];
@@ -67,7 +72,7 @@ fn real_main() -> Result<(), String> {
         i += 1;
     }
 
-    // 골격 입력: "-" 면 stdin(플러그인이 추출기 출력을 파이프), 그 외는 파일.
+    // skeleton 입력: "-" 면 stdin(플러그인이 추출기 출력을 파이프), 그 외 파일.
     let raw = if path == "-" {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).map_err(|e| format!("read stdin: {e}"))?;
@@ -75,62 +80,40 @@ fn real_main() -> Result<(), String> {
     } else {
         std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?
     };
-    let skel = Skeleton::from_json(&raw)?;
+    let skeleton: Value = serde_json::from_slice(&raw).map_err(|e| format!("parse skeleton: {e}"))?;
+    let program = skeleton
+        .get("program")
+        .cloned()
+        .ok_or("skeleton 에 program(완전 AST) 없음 — 추출기 로 재추출 필요")?;
+    let name = skeleton.get("meta").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or("workflow").to_string();
 
-    // ③파생: IDEA 에서 도메인 지시어 합성 → context 에 directives 주입(워크플로가 ${directives} 로 사용).
+    // ③파생: IDEA 에서 도메인 지시어 합성 → args.directives 주입(워크플로가 args.directives 로 사용).
     if let Some(Value::String(idea)) = args.get("IDEA").cloned() {
         let directives = synth_directives(&idea, &builtin_library());
         let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
-        eprintln!("[soksak-run] ③파생: 도메인 {:?} → 지시어 {}개 주입", matched, directives.len());
+        eprintln!("[soksak] ③파생: 도메인 {:?} → 지시어 {}개 → args.directives", matched, directives.len());
         args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
     }
-    // dry-run: 실행 계획만 출력(LLM 호출 없음). fan-out item/이전 출력 placeholder 는 ${...} 보존.
+    let args_json = Value::Object(args);
+
+    // dry-run: StubHost 로 program 해석(LLM 미호출). 실행이므로 전 agent 가 trace 에.
     if dry_run {
-        let plan = plan_skeleton(&skel, &args);
-        eprintln!("[soksak-run] dry-run — {} agent 실행 예정(LLM 미호출)", plan.len());
-        println!("{}", serde_json::to_string_pretty(&plan).map_err(|e| e.to_string())?);
+        let mut h = StubHost::new(DEFAULT_MODEL.into());
+        Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
+        let n = h.trace.iter().filter(|t| t.get("label").and_then(|l| l.as_str()).map_or(false, |s| !s.is_empty())).count();
+        eprintln!("[soksak] dry-run — agent {n}회 실행 예정(LLM 미호출)");
+        println!("{}", serde_json::to_string_pretty(&h.trace).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    eprintln!("[soksak-run] {} — steps={} agents 실행 시작", skel.meta.name, skel.steps.len());
 
-    // 인증 프로필 env 수집(호출자가 export 한 ANTHROPIC_* 전부 전달).
-    let env: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("ANTHROPIC_"))
-        .collect();
+    // 실행: ClaudeHost(인증 프로필). agent → claude -p.
+    let env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("ANTHROPIC_")).collect();
     if env.is_empty() {
         return Err("ANTHROPIC_* env 미설정 — 인증 프로필 환경을 export 하고 실행하라".to_string());
     }
-
-    // runner = claude -p(인증 프로필). agent 별 stderr 진행 로그.
-    let runner = |inv: &AgentInvocation, _schema: Option<&Value>| -> Result<Value, String> {
-        eprintln!("[soksak-run] agent {:?} (model={}) → claude -p", inv.label, inv.model);
-        run_agent(
-            &AgentRequest { prompt: inv.prompt.clone(), model: &inv.model, allowed_tools: allow_tools.clone() },
-            &env,
-        )
-    };
-
-    let results = run_skeleton(&skel, &args, runner)?;
-
-    // 출력 = label → 결과. 단일은 객체, fan-out(동일 label 다중)은 배열(실행 순서 보존).
-    let mut order: Vec<String> = vec![];
-    let mut by_label: std::collections::BTreeMap<String, Vec<&_>> = std::collections::BTreeMap::new();
-    for r in &results {
-        if !by_label.contains_key(&r.label) {
-            order.push(r.label.clone());
-        }
-        by_label.entry(r.label.clone()).or_default().push(r);
-    }
-    let entry = |r: &soksak_plugin::exec::AgentResult| json!({ "phase": r.phase, "schema": r.schema, "output": r.output });
-    let mut out_map = Map::new();
-    for label in order {
-        let rs = &by_label[&label];
-        if rs.len() == 1 {
-            out_map.insert(label, entry(rs[0]));
-        } else {
-            out_map.insert(label, Value::Array(rs.iter().map(|r| entry(r)).collect()));
-        }
-    }
-    println!("{}", serde_json::to_string_pretty(&Value::Object(out_map)).map_err(|e| e.to_string())?);
+    eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p 인증 프로필)");
+    let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into() };
+    let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
+    println!("{}", serde_json::to_string_pretty(&val_to_json(&result)).map_err(|e| e.to_string())?);
     Ok(())
 }
