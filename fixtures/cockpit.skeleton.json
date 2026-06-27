@@ -1,5 +1,5 @@
 {
-  "ir": "workflow-skeleton@1",
+  "skeleton": "workflow-skeleton@1",
   "source": {
     "name": "cockpit",
     "file": "cockpit.workflow.js",

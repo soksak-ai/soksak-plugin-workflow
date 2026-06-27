@@ -1,5 +1,5 @@
 {
-  "ir": "workflow-skeleton@1",
+  "skeleton": "workflow-skeleton@1",
   "source": {
     "name": "deep-research",
     "file": "deep-research.workflow.js",
