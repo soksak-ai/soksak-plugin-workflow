@@ -117,11 +117,37 @@ where
                 results.push(r);
             }
             "parallel" | "pipeline" => {
-                if let Some(agents) = &step.agents {
-                    for a in agents {
-                        let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &ctx, &mut runner)?;
-                        ctx.insert(r.label.clone(), r.output.clone());
-                        results.push(r);
+                let agents = step.agents.clone().unwrap_or_default();
+                // fan-out: axis 가 context 에서 배열로 해소되면 element 별 실행(itemParam 바인딩).
+                let fanned = step
+                    .axis
+                    .as_ref()
+                    .and_then(|ax| resolve_path(&ctx, ax))
+                    .and_then(|v| v.as_array().cloned());
+                match (fanned, &step.item_param) {
+                    (Some(items), Some(item_param)) if !items.is_empty() => {
+                        // label → fan-out 출력 배열(downstream threading 용).
+                        let mut collected: std::collections::BTreeMap<String, Vec<Value>> = std::collections::BTreeMap::new();
+                        for item in &items {
+                            let mut item_ctx = ctx.clone();
+                            item_ctx.insert(item_param.clone(), item.clone());
+                            for a in &agents {
+                                let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &item_ctx, &mut runner)?;
+                                collected.entry(r.label.clone()).or_default().push(r.output.clone());
+                                results.push(r);
+                            }
+                        }
+                        for (label, outs) in collected {
+                            ctx.insert(label, Value::Array(outs));
+                        }
+                    }
+                    _ => {
+                        // axis 없음/미해소 → 선언된 agent 1회씩.
+                        for a in &agents {
+                            let r = run_one(skel, a.label.clone(), a.directive_ref, &a.schema, &a.model, a.phase.clone().or_else(|| step.phase.clone()), &ctx, &mut runner)?;
+                            ctx.insert(r.label.clone(), r.output.clone());
+                            results.push(r);
+                        }
                     }
                 }
             }
@@ -262,6 +288,53 @@ mod tests {
         assert!(seen_prompts[0].contains("Decompose Q"));
         assert!(seen_prompts[0].contains("Output format"));
         assert!(seen_prompts[0].contains("angles"));
+    }
+
+    #[test]
+    fn fans_out_over_axis_array() {
+        let raw = serde_json::to_vec(&json!({
+            "ir": "workflow-skeleton@1",
+            "meta": { "name": "fanout" },
+            "steps": [
+                { "index": 0, "kind": "agent", "label": "scope", "schema": "S", "directiveRef": 0 },
+                { "index": 1, "kind": "parallel", "axis": "scope.angles", "itemParam": "angle",
+                  "agents": [ { "label": "search", "schema": "S", "directiveRef": 1 } ] },
+                { "index": 2, "kind": "agent", "label": "synth", "schema": "S", "directiveRef": 2 }
+            ],
+            "directives": [
+                { "index": 0, "text": "scope ${IDEA}" },
+                { "index": 1, "text": "search angle ${angle.label}" },
+                { "index": 2, "text": "synth from ${search}" }
+            ],
+            "schemas": { "S": { "type": "object" } }
+        }))
+        .unwrap();
+        let skel = Skeleton::from_json(&raw).unwrap();
+        let mut args = Map::new();
+        args.insert("IDEA".into(), json!("x"));
+        let mut search_prompts: Vec<String> = vec![];
+        let mut synth_prompt = String::new();
+        let results = run_skeleton(&skel, &args, |inv, _s| match inv.label.as_str() {
+            "scope" => Ok(json!({ "angles": [{ "label": "a1" }, { "label": "a2" }, { "label": "a3" }] })),
+            "search" => {
+                search_prompts.push(inv.prompt.clone());
+                Ok(json!({ "found": inv.label }))
+            }
+            "synth" => {
+                synth_prompt = inv.prompt.clone();
+                Ok(json!({ "ok": true }))
+            }
+            _ => Ok(json!({})),
+        })
+        .unwrap();
+        // search 가 angle 3개에 대해 3회 실행(fan-out) + 각 angle.label 바인딩.
+        assert_eq!(search_prompts.len(), 3);
+        assert!(search_prompts[0].contains("search angle a1"));
+        assert!(search_prompts[2].contains("search angle a3"));
+        // synth: search fan-out 출력이 배열로 threading.
+        assert!(synth_prompt.contains("synth from ["), "synth threading: {synth_prompt}");
+        // scope(1) + search(3) + synth(1) = 5.
+        assert_eq!(results.len(), 5);
     }
 
     #[test]

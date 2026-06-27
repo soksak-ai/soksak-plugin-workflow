@@ -54,6 +54,10 @@ pub struct Step {
     #[serde(default)]
     pub stages: Option<usize>,
     #[serde(default)]
+    pub axis: Option<String>,
+    #[serde(default, rename = "itemParam")]
+    pub item_param: Option<String>,
+    #[serde(default)]
     pub agents: Option<Vec<Agent>>,
 }
 
