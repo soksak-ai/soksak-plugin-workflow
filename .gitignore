@@ -1,1 +1,10 @@
 target
+
+# directive-loop 실행 산출물(원장·스펙·로그·락) — 재생성 가능, 추적 안 함
+stores/
+specs/
+
+# 적대 검증·리뷰 임시 산출물
+adv/
+adv_novel/
+review/

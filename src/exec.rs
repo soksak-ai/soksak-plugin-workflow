@@ -1,4 +1,4 @@
-//! exec — 골격 실행기. steps 를 순서대로 walk, agent 를 runner 로 실행한다.
+//! exec — 골격 러너. steps 를 순서대로 walk, agent 를 runner 로 실행한다.
 //! runner 주입식 — e2e 는 claude -p(provider), 단위테스트는 fake. directive 프롬프트의
 //! ${placeholder} 를 args 로 바인딩 + schema 본문을 출력 형식 지시로 append.
 //! 현재: 순차(parallel/pipeline 내부 agent 도 순서 실행). 동시성은 다음 단계.

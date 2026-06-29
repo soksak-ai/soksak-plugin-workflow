@@ -3,6 +3,7 @@
 //! 레거시(server2 upstream:// 계약) 포팅 아님 — 골격을 단일 진실로 해석·실행한다.
 
 pub mod derive_directive;
+pub mod directive_loop;
 pub mod domain_lib;
 pub mod exec;
 pub mod host;
