@@ -39,9 +39,6 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
         .arg("--output-format")
         .arg("stream-json")
         .arg("--verbose")
-        // partial(thinking) 델타 스트림 — 긴 검색 대기 중에도 thinking 이 흘러 스케줄러에 살아있음(heartbeat)을
-        // 끊김없이 전달(main.js 가 stderr 활동마다 scheduler.heartbeat). 둘 중 하나라도 흐르면 staleness 리셋.
-        .arg("--include-partial-messages")
         .arg("--strict-mcp-config")
         .arg("--allowedTools")
         .arg(req.allowed_tools.join(" "))
@@ -113,14 +110,6 @@ fn print_event(ev: &Value) {
                 if n % 20 == 0 {
                     eprintln!("  [thinking… {n}]");
                 }
-            }
-        }
-        // partial(thinking/text) 델타 — --include-partial-messages. 매 토큰이라 도배 방지 throttle,
-        // 단 주기 출력으로 stderr 활동을 유지(main.js heartbeat 연료). 긴 검색 대기 중 thinking 도 이 경로.
-        "stream_event" => {
-            let n = THINK_BEAT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n % 20 == 0 {
-                eprintln!("  [streaming… {n}]");
             }
         }
         // result 시작 시 다음 호출 heartbeat 초기화.

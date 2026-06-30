@@ -213,8 +213,9 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let (env, profile) = auth_env()?;
     eprintln!("[soksak] exec-one (model={model}, 프로필={profile}) → claude -p");
     let full = build_prompt_with_schema(&input.prompt, input.schema.as_ref(), lang.as_ref());
-    // 3600s: 코어 스케줄러와 천장 일치(register timeout_ms=ipc 클램프=3600s) — 검색 fan-out 단일 턴 30분+ 수용.
-    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 3600 };
+    // 10800s(3h): lease=프로세스-생존 — 도는 중 안 잘림. 코어 zombie_backstop(3h)·register timeout_ms 와 천장 일치
+    // (claude 가 backstop 전에 자체 종료 안 하게 ≥backstop). hang 방지 하드캡은 유지하되 넉넉히.
+    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 10800 };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
     let result = if input.schema.is_some() {
         run_agent(&req, &env)?

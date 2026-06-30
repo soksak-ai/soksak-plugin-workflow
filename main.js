@@ -90,9 +90,9 @@ export async function reconcileTick(deps) {
 // ── app 연결(런타임) ──
 
 /** exec-one spawn — stdin 에 {prompt, schema?} 쓰고 stdout {oxf, result} 파싱.
- *  onHeartbeat: exec-one 의 stderr(claude 스트림: thinking 델타·이벤트 jsonl)가 흐를 때마다 호출 →
- *  스케줄러 staleness 리셋(살아있음). 둘 중 하나라도 흐르면 안 잘린다(긴 검색 대기 중 thinking 흐름). */
-function execOne(app, exe, env, body, onHeartbeat) {
+ *  lease=프로세스-생존: spawn → **onExit await → 그제야 resolve/reject**. 도는 중(검색 1시간이든)엔 reply 금지 —
+ *  스케줄러가 lease 로 기다린다. heartbeat 발신 없음(폐기). 정상 exit+결과=resolve, 비정상/무결과=reject(→ok:false). */
+function execOne(app, exe, env, body) {
   return new Promise((resolve, reject) => {
     let out = "";
     const dec = new TextDecoder();
@@ -102,12 +102,6 @@ function execOne(app, exe, env, body, onHeartbeat) {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
         });
-        // 살아있음 신호: stderr 활동(스트림 이벤트·thinking 델타)마다 heartbeat. 도는 동안 staleness 리셋.
-        if (onHeartbeat && app.process.onStderr) {
-          app.process.onStderr(handle, () => {
-            try { onHeartbeat(); } catch { /* heartbeat 실패는 exec 진행 막지 않음 */ }
-          });
-        }
         app.process.onExit(handle, (code) => {
           if (code !== 0) return reject(new Error(`exec-one exit ${code}`));
           try {
@@ -231,8 +225,8 @@ export default {
             listNodes: () => app.commands.execute(KANBAN + ".node.list", {}),
             getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
             editNode: (id, fields) => app.commands.execute(KANBAN + ".node.edit", { node: id, ...fields }),
-            // exec 중 스트림 활동마다 heartbeat → 코어 staleness 리셋(도는 동안 안 잘림). API 미구현이면 no-op.
-            execOne: (body) => execOne(app, runtime.bin, runtime.env, body, () => app.scheduler?.heartbeat?.(RECONCILE_ID)),
+            // lease=프로세스-생존: exec-one 이 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 zombie_backstop 으로만 관리.
+            execOne: (body) => execOne(app, runtime.bin, runtime.env, body),
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
@@ -248,9 +242,10 @@ export default {
           id: RECONCILE_ID,
           trigger: { kind: "reconcile" },
           command: RECONCILE_CMD,
-          // 천장 일치: provider 캡=ipc 클램프=register timeout_ms=3600s(1시간). 검색 fan-out 단일 턴 30분+ 수용.
-          // timeout_ms 동안 lease 유지 → 발화 timeout 으로 중복 실행 0(셋 일치라야 성립).
-          timeout_ms: 3600000,
+          // lease=프로세스-생존: 핸들러가 onExit 까지 reply 보류(검색 1시간이든 안 잘림). timeout_ms 는 zombie
+          // backstop 천장(3h) 과 일치 — provider 캡=register timeout_ms=코어 zombie_backstop=3h. 도는 중 안 자르고
+          // 진짜 좀비만 backstop. (core-scheduler 가 zombie_backstop_ms wire — 값 확정 시 정렬.)
+          timeout_ms: 10800000,
           // 529 과부하 등 일시 실패 backoff 재시도(즉시 재시도 X — 지연 후 자연 복구). 실패=reconcileTick ok:false.
           retry: { max: 5, base_ms: 3000, max_ms: 60000 },
         });
