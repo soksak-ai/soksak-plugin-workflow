@@ -319,6 +319,39 @@ test("reconcileTick — generate 재진입: Hunt/Audit 이미 발행됐으면 ex
   assert.equal(r.ok, true);
 });
 
+test("reconcileTick — hunt 재진입: 추가항목 이미 발행됐으면 execStage 재실행·중복 0 (② hunt 멱등 가드)", async () => {
+  // hunt 가 추가항목(덩어리 직속 item)을 발행한 뒤 status=done commit 직전 실패/크래시 → 재pick.
+  // 덩어리 직속 item 자식이 있으면 hunt 발행 완료(generate 항목은 그룹 밑이라 덩어리 직속 아님) →
+  // exec-stage(hunt) 재실행·추가항목 중복 발행 차단(generate 와 같은 마커 패턴).
+  const nodes = [
+    { id: "hunt", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"hunt"}' },
+    { id: "add0", kind: "item", status: "todo", parentId: "chunk", badge: "검수전", blockedBy: [] }, // hunt 가 발행한 추가항목(덩어리 직속)
+  ];
+  const staged = { children: [{ ev: "add", id: "add0", kind: "item", parent: "chunk", title: "중복 추가!", prompt: "v", badge: "검수전" }], result: {} };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ title: "x", badge: "o" }];
+  const r = await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 0, "추가항목 마커 있으면 exec-stage(hunt) 재실행 안 함");
+  assert.equal(deps.calls.add.length, 0, "추가항목 중복 발행 0");
+  const done = deps.calls.edit.find((e) => e.id === "hunt");
+  assert.equal(done.fields.status, "done", "재진입은 status=done 만 멱등 재확정");
+  assert.equal(r.ok, true);
+});
+
+test("reconcileTick — hunt 첫 실행(추가항목 없음)은 정상 실행(가드 오발 없음)", async () => {
+  // 덩어리 직속 item(hunt 추가항목) 마커가 없으면 hunt 미실행 → 정상 ledger materialize + execStage.
+  // generate 항목은 그룹 밑이라 덩어리 직속 item 이 아니므로 마커 오발 없음.
+  const nodes = [
+    { id: "hunt", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"hunt"}' },
+    { id: "g0", kind: "group", status: "todo", parentId: "chunk" },
+    { id: "g0i0", kind: "item", status: "todo", parentId: "g0", badge: "o" }, // generate 항목(그룹 밑) — 덩어리 직속 아님
+  ];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [{ title: "x", badge: "o" }];
+  await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 1, "추가항목 마커 없으면 hunt 정상 실행");
+});
+
 test("reconcileTick — generate 첫 실행(마커 없음)은 정상 발행(가드 오발 없음)", async () => {
   // 덩어리에 sibling task(Hunt/Audit)가 없으면 generate 미발행 → 정상 execStage+발행. ② 가드가 첫 실행을 막으면 안 됨.
   const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"generate"}' }];

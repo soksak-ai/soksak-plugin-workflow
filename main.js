@@ -168,16 +168,21 @@ async function reconcileStage(deps, target, body, nodes) {
   let stageBody = body;
   let stageName;
   try { stageName = JSON.parse(body).stage; } catch { /* body 가 exec-stage 입력 아님 */ }
-  // ② 멱등 가드(generate) — 재진입(status=done commit 실패/크래시 후 재pick)에서 execStage 재실행·중복 발행 차단.
-  // generate 는 발행 끝에 Hunt/Audit task 를 덩어리 자식으로 낸다 → 덩어리에 (이 노드 말고) 다른 task 자식이
-  // 있으면 generate 발행 완료. 그땐 execStage 안 돌리고 status=done 만 멱등 재확정한다.
-  // 자식 멱등키는 둘 수 없다(kanban node.add 가 매번 새 id; 비결정 generate 는 콘텐츠 dedup 불가) — 발행-완료
-  // 마커로 전량 재발행만 막는 설계. (남는 경계: 마커 발행 *전* 중간 크래시의 부분-발행 원자성 — 보고서 참조.)
-  if (stageName === "generate" && Array.isArray(nodes) && target.parentId) {
-    const siblingTask = nodes.some(
-      (n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id,
-    );
-    if (siblingTask) {
+  // ② 멱등 가드 — 재진입(발행 완료 후 status=done commit 실패/크래시 → 재pick)에서 execStage 재실행·중복 발행 차단.
+  // stage 별 "발행 완료 마커"(이미 발행됐음을 보이는 덩어리 자손)를 찾으면 execStage 안 돌리고 status=done 만 멱등 재확정.
+  //  - generate: 발행 끝에 Hunt/Audit task 를 덩어리 자식으로 낸다 → 덩어리에 (이 노드 말고) 다른 task 자식이 마커.
+  //  - hunt: 추가항목을 덩어리 *직속* item 으로 낸다(generate 항목은 그룹 밑이라 덩어리 직속 아님) → 덩어리 직속 item 자식이 마커.
+  //  - audit: 노드 0개 발행(verdict 만 덩어리 result 로) → 재실행해도 중복 노드 0 → 가드 불필요.
+  // 자식 멱등키는 둘 수 없다(kanban node.add 가 매번 새 id; 비결정 generate 는 콘텐츠 dedup 불가) — 발행-완료 마커로
+  // 전량 재발행만 막는 설계. (남는 경계: 마커 발행 *전* 중간 크래시의 부분-발행 원자성 — kanban node.add 멱등키 필요. 후속.)
+  if (Array.isArray(nodes) && target.parentId) {
+    const published =
+      stageName === "generate"
+        ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id)
+        : stageName === "hunt"
+          ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item")
+          : false;
+    if (published) {
       await deps.editNode(target.id, { status: "done" });
       await deps.poke();
       return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
