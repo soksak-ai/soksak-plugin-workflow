@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, classifyResult, buildAddParams, buildLedger } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -120,20 +120,6 @@ test("reconcileTick — hunt task 는 ledger materialize 해 exec-stage args 주
   const sent = JSON.parse(deps.calls.stage[0]);
   assert.deepEqual(sent.args.ledger, [{ title: "재고 차감", badge: "o" }], "exec-stage args.ledger 주입됨");
   assert.equal(sent.stage, "hunt");
-});
-
-test("classifyResult — 스테이지 산출 모양으로 분기(모델 B)", () => {
-  assert.equal(classifyResult({ title: "약국", groups: [] }), "generate");
-  assert.equal(classifyResult({ additions: [{ title: "x" }] }), "hunt");
-  assert.equal(classifyResult({ complete: true, verdict: "완결" }), "audit");
-  assert.equal(classifyResult({ verdict: "미완" }), "audit");
-  assert.equal(classifyResult({ status: "o", reason: "실재" }), "verify");
-  assert.equal(classifyResult({ oxf: "f" }), "verify");
-  assert.equal(classifyResult("raw 텍스트"), "plain");
-  assert.equal(classifyResult({ foo: 1 }), "plain");
-  assert.equal(classifyResult(null), "plain");
-  // 우선순위: groups 가 status 보다 먼저(generate 가 우선) — 충돌 시 구조적 신호 우선.
-  assert.equal(classifyResult({ groups: [], status: "o" }), "generate");
 });
 
 test("execResultToEdit — oxf o/x/f 면 badge+result", () => {
