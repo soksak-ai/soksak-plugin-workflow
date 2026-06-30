@@ -10,6 +10,9 @@
     "commands",
     "schedule"
   ],
+  "dependencies": {
+    "soksak-plugin-kanban": "^0.1.0"
+  },
   "contributes": {
     "commands": [
       {
