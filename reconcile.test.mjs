@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, classifyResult, buildAddParams } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, classifyResult, buildAddParams, buildLedger } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -90,6 +90,34 @@ test("buildAddParams — kind=task + taskCtx → body=exec-stage 입력(skeleton
 test("buildAddParams — kind=task 인데 taskCtx 없으면 일반 body(skeleton 미임베드)", () => {
   const p = buildAddParams({ id: "gen", kind: "task", prompt: "generate" }, "k1", []);
   assert.equal(JSON.parse(p.body).prompt, "generate", "taskCtx 없으면 exec-one 입력 형태로 폴백");
+});
+
+test("buildLedger — 덩어리 자손 항목(kind=item)만, category=그룹 title", () => {
+  const nodes = [
+    { id: "chunk", kind: "chunk", parentId: null },
+    { id: "g0", kind: "group", parentId: "chunk", title: "재고 관리" },
+    { id: "i1", kind: "item", parentId: "g0", title: "재고 차감", badge: "o" },
+    { id: "i2", kind: "item", parentId: "g0", title: "창고 연결", badge: "검수전" },
+    { id: "other", kind: "item", parentId: "other-chunk", title: "남의 항목", badge: "o" }, // 다른 덩어리 — 제외
+    { id: "gen", kind: "task", parentId: "chunk" }, // task — 제외
+  ];
+  const ledger = buildLedger(nodes, "chunk");
+  assert.equal(ledger.length, 2, "이 덩어리 항목만");
+  assert.deepEqual(ledger[0], { title: "재고 차감", badge: "o", category: "재고 관리" });
+  assert.equal(ledger[1].badge, "검수전");
+});
+
+test("reconcileTick — hunt task 는 ledger materialize 해 exec-stage args 주입", async () => {
+  const nodes = [{ id: "hunt", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"skeleton":{},"stage":"hunt","args":{"directive":"약국"}}' }];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async (chunkId) => {
+    assert.equal(chunkId, "chunk", "덩어리 id 로 ledger 요청");
+    return [{ title: "재고 차감", badge: "o" }];
+  };
+  await reconcileTick(deps);
+  const sent = JSON.parse(deps.calls.stage[0]);
+  assert.deepEqual(sent.args.ledger, [{ title: "재고 차감", badge: "o" }], "exec-stage args.ledger 주입됨");
+  assert.equal(sent.stage, "hunt");
 });
 
 test("classifyResult — 스테이지 산출 모양으로 분기(모델 B)", () => {

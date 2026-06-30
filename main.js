@@ -38,6 +38,25 @@ export function pickReady(nodes) {
   });
 }
 
+/** buildLedger — 덩어리(chunkId) 자손 항목(kind=item)을 ledger 엔트리로(hunt/audit exec-stage args.ledger).
+ *  부모 사슬로 자손 판정. category = 항목의 그룹(부모) title. hunt 가 중복 회피·audit 가 완결성 인증에 씀. */
+export function buildLedger(nodes, chunkId) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const byId = new Map(list.map((n) => [n.id, n]));
+  const descends = (n) => {
+    let p = n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === chunkId) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  return list
+    .filter((n) => n.kind === "item" && descends(n))
+    .map((n) => ({ title: n.title, badge: n.badge, category: (byId.get(n.parentId) || {}).title }));
+}
+
 /** classifyResult — exec-one 산출(result)의 모양으로 처리 분기를 정한다(모델 B 동적 발행).
  *  draft 스테이지마다 산출 스키마가 달라 main.js reconcile 가 이걸로 가른다:
  *  - generate: {title, groups[]} → 덩어리 title 갱신 + 그룹/항목 동적 발행(--emit expand 재호출).
@@ -134,9 +153,23 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
  *  exec-stage 산출 = { children:[add 이벤트…], result:<워크플로 return> }. 실패는 ok:false(노드 미변경)→backoff.
  *  자식 부모 ref 해결: 배치 keyOf(로컬 emit id→칸반 id) / 기존 칸반 id(chunkRef)는 그대로. addNode(params)→칸반 id. */
 async function reconcileStage(deps, target, body) {
+  // hunt/audit 는 ledger(덩어리 자손 항목+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
+  let stageBody = body;
+  let stageName;
+  try { stageName = JSON.parse(body).stage; } catch { /* body 가 exec-stage 입력 아님 */ }
+  if ((stageName === "hunt" || stageName === "audit") && deps.materializeLedger && target.parentId) {
+    try {
+      const ledger = await deps.materializeLedger(target.parentId);
+      const inp = JSON.parse(body);
+      inp.args = { ...(inp.args || {}), ledger };
+      stageBody = JSON.stringify(inp);
+    } catch {
+      /* materialize 실패 시 ledger 없이 진행(exec-stage 가 빈 ledger 다룸) */
+    }
+  }
   let staged;
   try {
-    staged = await deps.execStage(body);
+    staged = await deps.execStage(stageBody);
   } catch (e) {
     return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
   }
@@ -339,6 +372,11 @@ export default {
             addNode: async (params) => {
               const r = await app.commands.execute(KANBAN + ".node.add", params);
               return r && r.nodeId;
+            },
+            // hunt/audit 용 ledger — 덩어리 자손 항목+배지(node.list 로).
+            materializeLedger: async (chunkId) => {
+              const listed = await app.commands.execute(KANBAN + ".node.list", {});
+              return buildLedger((listed && listed.nodes) || [], chunkId);
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
