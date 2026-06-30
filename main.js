@@ -19,19 +19,23 @@ export function isDone(node) {
   return !!node && node.status === "done";
 }
 
-/** ready 노드 = 드래프트 항목(badge="검수전") ∧ leaf(자식 없음) ∧ blockedBy 전부 done.
+/** ready 노드 = blockedBy 전부 done 인 미완 실행 대상(결정2):
+ *  - 드래프트 항목: badge="검수전" ∧ leaf(자식 없음) → exec-one 검증(→배지).
+ *  - stage 작업(Generate/Hunt/Audit): kind="task" ∧ status≠done → exec-stage(claude+자식 emit).
+ *    stage 노드는 덩어리 밖이라 badge 안 씀(집계 오염 0), status 로 미완 판정(exec 후 done → 재-pick 0).
  *  parallel=형제(blockedBy 없음)·pipeline=체인(blockedBy)은 노드 데이터로만 표현 — 여긴 그걸 읽어 판정. */
 export function pickReady(nodes) {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map((n) => [n.id, n]));
   const hasChild = new Set();
   for (const n of list) if (n.parentId) hasChild.add(n.parentId);
-  return list.filter(
-    (n) =>
-      n.badge === "검수전" &&
-      !hasChild.has(n.id) &&
-      (n.blockedBy || []).every((b) => isDone(byId.get(b))),
-  );
+  const depsDone = (n) => (n.blockedBy || []).every((b) => isDone(byId.get(b)));
+  return list.filter((n) => {
+    if (!depsDone(n)) return false;
+    if (n.badge === "검수전" && !hasChild.has(n.id)) return true; // 항목 검증
+    if (n.kind === "task" && n.status !== "done") return true; // stage 작업 실행
+    return false;
+  });
 }
 
 /** classifyResult — exec-one 산출(result)의 모양으로 처리 분기를 정한다(모델 B 동적 발행).
@@ -152,8 +156,9 @@ export default {
             try { ev = JSON.parse(line); } catch { return; }
             try {
               if (ev.ev === "add") {
-                const parentId = ev.parent ? keyOf.get(ev.parent) : undefined;
-                const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id)).filter(Boolean);
+                // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
+                const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
+                const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
                 // 칸반 Node.body = 워크플로 실행 지시(prompt/schema) — reconcile 가 exec-one stdin 으로 그대로 파이프.
                 const execInput = ev.prompt
                   ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
@@ -166,6 +171,8 @@ export default {
                   locked: true,
                   type: "task",
                 };
+                // node kind(free-form) — reconcile 가 stage 작업(task) 식별에 씀(결정1·2). 칸반에 taxonomy 안 박음.
+                if (ev.kind) params.kind = ev.kind;
                 // 칸반 드래프트 계약(Phase 2): 마커는 드래프트 노드에만 — 일반 노드엔 안 넣음(보드 오염 방지).
                 if (ev.badge) params.badge = ev.badge;
                 if (ev.is_draft) params.isDraft = true;

@@ -30,6 +30,24 @@ test("pickReady — blockedBy done 이면 ready 로 풀린다", () => {
   assert.deepEqual(pickReady(nodes).map((n) => n.id), ["c"]);
 });
 
+test("pickReady — stage 작업(kind=task)은 status≠done 으로 ready(badge 없이)", () => {
+  const nodes = [
+    { id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: null }, // Generate — ready(배지 없음)
+    { id: "aud", kind: "task", status: "done", blockedBy: [], parentId: null }, // 이미 실행됨 — 제외
+    { id: "hunt", kind: "task", status: "todo", blockedBy: ["gen"], parentId: null }, // gen 미완 — 제외
+  ];
+  assert.deepEqual(pickReady(nodes).map((n) => n.id), ["gen"]);
+});
+
+test("pickReady — 항목(badge)과 stage(kind=task) 혼재 시 둘 다", () => {
+  const nodes = [
+    { id: "gen", kind: "task", status: "done", blockedBy: [], parentId: null },
+    { id: "i1", badge: "검수전", kind: "item", status: "todo", blockedBy: [], parentId: "g0" },
+    { id: "hunt", kind: "task", status: "todo", blockedBy: ["gen"], parentId: null }, // gen done → ready
+  ];
+  assert.deepEqual(pickReady(nodes).map((n) => n.id).sort(), ["hunt", "i1"]);
+});
+
 test("pickReady — 빈/비배열 안전", () => {
   assert.deepEqual(pickReady([]), []);
   assert.deepEqual(pickReady(null), []);
