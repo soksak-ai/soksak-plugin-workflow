@@ -45,21 +45,29 @@ export function execResultToEdit(execOut) {
 }
 
 /** reconcile 한 틱 — ready 1개를 exec-one 으로 처리(타임아웃 안전). 진척 시 poke 로 다음 깨움.
- *  deps(의존 주입 — 테스트 가능): listNodes() · getNode(id) · editNode(id,fields) · execOne(body) · poke(). */
+ *  deps(의존 주입 — 테스트 가능): listNodes() · getNode(id) · editNode(id,fields) · execOne(body) · poke().
+ *  반환에 ok 포함 — 코어 재시도 판정(ok != true → backoff 재시도). exec 실패(529/timeout)는 throw 말고
+ *  ok:false 로 surface(노드 미변경 → 멱등, 코어가 backoff 후 재발화). */
 export async function reconcileTick(deps) {
   const listed = await deps.listNodes();
   const nodes = (listed && listed.nodes) || [];
   const ready = pickReady(nodes);
-  if (ready.length === 0) return { processed: 0 };
+  if (ready.length === 0) return { ok: true, processed: 0 };
   const target = ready[0]; // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
   const full = await deps.getNode(target.id);
   const body = (full && full.node && full.node.body) || "";
-  const execOut = await deps.execOne(body);
+  let execOut;
+  try {
+    execOut = await deps.execOne(body);
+  } catch (e) {
+    // 529 과부하·timeout 등 일시 실패 → ok:false. 노드 미변경(badge=검수전 유지) → 코어 backoff 재시도가 자연 복구.
+    return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+  }
   const edit = execResultToEdit(execOut);
   await deps.editNode(target.id, edit);
   // 진척(배지 확정)했을 때만 다음 틱 깨움 — 무판정으로 self-poke 하면 tight loop. 외부/부팅이 재시도.
   if (edit.badge) await deps.poke();
-  return { processed: 1, id: target.id, badge: edit.badge || null };
+  return { ok: true, processed: 1, id: target.id, badge: edit.badge || null };
 }
 
 // ── app 연결(런타임) ──
@@ -201,8 +209,8 @@ export default {
             execOne: (body) => execOne(app, runtime.bin, runtime.env, body),
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
-          const r = await reconcileTick(deps);
-          return { ok: true, ...r };
+          // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
+          return await reconcileTick(deps);
         },
       }),
     );
@@ -214,8 +222,11 @@ export default {
           id: RECONCILE_ID,
           trigger: { kind: "reconcile" },
           command: RECONCILE_CMD,
-          // exec-one(GLM 529 backoff 복구)이 길어도 발화가 TIMEOUT 으로 중복 실행 안 되게 넉넉히.
+          // exec-one(LLM)이 길어도 발화가 TIMEOUT 으로 중복 실행 안 되게 넉넉히(코어가 [1s,600s] 클램프 → 600s).
+          // timeout_ms 동안 lease 유지 → 중복 0. exec-one 은 그 안에 끝나도록 provider 타임아웃 590s 로 맞춤.
           timeout_ms: 600000,
+          // 529 과부하 등 일시 실패 backoff 재시도(즉시 재시도 X — 지연 후 자연 복구). 실패=reconcileTick ok:false.
+          retry: { max: 5, base_ms: 3000, max_ms: 60000 },
         });
       } catch (e) {
         app.bus?.emit?.("workflow.error", { message: `scheduler.register: ${String(e)}` });

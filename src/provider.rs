@@ -20,15 +20,18 @@ pub struct AgentRequest<'a> {
     pub model: &'a str,
     /// 허용 tool(기본 빈 = 순수 생성). 일부 agent(WebSearch 등)는 명시.
     pub allowed_tools: Vec<String>,
+    /// claude 호출 하드캡(초). hung 호출이 영원히 안 막게. exec-one 은 코어 스케줄러 timeout(600s) 클램프
+    /// 아래(590s)로 — 발화 timeout 전에 자체 종료해 lease 중복 실행 0. 일반 interp 실행은 900s.
+    pub timeout_secs: u64,
 }
 
 /// run_agent_text — claude -p 로 agent 실행, result 텍스트(raw)를 반환.
 /// author(마크다운 스펙처럼 JSON 이 아닌 산출)용. env=인증 프로필. run_agent 의 raw-text 형제.
 pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
-    // timeout 900s 하드캡 — hung claude 호출(WebSearch 폭주 등)이 루프를 영원히 막지 못하게.
+    // timeout 하드캡(req.timeout_secs) — hung claude 호출(WebSearch 폭주 등)이 루프를 영원히 막지 못하게.
     // timeout 만료 → 비-success status → Err(라운드 실패, 무한 hang 아님).
     let mut cmd = Command::new("timeout");
-    cmd.arg("900")
+    cmd.arg(req.timeout_secs.to_string())
         .arg("claude")
         .arg("-p")
         .arg(&req.prompt)

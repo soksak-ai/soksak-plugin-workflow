@@ -213,7 +213,8 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let (env, profile) = auth_env()?;
     eprintln!("[soksak] exec-one (model={model}, 프로필={profile}) → claude -p");
     let full = build_prompt_with_schema(&input.prompt, input.schema.as_ref(), lang.as_ref());
-    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools };
+    // 590s: 코어 스케줄러 timeout(600s 클램프) 아래 — 발화 timeout 전 자체 종료해 lease 중복 0.
+    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 590 };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
     let result = if input.schema.is_some() {
         run_agent(&req, &env)?

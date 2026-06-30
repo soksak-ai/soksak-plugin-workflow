@@ -216,7 +216,7 @@ fn call_json<T: DeserializeOwned>(prompt: String, tools: Vec<String>, model: &st
             std::thread::sleep(Duration::from_secs(COOLDOWN * attempt)); // 백오프 — 레이트리밋 쿨다운.
             eprintln!("  [재시도 {attempt}/2: {}]", last.chars().take(80).collect::<String>());
         }
-        match run_agent_text(&AgentRequest { prompt: prompt.clone(), model, allowed_tools: tools.clone() }, &cfg.agent_env) {
+        match run_agent_text(&AgentRequest { prompt: prompt.clone(), model, allowed_tools: tools.clone(), timeout_secs: 900 }, &cfg.agent_env) {
             Ok(text) => match parse_as::<T>(&text) {
                 Ok(t) => return Ok(t),
                 Err(e) => last = e,
@@ -462,7 +462,7 @@ Output ONLY the spec markdown."#,
         directive = directive,
         ledger = ledger_view(topics)
     );
-    run_agent_text(&AgentRequest { prompt, model: &cfg.exec_model, allowed_tools: vec![] }, &cfg.agent_env)
+    run_agent_text(&AgentRequest { prompt, model: &cfg.exec_model, allowed_tools: vec![], timeout_secs: 900 }, &cfg.agent_env)
 }
 
 // === 적용 함수 ===
