@@ -115,6 +115,20 @@ impl WorkflowHost {
     fn opt_bool(opts: &BTreeMap<String, Val>, key: &str) -> bool {
         matches!(opts.get(key), Some(Val::Bool(true)))
     }
+    /// 문자열 배열 opt(blockedBy 등). Val::Arr → Vec<String>. 빈/미존재면 None.
+    fn opt_str_array(opts: &BTreeMap<String, Val>, key: &str) -> Option<Vec<String>> {
+        match opts.get(key) {
+            Some(Val::Arr(a)) => {
+                let v: Vec<String> = a.borrow().iter().map(to_string).filter(|s| !s.is_empty()).collect();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Host for WorkflowHost {
@@ -126,11 +140,15 @@ impl Host for WorkflowHost {
         // 규칙 B: title = opts.title(LLM 발명), description = opts.description(사람용). label fallback 없음.
         let title = Self::opt_str(opts, "title");
         let description = Self::opt_str(opts, "description");
-        // 규칙 A: pipeline 스코프면 직전 노드에 blockedBy(체인), parallel/단일은 없음(형제).
+        // blockedBy 통로: opts.blockedBy(명시적 — draft Hunt/Audit 순서: blockedBy=항목 nodeId들. main.js relay 가
+        // keyOf 로 칸반 id 해석) 우선. 없으면 규칙 A pipeline 스코프(체인) / parallel·단일(형제, 없음).
         let in_pipeline = matches!(self.scopes.last(), Some(GroupScope::Pipeline { .. }));
-        let blocked_by = match self.scopes.last() {
-            Some(GroupScope::Pipeline { prev }) => prev.clone().into_iter().collect(),
-            _ => vec![],
+        let blocked_by = match Self::opt_str_array(opts, "blockedBy") {
+            Some(ids) => ids,
+            None => match self.scopes.last() {
+                Some(GroupScope::Pipeline { prev }) => prev.clone().into_iter().collect(),
+                _ => vec![],
+            },
         };
         let schema = opts.get("schema").map(crate::interp::val_to_json).filter(|s| s.is_object());
         // 칸반 드래프트 마커(통로): 워크플로(directive)가 항목엔 badge:"검수전", 덩어리엔 isDraft,
@@ -270,6 +288,10 @@ mod tests {
             m.insert((*k).to_string(), Val::Str((*v).to_string()));
         }
         m
+    }
+    /// Val::Arr(문자열) — opts.blockedBy 등 배열 통로 테스트용.
+    fn val_arr(ids: &[&str]) -> Val {
+        Val::Arr(std::rc::Rc::new(std::cell::RefCell::new(ids.iter().map(|s| Val::Str((*s).to_string())).collect())))
     }
     /// Add 이벤트 → (kind, id, parent, blocked_by).
     fn adds(h: &WorkflowHost) -> Vec<(String, String, Option<String>, Vec<String>)> {
@@ -468,6 +490,22 @@ mod tests {
                 assert_eq!(parent.as_deref(), Some("g0"));
                 assert_eq!(prompt, "재고 차감 검증 프롬프트", "항목 prompt=verifyPrompt(exec-one 입력)");
                 assert_eq!(badge.as_deref(), Some("검수전"));
+            }
+        }
+    }
+
+    #[test]
+    fn opts_blocked_by_explicit_for_hunt_audit_order() {
+        // [모델 B] opts.blockedBy(명시적 — draft Hunt/Audit: blockedBy=항목 nodeId들) → NodeEvent.blocked_by.
+        // 없으면 Hunt 가 항목 검증 전 ready 되는 버그. main.js relay 가 keyOf 로 칸반 id 해석.
+        let mut h = host();
+        let mut o = opts(&[("kind", "task"), ("nodeId", "hunt"), ("title", "누락 탐색")]);
+        o.insert("blockedBy".into(), val_arr(&["g0i0", "g0i1", "g1i0"]));
+        h.agent("hunt", &o).unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { blocked_by, id, .. } => {
+                assert_eq!(id, "hunt");
+                assert_eq!(blocked_by, &vec!["g0i0".to_string(), "g0i1".to_string(), "g1i0".to_string()], "opts.blockedBy → blocked_by(순서 보장)");
             }
         }
     }
