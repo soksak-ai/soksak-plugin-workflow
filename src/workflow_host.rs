@@ -13,7 +13,9 @@ use crate::interp::{to_string, Host, Val};
 use std::collections::BTreeMap;
 
 /// 발행되는 칸반 노드 이벤트(→ JSON line → main.js → soksak-plugin-kanban node.add/edit).
-#[derive(Debug, Clone, PartialEq)]
+/// JSON: {"ev":"add"|"status", ...} (camelCase: blockedBy). main.js 가 ev 로 분기.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "ev", rename_all = "lowercase")]
 pub enum NodeEvent {
     Add {
         id: String,

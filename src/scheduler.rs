@@ -8,6 +8,10 @@
 //!
 //! 이 모듈은 *판정 코어*(동기). 실제 동시 실행(claude -p, tokio)·칸반 갱신은 상위(run loop)가 얹는다.
 
+/// 동시 실행 기본 상한 — 에이전트 한계(동시 claude -p 수·검색 529·rate limit) 회피.
+/// 실행 시 파람(CLI --concurrency / 워크플로 args.concurrency)으로 덮어쓴다.
+pub const DEFAULT_CONCURRENCY: usize = 8;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TaskNode {
     pub id: String,
@@ -92,6 +96,17 @@ impl Dag {
     where
         F: Fn(&TaskNode) -> String + Sync,
     {
+        self.run_capped(exec, usize::MAX)
+    }
+
+    /// run_capped — concurrency 상한을 둔 실행. 한 라운드의 준비 노드를 **conc 크기 wave** 로
+    /// 나눠 동시 실행한다(에이전트 한계: 동시 claude -p 수·529·rate limit → 물리적 동시 제한).
+    /// 논리적 병렬(blockedBy 없음)은 그대로, 물리적 동시는 conc 로 제한 — "병렬 안 순차 wave".
+    pub fn run_capped<F>(&mut self, exec: &F, concurrency: usize) -> usize
+    where
+        F: Fn(&TaskNode) -> String + Sync,
+    {
+        let conc = concurrency.max(1);
         let mut rounds = 0;
         loop {
             let ready = self.ready();
@@ -100,11 +115,14 @@ impl Dag {
             }
             rounds += 1;
             let batch: Vec<TaskNode> = ready.iter().filter_map(|id| self.get(id).cloned()).collect();
-            // 같은 라운드의 준비 노드들을 동시 실행(진짜 병렬).
-            let results: Vec<(String, String)> = std::thread::scope(|s| {
-                let handles: Vec<_> = batch.iter().map(|n| s.spawn(move || (n.id.clone(), exec(n)))).collect();
-                handles.into_iter().map(|h| h.join().expect("exec thread panicked")).collect()
-            });
+            let mut results: Vec<(String, String)> = Vec::with_capacity(batch.len());
+            for wave in batch.chunks(conc) {
+                let w: Vec<(String, String)> = std::thread::scope(|s| {
+                    let handles: Vec<_> = wave.iter().map(|n| s.spawn(move || (n.id.clone(), exec(n)))).collect();
+                    handles.into_iter().map(|h| h.join().expect("exec thread panicked")).collect()
+                });
+                results.extend(w);
+            }
             for (id, res) in results {
                 if let Some(n) = self.nodes.iter_mut().find(|x| x.id == id) {
                     n.status = "done".into();
@@ -238,5 +256,33 @@ mod tests {
         let mut dag = Dag::new(vec![TaskNode::new("a", None, &[], "todo")]);
         dag.run(&|n| format!("done:{}", n.id));
         assert_eq!(dag.get("a").unwrap().body, "done:a");
+    }
+
+    #[test]
+    fn run_capped_limits_physical_concurrency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // 준비 노드 6개(전부 동시 가능)지만 conc=2 → 물리적 동시 ≤ 2(wave).
+        let mut dag = Dag::new((0..6).map(|i| TaskNode::new(&format!("n{i}"), None, &[], "todo")).collect());
+        let active = AtomicUsize::new(0);
+        let max_seen = AtomicUsize::new(0);
+        dag.run_capped(
+            &|_n| {
+                let a = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max_seen.fetch_max(a, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                active.fetch_sub(1, Ordering::SeqCst);
+                "r".into()
+            },
+            2,
+        );
+        assert!(dag.all_done());
+        assert!(max_seen.load(Ordering::SeqCst) <= 2, "동시 실행 ≤ concurrency(2)");
+    }
+
+    #[test]
+    fn run_capped_zero_treated_as_one() {
+        let mut dag = Dag::new(vec![TaskNode::new("a", None, &[], "todo")]);
+        dag.run_capped(&|_| "r".into(), 0); // 0 → 1 로 보정
+        assert!(dag.all_done());
     }
 }
