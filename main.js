@@ -222,9 +222,9 @@ export default {
           id: RECONCILE_ID,
           trigger: { kind: "reconcile" },
           command: RECONCILE_CMD,
-          // exec-one(LLM)이 길어도 발화가 TIMEOUT 으로 중복 실행 안 되게 넉넉히(코어가 [1s,600s] 클램프 → 600s).
-          // timeout_ms 동안 lease 유지 → 중복 0. exec-one 은 그 안에 끝나도록 provider 타임아웃 590s 로 맞춤.
-          timeout_ms: 600000,
+          // 천장 일치: provider 캡=ipc 클램프=register timeout_ms=3600s(1시간). 검색 fan-out 단일 턴 30분+ 수용.
+          // timeout_ms 동안 lease 유지 → 발화 timeout 으로 중복 실행 0(셋 일치라야 성립).
+          timeout_ms: 3600000,
           // 529 과부하 등 일시 실패 backoff 재시도(즉시 재시도 X — 지연 후 자연 복구). 실패=reconcileTick ok:false.
           retry: { max: 5, base_ms: 3000, max_ms: 60000 },
         });

@@ -20,8 +20,9 @@ pub struct AgentRequest<'a> {
     pub model: &'a str,
     /// 허용 tool(기본 빈 = 순수 생성). 일부 agent(WebSearch 등)는 명시.
     pub allowed_tools: Vec<String>,
-    /// claude 호출 하드캡(초). hung 호출이 영원히 안 막게. exec-one 은 코어 스케줄러 timeout(600s) 클램프
-    /// 아래(590s)로 — 발화 timeout 전에 자체 종료해 lease 중복 실행 0. 일반 interp 실행은 900s.
+    /// claude 호출 하드캡(초). hung 호출이 영원히 안 막게 — 단 검색 fan-out 단일 턴이 30분 넘을 수 있어
+    /// 넉넉히 3600s(1시간). exec-one 은 코어와 천장 일치: provider 캡=register timeout_ms=ipc 클램프=3600s.
+    /// 셋 일치라야 발화 timeout 으로 lease 중복 실행이 안 난다.
     pub timeout_secs: u64,
 }
 
