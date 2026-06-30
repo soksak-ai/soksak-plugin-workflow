@@ -503,6 +503,23 @@ mod tests {
     }
 
     #[test]
+    fn claude_emit_host_publish_carries_blockedby_and_description() {
+        // [exec-stage 경로] ClaudeEmitHost.publish 가 opts.blockedBy→ev.blocked_by + opts.description→ev.description 를
+        // 함께 emit(publish 분기 = WorkflowHost.agent 위임). 없으면 Hunt 가 항목 검증 전 ready(B) + 요건설명 표시 깨짐(A).
+        let mut h = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
+        let mut o = opts(&[("kind", "task"), ("stage", "hunt"), ("nodeId", "hunt"), ("title", "누락 탐색"), ("description", "전체 원장 누락 탐색")]);
+        o.insert("publish".into(), Val::Bool(true));
+        o.insert("blockedBy".into(), val_arr(&["g0i0", "g0i1"]));
+        h.agent("", &o).unwrap();
+        match &h.wh.events[0] {
+            NodeEvent::Add { blocked_by, description, .. } => {
+                assert_eq!(blocked_by, &vec!["g0i0".to_string(), "g0i1".to_string()], "exec-stage publish 가 opts.blockedBy emit(Hunt/Audit 순서)");
+                assert_eq!(description, "전체 원장 누락 탐색", "exec-stage publish 가 opts.description emit(규칙 B 요건설명 표시)");
+            }
+        }
+    }
+
+    #[test]
     fn opts_blocked_by_explicit_for_hunt_audit_order() {
         // [모델 B] opts.blockedBy(명시적 — draft Hunt/Audit: blockedBy=항목 nodeId들) → NodeEvent.blocked_by.
         // 없으면 Hunt 가 항목 검증 전 ready 되는 버그. main.js relay 가 keyOf 로 칸반 id 해석.
