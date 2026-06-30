@@ -5,7 +5,7 @@
 
 use crate::interp::{json_to_val, val_to_json, Host, Val};
 use crate::lang::Language;
-use crate::provider::{run_agent, AgentRequest};
+use crate::provider::{run_agent, run_agent_text, AgentRequest};
 use serde_json::{json, Value as Json};
 use std::collections::BTreeMap;
 
@@ -116,8 +116,15 @@ impl Host for ClaudeHost {
         let label = opt_str(opts, "label").unwrap_or_default();
         let full = build_prompt(prompt, opts, self.lang.as_ref());
         eprintln!("[soksak] agent {label:?} (model={model}) → claude -p");
-        match run_agent(&AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone() }, &self.env) {
-            Ok(out) => Ok(json_to_val(&out)),
+        let req = AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone() };
+        // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트 그대로 — plain agent 에 JSON 파싱 강요 금지.
+        let res = if opts.get("schema").is_some() {
+            run_agent(&req, &self.env).map(|out| json_to_val(&out))
+        } else {
+            run_agent_text(&req, &self.env).map(Val::Str)
+        };
+        match res {
+            Ok(v) => Ok(v),
             // agent 실패 → null(engine 계약: agent 는 실패 시 null).
             Err(e) => {
                 eprintln!("[soksak] agent {label:?} 실패 → null: {e}");
