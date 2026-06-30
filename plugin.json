@@ -15,6 +15,10 @@
       {
         "name": "workflow.run",
         "title": "Run workflow → 칸반"
+      },
+      {
+        "name": "workflow.reconcile",
+        "title": "Reconcile — ready 노드 exec-one 실행(스케줄러 발화)"
       }
     ]
   }
