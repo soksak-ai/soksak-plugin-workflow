@@ -65,10 +65,10 @@ export function execResultToEdit(execOut) {
   return valid ? { badge: oxf, result } : { result };
 }
 
-/** reconcile 한 틱 — ready 1개를 exec-one 으로 처리(타임아웃 안전). 진척 시 poke 로 다음 깨움.
- *  deps(의존 주입 — 테스트 가능): listNodes() · getNode(id) · editNode(id,fields) · execOne(body) · poke().
- *  반환에 ok 포함 — 코어 재시도 판정(ok != true → backoff 재시도). exec 실패(529/timeout)는 throw 말고
- *  ok:false 로 surface(노드 미변경 → 멱등, 코어가 backoff 후 재발화). */
+/** reconcile 한 틱 — ready 1개를 처리(타임아웃 안전, 프로세스-생존). 진척 시 poke 로 다음 깨움.
+ *  분기(모델 B): kind=task(Generate/Hunt/Audit) → exec-stage(claude+자식 노드 발행) / 그 외(항목) → exec-one(검증→배지).
+ *  deps(의존 주입 — 테스트 가능): listNodes() · getNode(id) · editNode(id,fields) · execOne(body) · execStage(body) ·
+ *  addNode(ev) · poke(). 반환 ok — 코어 재시도 판정(ok!=true → backoff). exec 실패는 throw 말고 ok:false(노드 미변경=멱등). */
 export async function reconcileTick(deps) {
   const listed = await deps.listNodes();
   const nodes = (listed && listed.nodes) || [];
@@ -76,7 +76,13 @@ export async function reconcileTick(deps) {
   if (ready.length === 0) return { ok: true, processed: 0 };
   const target = ready[0]; // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
   const full = await deps.getNode(target.id);
-  const body = (full && full.node && full.node.body) || "";
+  const node = (full && full.node) || {};
+  const body = node.body || "";
+  // kind=task → exec-stage 로 stage 실행 후 자식 노드 동적 발행(generate→그룹/항목, hunt→추가항목).
+  if (target.kind === "task") {
+    return reconcileStage(deps, target, body);
+  }
+  // 항목 검증 — exec-one(verifyPrompt) → 배지.
   let execOut;
   try {
     execOut = await deps.execOne(body);
@@ -89,6 +95,58 @@ export async function reconcileTick(deps) {
   // 진척(배지 확정)했을 때만 다음 틱 깨움 — 무판정으로 self-poke 하면 tight loop. 외부/부팅이 재시도.
   if (edit.badge) await deps.poke();
   return { ok: true, processed: 1, id: target.id, badge: edit.badge || null };
+}
+
+/** 발행 이벤트(ev) → 칸반 node.add 파라미터(공유 — 발행 relay·exec-stage 자식 relay 동일).
+ *  parentId/blockedBy 는 호출자가 keyOf 로 미리 해결해 넘긴다. body = exec-one 입력(prompt/schema) 또는 ev.body. */
+export function buildAddParams(ev, parentId, blockedBy) {
+  const execInput = ev.prompt
+    ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
+    : ev.body || "";
+  const params = {
+    title: ev.title || ev.kind,
+    parentId,
+    body: execInput,
+    blockedBy: blockedBy || [],
+    locked: true,
+    type: "task",
+  };
+  if (ev.kind) params.kind = ev.kind; // free-form — reconcile 가 stage 작업 식별에 씀
+  if (ev.badge) params.badge = ev.badge;
+  if (ev.is_draft) params.isDraft = true;
+  if (ev.parent_draft_id) params.parentDraftId = ev.parent_draft_id;
+  return params;
+}
+
+/** reconcileStage — kind=task 노드를 exec-stage 로 실행 → 자식 노드 발행 + 덩어리 갱신 + status=done(멱등) + poke.
+ *  exec-stage 산출 = { children:[add 이벤트…], result:<워크플로 return> }. 실패는 ok:false(노드 미변경)→backoff.
+ *  자식 부모 ref 해결: 배치 keyOf(로컬 emit id→칸반 id) / 기존 칸반 id(chunkRef)는 그대로. addNode(params)→칸반 id. */
+async function reconcileStage(deps, target, body) {
+  let staged;
+  try {
+    staged = await deps.execStage(body);
+  } catch (e) {
+    return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+  }
+  const children = (staged && staged.children) || [];
+  const keyOf = new Map();
+  for (const ev of children) {
+    const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
+    const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
+    const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy));
+    if (nodeId) keyOf.set(ev.id, nodeId);
+  }
+  // 덩어리 갱신: generate→title, audit→verdict(result). 덩어리 = stage 노드의 parent.
+  const res = staged && staged.result;
+  if (res && typeof res === "object" && target.parentId) {
+    const chunkEdit = {};
+    if (typeof res.chunkTitle === "string" && res.chunkTitle) chunkEdit.title = res.chunkTitle;
+    if (typeof res.verdict === "string" && res.verdict) chunkEdit.result = res.verdict;
+    if (Object.keys(chunkEdit).length) await deps.editNode(target.parentId, chunkEdit);
+  }
+  await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
+  await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
+  return { ok: true, processed: 1, id: target.id, stage: true, published: children.length };
 }
 
 // ── app 연결(런타임) ──
@@ -113,6 +171,39 @@ function execOne(app, exe, env, body) {
           } catch {
             reject(new Error(`exec-one 출력 JSON 파싱 실패: ${out.slice(0, 200)}`));
           }
+        });
+        await app.process.write(handle, body);
+        if (app.process.closeStdin) await app.process.closeStdin(handle);
+      })
+      .catch(reject);
+  });
+}
+
+/** exec-stage spawn — stdin {skeleton, stage, args} 쓰고 stdout(자식 {ev:add} JSON line + 최종 {ev:result})
+ *  파싱 → { children:[add…], result }. lease=프로세스-생존: onExit 까지 대기. env=인증(claude 실행하므로 필요). */
+function execStage(app, exe, env, body) {
+  return new Promise((resolve, reject) => {
+    let out = "";
+    const dec = new TextDecoder();
+    const opts = env && typeof env === "object" ? { env } : {};
+    Promise.resolve(app.process.spawn(exe, ["exec-stage", "--lang", "ko"], opts))
+      .then(async (handle) => {
+        app.process.onData(handle, (b) => {
+          out += dec.decode(b, { stream: true });
+        });
+        app.process.onExit(handle, (code) => {
+          if (code !== 0) return reject(new Error(`exec-stage exit ${code}`));
+          const children = [];
+          let result = null;
+          for (const line of out.split("\n")) {
+            const t = line.trim();
+            if (!t.startsWith("{")) continue;
+            let ev;
+            try { ev = JSON.parse(t); } catch { continue; }
+            if (ev.ev === "add") children.push(ev);
+            else if (ev.ev === "result") result = ev.value;
+          }
+          resolve({ children, result });
         });
         await app.process.write(handle, body);
         if (app.process.closeStdin) await app.process.closeStdin(handle);
@@ -159,24 +250,7 @@ export default {
                 // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
                 const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
                 const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
-                // 칸반 Node.body = 워크플로 실행 지시(prompt/schema) — reconcile 가 exec-one stdin 으로 그대로 파이프.
-                const execInput = ev.prompt
-                  ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
-                  : ev.body || "";
-                const params = {
-                  title: ev.title || ev.kind,
-                  parentId,
-                  body: execInput,
-                  blockedBy,
-                  locked: true,
-                  type: "task",
-                };
-                // node kind(free-form) — reconcile 가 stage 작업(task) 식별에 씀(결정1·2). 칸반에 taxonomy 안 박음.
-                if (ev.kind) params.kind = ev.kind;
-                // 칸반 드래프트 계약(Phase 2): 마커는 드래프트 노드에만 — 일반 노드엔 안 넣음(보드 오염 방지).
-                if (ev.badge) params.badge = ev.badge;
-                if (ev.is_draft) params.isDraft = true;
-                if (ev.parent_draft_id) params.parentDraftId = ev.parent_draft_id;
+                const params = buildAddParams(ev, parentId, blockedBy); // 발행 relay·exec-stage relay 공유
                 const r = await app.commands.execute(KANBAN + ".node.add", params);
                 if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
               }
@@ -232,8 +306,14 @@ export default {
             listNodes: () => app.commands.execute(KANBAN + ".node.list", {}),
             getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
             editNode: (id, fields) => app.commands.execute(KANBAN + ".node.edit", { node: id, ...fields }),
-            // lease=프로세스-생존: exec-one 이 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 zombie_backstop 으로만 관리.
+            // lease=프로세스-생존: exec-one/exec-stage 가 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 backstop 으로만 관리.
             execOne: (body) => execOne(app, runtime.bin, runtime.env, body),
+            execStage: (body) => execStage(app, runtime.bin, runtime.env, body),
+            // exec-stage 자식 노드 발행 → 칸반 node.add, 칸반 id 반환(reconcileStage 가 배치 keyOf 로 부모 잇게).
+            addNode: async (params) => {
+              const r = await app.commands.execute(KANBAN + ".node.add", params);
+              return r && r.nodeId;
+            },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).

@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, classifyResult } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, classifyResult, buildAddParams } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -53,6 +53,28 @@ test("pickReady — 빈/비배열 안전", () => {
   assert.deepEqual(pickReady(null), []);
 });
 
+test("buildAddParams — 항목(prompt/schema)은 body=exec입력, kind/badge 통과", () => {
+  const p = buildAddParams(
+    { id: "i1", kind: "item", title: "재고 차감", description: "주문 시 차감", prompt: "verify…", schema: { type: "object" }, badge: "검수전" },
+    "k-1",
+    [],
+  );
+  assert.equal(p.title, "재고 차감");
+  assert.equal(p.parentId, "k-1");
+  assert.equal(p.kind, "item");
+  assert.equal(p.badge, "검수전");
+  assert.deepEqual(JSON.parse(p.body), { prompt: "verify…", schema: { type: "object" } }, "body=exec-one 입력");
+  assert.equal(p.locked, true);
+});
+
+test("buildAddParams — 그룹(prompt 없음)은 body=ev.body, 드래프트 마커 없음", () => {
+  const p = buildAddParams({ id: "g0", kind: "group", title: "재고", category: "재고" }, "chunk-7", []);
+  assert.equal(p.kind, "group");
+  assert.equal(p.body, "");
+  assert.equal(p.badge, undefined, "그룹은 badge 없음");
+  assert.equal(p.isDraft, undefined);
+});
+
 test("classifyResult — 스테이지 산출 모양으로 분기(모델 B)", () => {
   assert.equal(classifyResult({ title: "약국", groups: [] }), "generate");
   assert.equal(classifyResult({ additions: [{ title: "x" }] }), "hunt");
@@ -81,9 +103,9 @@ test("execResultToEdit — oxf 없으면 result 만(badge 미변경)", () => {
   assert.equal(e.result, JSON.stringify({ items: [1, 2] }));
 });
 
-// reconcileTick — fake deps 로 오케스트레이션 검증.
-function fakeDeps(nodes, execOut) {
-  const calls = { get: [], edit: [], exec: [], poke: 0 };
+// reconcileTick — fake deps 로 오케스트레이션 검증. staged = exec-stage 산출(task 경로용).
+function fakeDeps(nodes, execOut, staged) {
+  const calls = { get: [], edit: [], exec: [], stage: [], add: [], poke: 0 };
   const byId = new Map(nodes.map((n) => [n.id, n]));
   return {
     calls,
@@ -99,6 +121,14 @@ function fakeDeps(nodes, execOut) {
     execOne: async (body) => {
       calls.exec.push(body);
       return execOut;
+    },
+    execStage: async (body) => {
+      calls.stage.push(body);
+      return staged;
+    },
+    addNode: async (params) => {
+      calls.add.push(params);
+      return "k-" + calls.add.length; // 가짜 칸반 nodeId
     },
     poke: async () => {
       calls.poke += 1;
@@ -154,4 +184,45 @@ test("reconcileTick — exec 실패(529)면 ok:false·노드 미변경·poke 안
   assert.equal(r.processed, 0);
   assert.equal(deps.calls.edit.length, 0, "노드 미변경(멱등 — 검수전 유지)");
   assert.equal(deps.calls.poke, 0, "실패는 self-poke 안 함");
+});
+
+test("reconcileTick — kind=task → exec-stage: 자식 발행 + 덩어리 title + status=done + poke", async () => {
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: '{"stage":"generate"}' }];
+  const staged = {
+    children: [
+      { ev: "add", id: "g0", kind: "group", parent: "chunk-7", title: "재고" },
+      { ev: "add", id: "g0i0", kind: "item", parent: "g0", title: "재고 차감", prompt: "verify…", badge: "검수전" },
+    ],
+    result: { chunkTitle: "약국 재고 SaaS", titleOrigin: "agent" },
+  };
+  const deps = fakeDeps(nodes, null, staged);
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.stage, true);
+  assert.equal(r.published, 2, "그룹+항목 발행");
+  assert.deepEqual(deps.calls.stage, ['{"stage":"generate"}'], "node.body 를 exec-stage 에 그대로");
+  assert.equal(deps.calls.add.length, 2, "자식 노드 2개 relay→node.add");
+  assert.equal(deps.calls.add[0].parentId, "chunk-7", "그룹 parent=기존 덩어리 ref 그대로");
+  assert.equal(deps.calls.add[1].kind, "item");
+  assert.equal(deps.calls.add[1].parentId, "k-1", "항목 parent=그룹의 칸반 id(배치 keyOf 해결)");
+  // 덩어리(chunk-7) title 갱신 + Generate 노드 status=done.
+  const chunkEdit = deps.calls.edit.find((e) => e.id === "chunk-7");
+  assert.equal(chunkEdit.fields.title, "약국 재고 SaaS", "덩어리 title=generate 결과");
+  const doneEdit = deps.calls.edit.find((e) => e.id === "gen");
+  assert.equal(doneEdit.fields.status, "done", "stage 작업 done(재-pick 0)");
+  assert.equal(deps.calls.poke, 1, "발행된 항목 깨움");
+  assert.equal(deps.calls.exec.length, 0, "task 는 exec-one 안 탐");
+});
+
+test("reconcileTick — kind=task exec-stage 실패면 ok:false·노드 미변경(backoff)", async () => {
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: "{}" }];
+  const deps = fakeDeps(nodes, null, null);
+  deps.execStage = async () => {
+    throw new Error("exec-stage exit 1");
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false);
+  assert.equal(deps.calls.add.length, 0, "실패 시 발행 0");
+  assert.equal(deps.calls.edit.length, 0, "status=done 안 함(재시도 대상 유지)");
+  assert.equal(deps.calls.poke, 0);
 });
