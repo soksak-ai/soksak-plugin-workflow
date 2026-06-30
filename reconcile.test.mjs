@@ -272,6 +272,37 @@ test("reconcileTick — kind=task → exec-stage: 자식 발행 + 덩어리 titl
   assert.equal(deps.calls.exec.length, 0, "task 는 exec-one 안 탐");
 });
 
+test("reconcileTick — generate 재진입: Hunt/Audit 이미 발행됐으면 execStage 재실행·중복 0 (② 멱등 가드)", async () => {
+  // 현실 재진입: generate 가 그룹/항목 + Hunt/Audit task 까지 다 발행했는데 status=done commit 직전 실패(예외/크래시) → 재pick.
+  // generate 가 *마지막에* 덩어리 자식으로 발행하는 Hunt/Audit task 가 이미 있으면 = generate 발행 완료 →
+  // execStage 재실행·중복 발행 차단(자식 멱등키 부재 — kanban node.add 가 매번 새 id. 비결정 generate 는 콘텐츠 dedup 불가).
+  const nodes = [
+    { id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"generate"}' },
+    { id: "g0", kind: "group", status: "todo", parentId: "chunk" },
+    { id: "g0i0", kind: "item", status: "todo", parentId: "g0", badge: "검수전", blockedBy: [] },
+    { id: "hunt", kind: "task", status: "todo", parentId: "chunk", blockedBy: ["g0i0"] },
+    { id: "audit", kind: "task", status: "todo", parentId: "chunk", blockedBy: ["g0i0", "hunt"] },
+  ];
+  const staged = { children: [{ ev: "add", id: "g0", kind: "group", parent: "chunk", title: "중복!" }], result: {} };
+  const deps = fakeDeps(nodes, null, staged);
+  const r = await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 0, "발행 완료 마커(Hunt/Audit) 있으면 execStage 재실행 안 함");
+  assert.equal(deps.calls.add.length, 0, "중복 발행 0");
+  const done = deps.calls.edit.find((e) => e.id === "gen");
+  assert.equal(done.fields.status, "done", "재진입은 status=done 만 멱등 재확정");
+  assert.equal(r.ok, true);
+});
+
+test("reconcileTick — generate 첫 실행(마커 없음)은 정상 발행(가드 오발 없음)", async () => {
+  // 덩어리에 sibling task(Hunt/Audit)가 없으면 generate 미발행 → 정상 execStage+발행. ② 가드가 첫 실행을 막으면 안 됨.
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"generate"}' }];
+  const staged = { children: [{ ev: "add", id: "g0", kind: "group", parent: "chunk", title: "재고" }], result: {} };
+  const deps = fakeDeps(nodes, null, staged);
+  await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 1, "첫 실행은 execStage 정상 호출");
+  assert.equal(deps.calls.add.length, 1, "자식 발행됨");
+});
+
 test("reconcileTick — exec-stage 자식 relay 가 blockedBy 를 keyOf 로 칸반 id 해석(Hunt 순서)", async () => {
   // [B ② 절반] 자식 ev.blocked_by(로컬 항목 id) → keyOf 해석 → node.blockedBy(칸반 id).
   // Hunt 가 항목들 검증 후 ready 되려면 이 배선 필수 — 없으면 Hunt 가 항목 검증 전 ready 버그.
