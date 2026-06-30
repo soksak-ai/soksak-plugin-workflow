@@ -10,7 +10,7 @@ export const meta = {
 //   트리 중첩 = opts.nodeId(자기 id) + opts.parent(부모 ref). chunkRef=기존 덩어리 kanban id(exec-stage args). blockedBy=opts.blockedBy(→ev.blockedBy, main.js keyOf 해석).
 //   규칙 B 3축: title(요건명)=opts.title / description(요건설명)=opts.description / body(exec 입력)=agent 1번째 인자.
 //     → 항목(kind:item) NodeEvent: title→node.title, description→node.description(표시), prompt(verifyPrompt)→node.body(exec-one 입력). verifyPrompt 단일진실(draft.js).
-//     → stage 노드(kind:task) 의 agent 1번째 인자 = stage 이름('generate'|'hunt'|'audit') → ev.prompt → main.js 가 {skeleton,stage,args} task body 임베드(draft.js 무관여).
+//     → stage 노드(kind:task) 의 stage = opts.stage('generate'|'hunt'|'audit') → ev.stage 필드 → main.js 가 {skeleton,stage,args} task body 임베드(draft.js 무관여). prompt 는 비운다.
 //   흐름: --emit 골격(덩어리 isDraft + Generate 노드 kind:task) → reconcile(kind:task)→exec-stage(generate) → 그룹/항목 + Hunt/Audit task 노드 발행
 //         → 각 항목 reconcile(kind:item)→exec-one(verifyPrompt)→badge=oxf → Hunt/Audit reconcile→exec-stage(hunt/audit, ledger=main.js materialize).
 //   클론 서브셋: ForOf+While 만(C-style for 금지), 정규식 금지, schema named const, Date.now/Math.random 금지.
@@ -163,9 +163,9 @@ if (STAGE === 'generate') {
     }
     gi = gi + 1
   }
-  // Hunt/Audit task 노드 발행 — agent 1번째 인자=stage 이름(→ev.prompt→task body.stage). blockedBy 로 순서(Hunt=항목 검증 후, Audit=항목+Hunt 후).
-  await agent('hunt', { publish: true, kind: 'task', nodeId: 'hunt', parent: CHUNK_REF, title: '누락 탐색', blockedBy: itemIds })
-  await agent('audit', { publish: true, kind: 'task', nodeId: 'audit', parent: CHUNK_REF, title: '부모 감사', blockedBy: itemIds.concat(['hunt']) })
+  // Hunt/Audit task 노드 발행 — stage=opts.stage(→ev.stage 필드→task body.stage). prompt 는 비운다. blockedBy 로 순서(Hunt=항목 검증 후, Audit=항목+Hunt 후).
+  await agent('', { publish: true, kind: 'task', stage: 'hunt', nodeId: 'hunt', parent: CHUNK_REF, title: '누락 탐색', blockedBy: itemIds })
+  await agent('', { publish: true, kind: 'task', stage: 'audit', nodeId: 'audit', parent: CHUNK_REF, title: '부모 감사', blockedBy: itemIds.concat(['hunt']) })
   return { chunkTitle: (tree && tree.title) || '', titleOrigin: (tree && tree.titleOrigin) || 'agent' }   // reconcileStage: chunkTitle → 덩어리 title 갱신
 }
 
@@ -192,8 +192,8 @@ if (STAGE === 'audit') {
   return { verdict: (audit && audit.verdict) || '(감사 결과 없음)', complete: !!(audit && audit.complete) }
 }
 
-// ── skeleton(--emit, claude 0): 덩어리(isDraft) + Generate 노드(kind:task, 1번째 인자='generate'). main.js 가 task body 에 skeleton+directive 임베드. ──
+// ── skeleton(--emit, claude 0): 덩어리(isDraft) + Generate 노드(kind:task, stage:'generate'). main.js 가 task body 에 skeleton+directive 임베드. ──
 await agent('', { publish: true, kind: 'chunk', nodeId: CHUNK_REF, isDraft: true, parentDraftId: parentDraftId || '',
   title: (args && args.title) || '구체화 덩어리', description: DIRECTIVE })   // 발행(덩어리 — title 은 generate 가 갱신)
-await agent('generate', { publish: true, kind: 'task', nodeId: 'gen', parent: CHUNK_REF, title: '요건 도출' })   // 발행(Generate 노드: 1번째 인자='generate'→ev.prompt→task body.stage. skeleton/directive 는 main.js relay 가 임베드)
+await agent('', { publish: true, kind: 'task', stage: 'generate', nodeId: 'gen', parent: CHUNK_REF, title: '요건 도출' })   // 발행(Generate 노드: stage='generate'→ev.stage 필드→task body.stage. skeleton/directive 는 main.js relay 가 임베드)
 return { emitted: 'skeleton', chunk: CHUNK_REF }

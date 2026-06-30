@@ -31,6 +31,10 @@ pub enum NodeEvent {
         title: String,
         description: String, // 규칙 B: 요건 설명(사람용, 칸반 description 필드). exec 입력 아님 — body 와 별개 축.
         prompt: String, // agent 프롬프트(verifyPrompt 등). main.js relay 가 schema 와 묶어 칸반 body(exec-one 입력)로.
+        // task 노드(generate/hunt/audit) 의 stage — opts.stage 통로. main.js relay 가 stage 필드로 exec-stage body 임베드.
+        // 일반/항목/그룹 노드는 없음(생략). task 노드 prompt 는 비운다 — stage 가 별도 축.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stage: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,6 +163,8 @@ impl Host for WorkflowHost {
         // node kind/category — draft 모델 B 가 opts 로 박는다(chunk/group/item/task + 분류 차원). 미지정=agent.
         let kind = Self::opt_marker(opts, "kind").unwrap_or_else(|| "agent".into());
         let category = Self::opt_marker(opts, "category");
+        // task 노드 stage(generate/hunt/audit) — opts.stage. 일반/항목/그룹은 없음 → 생략.
+        let stage = Self::opt_marker(opts, "stage");
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
@@ -172,6 +178,7 @@ impl Host for WorkflowHost {
             badge,
             is_draft,
             parent_draft_id,
+            stage,
         });
         // pipeline 체인 전진(같은 item 의 다음 stage 가 이 노드에 blockedBy).
         if in_pipeline {
@@ -200,6 +207,7 @@ impl Host for WorkflowHost {
             badge: None,
             is_draft: false,
             parent_draft_id: None,
+            stage: None, // phase 컨테이너는 stage 작업 아님.
         });
         self.stack = vec![id.clone()]; // phase 는 최상위 단계 — stack 리셋
         self.prev_phase = Some(id);
@@ -508,6 +516,29 @@ mod tests {
                 assert_eq!(blocked_by, &vec!["g0i0".to_string(), "g0i1".to_string(), "g1i0".to_string()], "opts.blockedBy → blocked_by(순서 보장)");
             }
         }
+    }
+
+    #[test]
+    fn opts_stage_to_node_stage_field() {
+        // [모델 B] task 노드의 stage(generate/hunt/audit)는 opts.stage → NodeEvent.stage 필드.
+        // prompt 가 아니다 — task 노드 prompt 는 비운다(main.js relay 가 stage 필드로 exec-stage body 임베드).
+        let mut h = host();
+        h.agent("", &opts(&[("kind", "task"), ("stage", "generate"), ("nodeId", "gen"), ("title", "요건 도출")]))
+            .unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { stage, kind, prompt, .. } => {
+                assert_eq!(stage.as_deref(), Some("generate"), "opts.stage → ev.stage 필드");
+                assert_eq!(kind, "task");
+                assert_eq!(prompt, "", "task 노드 prompt 비움(stage 는 별도 필드)");
+            }
+        }
+        // 일반 노드(stage 미지정) → stage 생략(JSON 에 안 실림 — 보드 오염 0).
+        h.agent("p", &BTreeMap::new()).unwrap();
+        match &h.events[1] {
+            NodeEvent::Add { stage, .. } => assert_eq!(stage, &None, "stage 미지정 시 생략"),
+        }
+        let js = serde_json::to_string(&h.events[1]).unwrap();
+        assert!(!js.contains("stage"), "일반 노드 JSON 엔 stage 없음: {js}");
     }
 
     #[test]

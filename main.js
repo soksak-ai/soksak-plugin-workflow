@@ -102,17 +102,19 @@ export async function reconcileTick(deps) {
 /** 발행 이벤트(ev) → 칸반 node.add 파라미터(공유 — 발행 relay·exec-stage 자식 relay 동일).
  *  세 축 분리 매핑(규칙 B): title(요건명) / description(요건 설명, 사람용) / body(exec 입력, 사람에 안 보임).
  *  parentId/blockedBy 는 호출자가 keyOf 로 미리 해결해 넘긴다. body:
- *  - kind=task(stage 작업) + taskCtx{skeleton,directive} → exec-stage 입력 {skeleton, stage(=ev.prompt), args{directive,chunkRef}}.
- *    chunkRef=부모(덩어리). main.js 가 skeleton 임베드 — draft.js 무관여.
+ *  - kind=task(stage 작업): stage=ev.stage(NodeEvent.stage 필드 — prompt 아님). taskCtx{skeleton,directive} 있으면
+ *    exec-stage 입력 {skeleton, stage, args{directive,chunkRef}}. chunkRef=부모(덩어리). main.js 가 skeleton 임베드 — draft.js 무관여.
+ *    skeleton 없으면(방어적) {stage} 만. task 노드 prompt 는 비운다.
  *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema}. prompt 없으면(그룹/덩어리) body 빈 문자열. */
 export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
   let body;
-  if (ev.kind === "task" && taskCtx && taskCtx.skeleton) {
-    body = JSON.stringify({
-      skeleton: taskCtx.skeleton,
-      stage: ev.prompt || "generate",
-      args: { directive: taskCtx.directive, chunkRef: parentId },
-    });
+  if (ev.kind === "task") {
+    const stage = ev.stage || "generate";
+    body = JSON.stringify(
+      taskCtx && taskCtx.skeleton
+        ? { skeleton: taskCtx.skeleton, stage, args: { directive: taskCtx.directive, chunkRef: parentId } }
+        : { stage }
+    );
   } else {
     body = ev.prompt
       ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
