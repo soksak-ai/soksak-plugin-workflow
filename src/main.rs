@@ -128,12 +128,15 @@ fn real_main() -> Result<(), String> {
         return Ok(());
     }
 
-    // 실행: ClaudeHost(인증 프로필). agent → claude -p.
-    let env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("ANTHROPIC_")).collect();
-    if env.is_empty() {
-        return Err("ANTHROPIC_* env 미설정 — 인증 프로필 환경을 export 하고 실행하라".to_string());
+    // 실행: ClaudeHost. agent → claude -p. 프로필 인증 변수만 통과 — 인증 프로필(ANTHROPIC_*) 또는 oauth 프로필/oauth 프로필(CLAUDE_CODE_OAUTH_TOKEN).
+    let env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("ANTHROPIC_") || k == "CLAUDE_ACCOUNT_NAME" || k == "CLAUDE_CODE_OAUTH_TOKEN")
+        .collect();
+    if !env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN" || k == "CLAUDE_CODE_OAUTH_TOKEN") {
+        return Err("프로필 인증 토큰 미설정 — 인증 프로필(ANTHROPIC_AUTH_TOKEN) 또는 oauth 프로필(CLAUDE_CODE_OAUTH_TOKEN) export 후 실행하라".to_string());
     }
-    eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p 인증 프로필)");
+    let profile = if env.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN") { "oauth 프로필/oauth 프로필" } else { "인증 프로필" };
+    eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p, 프로필={profile})");
     let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into(), lang };
     let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
     println!("{}", serde_json::to_string_pretty(&val_to_json(&result)).map_err(|e| e.to_string())?);

@@ -78,6 +78,12 @@ pub trait Host {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String>;
     fn phase(&mut self, title: &str);
     fn log(&mut self, msg: &str);
+    /// 워크플로 노드 발행용 그룹 경계 — parallel/pipeline 진입/진출(부모키·blockedBy 추적).
+    /// default no-op: 기존 Host(ClaudeHost/StubHost)는 영향 없음.
+    fn group_enter(&mut self, _kind: &str) {}
+    fn group_exit(&mut self) {}
+    /// pipeline 의 한 item 이 stage 체인을 시작/끝낼 때(blockedBy 체인 경계). default no-op.
+    fn stage_boundary(&mut self) {}
 }
 
 // 제어 흐름.
@@ -687,18 +693,22 @@ impl<'a, H: Host> Interp<'a, H> {
             None => vec![],
         };
         let mut out = Vec::with_capacity(thunks.len());
+        // 동시 그룹: 안의 agent 노드들은 서로 blockedBy 없음(형제).
+        self.host.group_enter("parallel");
         for t in thunks {
             match self.call_value(&t, vec![], scope) {
                 Ok(v) => out.push(v),
                 // 인터프리터 갭은 전파(loud). 진짜 throw 만 null(engine 계약: thunk throw→null).
                 Err(e) => {
                     if is_interp_gap(&e) {
+                        self.host.group_exit();
                         return Err(e);
                     }
                     out.push(Val::Null);
                 }
             }
         }
+        self.host.group_exit();
         Ok(Val::Arr(Rc::new(RefCell::new(out))))
     }
 
@@ -710,15 +720,19 @@ impl<'a, H: Host> Interp<'a, H> {
         let items = as_array(&args.remove(0));
         let stages = args; // 나머지 = stage 콜백들
         let mut out = Vec::with_capacity(items.len());
+        // 순차 그룹: 각 item 은 독립 stage 체인(같은 item 내 stage 간 blockedBy 체인).
+        self.host.group_enter("pipeline");
         for (idx, item) in items.into_iter().enumerate() {
             let mut prev = item.clone();
             let mut dropped = false;
+            self.host.stage_boundary(); // 새 item 체인 시작(체인 리셋).
             for st in &stages {
                 match self.call_value(st, vec![prev.clone(), item.clone(), Val::Num(idx as f64)], scope) {
                     Ok(v) => prev = v,
                     // 인터프리터 갭은 전파(loud). 진짜 throw 만 item→null 드롭(engine 계약).
                     Err(e) => {
                         if is_interp_gap(&e) {
+                            self.host.group_exit();
                             return Err(e);
                         }
                         dropped = true;
@@ -728,6 +742,7 @@ impl<'a, H: Host> Interp<'a, H> {
             }
             out.push(if dropped { Val::Null } else { prev });
         }
+        self.host.group_exit();
         Ok(Val::Arr(Rc::new(RefCell::new(out))))
     }
 

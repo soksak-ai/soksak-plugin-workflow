@@ -11,3 +11,4 @@ pub mod interp;
 pub mod lang;
 pub mod provider;
 pub mod skeleton;
+pub mod workflow_host;

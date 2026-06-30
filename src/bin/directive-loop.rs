@@ -32,6 +32,7 @@ fn main() {
     let mut directive = String::new();
     let mut store = PathBuf::from("ledger.json");
     let mut rounds: u32 = 6;
+    let mut concurrency: usize = 5; // (A)검증 병렬 배치 수. 웹서치 버스트 시 줄임.
     let mut verifier_model = "sonnet".to_string(); // glm-5.1 — 빠른 집중 검증.
     let mut exec_model = "opus".to_string(); // glm-5.2 — broad 추론.
     let mut force = false; // 이미 수렴한 store 도 강제 재개.
@@ -45,6 +46,10 @@ fn main() {
             "--rounds" => {
                 i += 1;
                 rounds = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(6);
+            }
+            "--concurrency" => {
+                i += 1;
+                concurrency = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(5);
             }
             "--verifier-model" => {
                 i += 1;
@@ -69,7 +74,7 @@ fn main() {
     if !prof.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN" || k == "ANTHROPIC_AUTH_TOKEN") {
         eprintln!("[directive-loop] 경고: 프로필 인증 토큰 미설정 — CLAUDE_CODE_OAUTH_TOKEN 또는 ANTHROPIC_AUTH_TOKEN export 필요");
     }
-    let cfg = LoopConfig { agent_env: prof, verifier_model, exec_model, max_rounds: rounds };
+    let cfg = LoopConfig { agent_env: prof, verifier_model, exec_model, max_rounds: rounds, concurrency };
 
     if let Some(parent) = store.parent() {
         let _ = std::fs::create_dir_all(parent);
