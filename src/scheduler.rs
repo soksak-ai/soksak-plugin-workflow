@@ -84,6 +84,36 @@ impl Dag {
     pub fn all_done(&self) -> bool {
         self.nodes.iter().filter(|n| !self.is_container(&n.id)).all(|n| n.status == "done")
     }
+
+    /// run — 준비 노드를 라운드마다 **동시 실행**(std::thread::scope, 진짜 병렬: claude -p 동시 spawn).
+    /// 각 노드 exec(node)→result 기록·done. blockedBy 게이트가 순차를, 무게이트가 동시를 만든다.
+    /// 반환=라운드 수(동시=1, 체인=N). 교착(준비 없는데 미완)이면 중단.
+    pub fn run<F>(&mut self, exec: &F) -> usize
+    where
+        F: Fn(&TaskNode) -> String + Sync,
+    {
+        let mut rounds = 0;
+        loop {
+            let ready = self.ready();
+            if ready.is_empty() {
+                break;
+            }
+            rounds += 1;
+            let batch: Vec<TaskNode> = ready.iter().filter_map(|id| self.get(id).cloned()).collect();
+            // 같은 라운드의 준비 노드들을 동시 실행(진짜 병렬).
+            let results: Vec<(String, String)> = std::thread::scope(|s| {
+                let handles: Vec<_> = batch.iter().map(|n| s.spawn(move || (n.id.clone(), exec(n)))).collect();
+                handles.into_iter().map(|h| h.join().expect("exec thread panicked")).collect()
+            });
+            for (id, res) in results {
+                if let Some(n) = self.nodes.iter_mut().find(|x| x.id == id) {
+                    n.status = "done".into();
+                    n.body = res; // 결과 기록(칸반 result 로 emit)
+                }
+            }
+        }
+        rounds
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +186,57 @@ mod tests {
         assert!(!dag.all_done());
         dag.set_status("c", "done");
         assert!(dag.all_done());
+    }
+
+    #[test]
+    fn run_chain_is_sequential() {
+        use std::sync::Mutex;
+        let mut dag = Dag::new(vec![
+            TaskNode::new("a", None, &[], "todo"),
+            TaskNode::new("b", None, &["a"], "todo"),
+        ]);
+        let order = Mutex::new(Vec::new());
+        let rounds = dag.run(&|n| {
+            order.lock().unwrap().push(n.id.clone());
+            "r".into()
+        });
+        assert!(dag.all_done());
+        assert_eq!(rounds, 2, "체인은 2 라운드(순차)");
+        assert_eq!(*order.lock().unwrap(), vec!["a", "b"], "blockedBy 순서 존중");
+    }
+
+    #[test]
+    fn run_parallel_is_single_round() {
+        // 무게이트 형제 → 한 라운드에 동시 실행(진짜 병렬).
+        let mut dag = Dag::new(vec![
+            TaskNode::new("a", None, &[], "todo"),
+            TaskNode::new("b", None, &[], "todo"),
+            TaskNode::new("c", None, &[], "todo"),
+        ]);
+        let rounds = dag.run(&|_| "r".into());
+        assert!(dag.all_done());
+        assert_eq!(rounds, 1, "동시: 한 라운드에 모두");
+    }
+
+    #[test]
+    fn run_group_gate_then_parallel() {
+        // P1{a} → P2{b1,b2} (P2.blockedBy=[P1]) : a 먼저(라운드1), 그 다음 b1·b2 동시(라운드2).
+        let mut dag = Dag::new(vec![
+            TaskNode::new("P1", None, &[], "todo"),
+            TaskNode::new("a", Some("P1"), &[], "todo"),
+            TaskNode::new("P2", None, &["P1"], "todo"),
+            TaskNode::new("b1", Some("P2"), &[], "todo"),
+            TaskNode::new("b2", Some("P2"), &[], "todo"),
+        ]);
+        let rounds = dag.run(&|_| "r".into());
+        assert!(dag.all_done());
+        assert_eq!(rounds, 2, "그룹 순차(P1→P2) 후 P2 안은 동시 → 2 라운드");
+    }
+
+    #[test]
+    fn run_results_recorded() {
+        let mut dag = Dag::new(vec![TaskNode::new("a", None, &[], "todo")]);
+        dag.run(&|n| format!("done:{}", n.id));
+        assert_eq!(dag.get("a").unwrap().body, "done:a");
     }
 }
