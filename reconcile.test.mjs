@@ -10,6 +10,27 @@ test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone(undefined), false);
 });
 
+test("isDone — 항목(kind=item)은 badge o/x/f 가 done(status 축 아님) — ① deadlock 방지", () => {
+  // 항목은 검증 시 badge 만 받고 status 는 영영 todo(execResultToEdit 가 badge 만 박음). status 로 done 판정하면
+  // hunt.blockedBy=[itemIds] 의 depsDone 이 영구 false → hunt/audit 영구 미실행(deadlock). 항목은 badge 로 done 판정.
+  assert.equal(isDone({ kind: "item", badge: "o", status: "todo" }), true);
+  assert.equal(isDone({ kind: "item", badge: "x", status: "todo" }), true);
+  assert.equal(isDone({ kind: "item", badge: "f", status: "todo" }), true);
+  assert.equal(isDone({ kind: "item", badge: "검수전", status: "todo" }), false, "미검증 항목은 done 아님");
+  assert.equal(isDone({ kind: "item", status: "todo" }), false, "badge 없으면 done 아님");
+});
+
+test("pickReady — 검증된 항목(badge)을 blockedBy 로 가진 hunt task 가 풀린다 — ① deadlock 해소", () => {
+  // 항목들이 검증(badge o/x)됐는데 status 는 todo. hunt 는 그 항목들에 blockedBy. ① 전엔 isDone=false 라 영구 미실행.
+  const nodes = [
+    { id: "i1", kind: "item", badge: "o", status: "todo", parentId: "g0", blockedBy: [] },
+    { id: "i2", kind: "item", badge: "x", status: "todo", parentId: "g0", blockedBy: [] },
+    { id: "hunt", kind: "task", status: "todo", parentId: "chunk", blockedBy: ["i1", "i2"] },
+  ];
+  // i1/i2 는 이미 검증(badge≠검수전)이라 제외, hunt 는 deps 충족 → ready.
+  assert.deepEqual(pickReady(nodes).map((n) => n.id), ["hunt"]);
+});
+
 test("pickReady — 검수전 ∧ leaf ∧ 의존 done 만", () => {
   const nodes = [
     { id: "a", badge: "검수전", blockedBy: [], parentId: null, status: "todo" }, // ready
@@ -249,6 +270,30 @@ test("reconcileTick — kind=task → exec-stage: 자식 발행 + 덩어리 titl
   assert.equal(doneEdit.fields.status, "done", "stage 작업 done(재-pick 0)");
   assert.equal(deps.calls.poke, 1, "발행된 항목 깨움");
   assert.equal(deps.calls.exec.length, 0, "task 는 exec-one 안 탐");
+});
+
+test("reconcileTick — exec-stage 자식 relay 가 blockedBy 를 keyOf 로 칸반 id 해석(Hunt 순서)", async () => {
+  // [B ② 절반] 자식 ev.blocked_by(로컬 항목 id) → keyOf 해석 → node.blockedBy(칸반 id).
+  // Hunt 가 항목들 검증 후 ready 되려면 이 배선 필수 — 없으면 Hunt 가 항목 검증 전 ready 버그.
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: '{"stage":"generate"}' }];
+  const staged = {
+    children: [
+      { ev: "add", id: "g0", kind: "group", parent: "chunk-7", title: "재고" }, // → k-1
+      { ev: "add", id: "g0i0", kind: "item", parent: "g0", title: "차감", prompt: "v", badge: "검수전" }, // → k-2
+      { ev: "add", id: "g0i1", kind: "item", parent: "g0", title: "동기화", prompt: "v", badge: "검수전" }, // → k-3
+      { ev: "add", id: "hunt", kind: "task", parent: "chunk-7", stage: "hunt", title: "누락 탐색", blocked_by: ["g0i0", "g0i1"] }, // → k-4
+      { ev: "add", id: "audit", kind: "task", parent: "chunk-7", stage: "audit", title: "감사", blocked_by: ["g0i0", "g0i1", "hunt"] }, // → k-5
+    ],
+    result: {},
+  };
+  const deps = fakeDeps(nodes, null, staged);
+  const r = await reconcileTick(deps);
+  assert.equal(r.published, 5);
+  const huntAdd = deps.calls.add[3];
+  assert.equal(huntAdd.kind, "task");
+  assert.deepEqual(huntAdd.blockedBy, ["k-2", "k-3"], "Hunt blockedBy=항목들 칸반 id(로컬 g0i0/g0i1 keyOf 해석)");
+  const auditAdd = deps.calls.add[4];
+  assert.deepEqual(auditAdd.blockedBy, ["k-2", "k-3", "k-4"], "Audit blockedBy=항목들+Hunt 칸반 id(keyOf 해석)");
 });
 
 test("reconcileTick — kind=task exec-stage 실패면 ok:false·노드 미변경(backoff)", async () => {

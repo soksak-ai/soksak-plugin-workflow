@@ -14,9 +14,14 @@ const RECONCILE_ID = "workflow-reconcile";
 
 // ── 순수 로직(테스트 가능 — app 의존 없음) ──
 
-/** 노드 done 판정(미존재 의존=false, 안전). */
+/** 노드 done 판정(미존재 의존=false, 안전).
+ *  항목(kind=item)은 검증 시 badge(o/x/f)만 받고 status 는 영영 todo(execResultToEdit 가 badge 만 박음) —
+ *  status 로 판정하면 hunt.blockedBy=[itemIds] 의 depsDone 이 영구 false 라 hunt/audit 가 영영 안 풀린다(deadlock).
+ *  항목은 badge 확정(o/x/f)이 done. stage 작업/그룹/덩어리는 status="done" 이 done. */
 export function isDone(node) {
-  return !!node && node.status === "done";
+  if (!node) return false;
+  if (node.kind === "item") return node.badge === "o" || node.badge === "x" || node.badge === "f";
+  return node.status === "done";
 }
 
 /** ready 노드 = blockedBy 전부 done 인 미완 실행 대상(결정2):
