@@ -1,6 +1,7 @@
-// soksak-plugin-workflow — 워크플로 런타임(rust soksak-run --kanban)을 spawn 하고,
-// 그 stdout JSON line(노드 이벤트)을 받아 soksak-plugin-kanban 의 node.add/edit 내부 command 로 중계.
+// soksak-plugin-workflow — 워크플로 런타임(rust soksak-workflow --emit)을 spawn 하고,
+// 그 stdout JSON line(발행 노드 이벤트)을 받아 soksak-plugin-kanban 의 node.add 내부 command 로 중계.
 // 발행 노드는 locked: true(스케줄러 전용). CLI 아님 — app.commands.execute(plugin.<id>.<cmd>).
+// 발행만(LLM 미호출). 실제 실행은 코어 스케줄러가 ready 노드를 soksak-workflow exec-one 으로 돌린다(Phase 3e).
 //
 // 순서 보장: onData 조각을 라인 단위로 큐에 분리(동기)하고, drain 워커가 순차 await(keyOf race 방지).
 
@@ -16,15 +17,14 @@ export default {
         params: {
           skeleton: { type: "string", description: "skeleton JSON 문자열(stdin)" },
           skeletonPath: { type: "string", description: "skeleton JSON 파일 경로(인자)" },
-          concurrency: { type: "number", description: "동시 실행 상한(기본 8)" },
-          bin: { type: "string", description: "soksak-run 바이너리 경로(기본 PATH)" },
-          env: { type: "json", description: "spawn 환경변수(예: 인증 프로필 ANTHROPIC_*)" },
+          bin: { type: "string", description: "soksak-workflow 바이너리 경로(기본 PATH)" },
+          env: { type: "json", description: "spawn 환경변수(발행만 — LLM 미호출이라 토큰 불필요)" },
         },
         returns: "{ ok }",
-        handler: async ({ skeleton, skeletonPath, concurrency, bin, env }) => {
-          const exe = bin || "soksak-run";
+        handler: async ({ skeleton, skeletonPath, bin, env }) => {
+          const exe = bin || "soksak-workflow";
           const input = skeletonPath || "-";
-          const args = [input, "--kanban", "--concurrency", String(concurrency ?? 8), "--lang", "ko"];
+          const args = [input, "--emit", "--lang", "ko"];
           const handle = await app.process.spawn(exe, args, env && typeof env === "object" ? { env } : {});
 
           const keyOf = new Map(); // 워크플로 노드 id → 칸반 노드 key

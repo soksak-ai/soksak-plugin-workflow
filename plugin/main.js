@@ -1,16 +1,16 @@
-// soksak-workflow — JS 어댑터. 추출기(추출, node) + soksak-run(실행, rust) 사이드카를
-// 묶어 commands 로 노출한다. 자체 로직 0 — 추출은 추출기, 실행/③파생은 soksak-run.
-// agent 의 실제 LLM 호출은 soksak-run 이 claude -p(인증 프로필)로 위임.
+// soksak-workflow — JS 어댑터. 추출기(추출, node) + soksak-workflow(실행, rust) 사이드카를
+// 묶어 commands 로 노출한다. 자체 로직 0 — 추출은 추출기, 실행/③파생은 soksak-workflow.
+// agent 의 실제 LLM 호출은 soksak-workflow 가 claude -p(인증 프로필)로 위임.
 //
 // 흐름(workflow.run): .workflow.js ──node 추출기 parse──▶ 골격 JSON ──fs.writeText──▶
-//   임시파일 ──soksak-run <tmp> --arg IDEA=…(인증 프로필 env)──▶ 결과 JSON.
+//   임시파일 ──soksak-workflow <tmp> --arg IDEA=…(인증 프로필 env)──▶ 결과 JSON.
 // 노출: directive.synth {idea} · workflow.run {workflowJs, idea, allowTools?}
 
 export default {
   async activate(ctx) {
     const app = ctx.app;
     const cfg = ctx.config || {};
-    const runBin = cfg.soksakRunBin || "soksak-run";
+    const runBin = cfg.soksakWorkflowBin || "soksak-workflow";
     const 추출기Cli = cfg.추출기Cli || null; // node 로 실행할 cli.js 경로
     const tmpDir = cfg.tmpDir || "/tmp";
     const 인증 프로필Env = cfg.인증 프로필Env || {};
@@ -41,10 +41,10 @@ export default {
           try {
             // 1) 추출: node 추출기/cli.js parse <workflowJs> → 골격 JSON.
             const { stdout: skeletonJson } = await runProc(app, ctx, "node", [추출기Cli, "parse", workflowJs], {});
-            // 2) 골격을 임시파일로(soksak-run 은 파일/`-` 입력).
+            // 2) 골격을 임시파일로(soksak-workflow 는 파일/`-` 입력).
             const tmp = `${tmpDir}/soksak-skeleton-${Date.now()}.json`;
             await app.fs.writeText(tmp, skeletonJson);
-            // 3) 실행: soksak-run <tmp> --arg IDEA=<idea> [--allow-tools …] (인증 프로필 env).
+            // 3) 실행: soksak-workflow <tmp> --arg IDEA=<idea> [--allow-tools …] (인증 프로필 env).
             const runArgs = [tmp, "--arg", `IDEA=${idea}`];
             if (allowTools) runArgs.push("--allow-tools", allowTools);
             const { stdout } = await runProc(app, ctx, runBin, runArgs, 인증 프로필Env);
