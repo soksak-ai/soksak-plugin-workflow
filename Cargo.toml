@@ -5,7 +5,7 @@ edition = "2021"
 description = "워크플로 골격 실행 런타임 — 발행(--emit)·실행(exec-one/exec-stage)·③파생. agent 는 claude -p 로 실행."
 
 [[bin]]
-name = "soksak-run"
+name = "soksak-workflow"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,64 +1,70 @@
-//! workflow_host — Host 구현: interp 의 agent/parallel/pipeline 을 칸반 노드 발행으로 매핑.
+//! workflow_host — Host 구현: interp 의 agent/parallel/pipeline 을 칸반 노드 *발행*으로 매핑.
 //!
-//! 사용자 확정 모델:
-//! - agent  → 단일 리프 노드.
-//! - parallel → 동시: 안의 노드들은 서로 blockedBy 없음(형제).
-//! - pipeline → 순차: 같은 item 의 stage 노드 체인(blockedBy 연결).
-//! - phase  → 순차 컨테이너(직전 phase 에 blockedBy).
-//! - 무한뎁스: group/phase 컨테이너 노드 + stack 깊이. **그룹(컨테이너)끼리만 blockedBy** —
-//!   자식까지 N×M 파편화하지 않는다(부모 컨테이너가 게이트; done 은 자식 집계 = subProgress).
-//!
-//! 실행은 주입된 exec 에 위임(스케줄러/스텁) — 이 모듈은 *발행 매핑*만 책임.
+//! 규칙(rule_workflow_pipeline_node_model) 준수:
+//! - 규칙 A: 노드는 작업이다. parallel/pipeline 은 **노드가 아니다** — 관계다.
+//!   - agent     → 단일 작업 노드 1개.
+//!   - parallel  → 자식들을 형제로(동시 = blockedBy 없음). parallel 자체 노드 X.
+//!   - pipeline  → 자식들을 blockedBy 체인으로(순차). pipeline 자체 노드 X.
+//!   - phase     → 의미있는 컨테이너 노드(순차 게이트). 의미있는 title.
+//!   group_enter/group_exit 는 *노드를 발행하지 않는다* — parallel/pipeline 스코프만 추적해
+//!   blockedBy(형제 vs 체인)를 가른다(parallel-in-pipeline 도 형제로 보존). 컨테이너 노드는 phase 만.
+//! - 규칙 B: 모든 노드 title = opts.title(LLM 발명), body = opts.description. label fallback 폐기.
+//! - 규칙 C: 실행 안 함(발행만). agent 는 트리거를 일으키지 않는다 — exec 없음. 검증 전 노드는 badge="검수전".
+//!   스케줄러(코어)가 칸반 상태를 보고 ready 노드를 별도로 실행(soksak-workflow --exec-one)한다.
+use crate::host::stub_from_schema;
 use crate::interp::{to_string, Host, Val};
+use serde_json::Value as Json;
 use std::collections::BTreeMap;
 
-/// 발행되는 칸반 노드 이벤트(→ JSON line → main.js → soksak-plugin-kanban node.add/edit).
-/// JSON: {"ev":"add"|"status", ...} (camelCase: blockedBy). main.js 가 ev 로 분기.
+/// 발행되는 칸반 노드 이벤트(→ JSON line → main.js → soksak-plugin-kanban node.add).
+/// 발행 전용: Add 만(실행 lifecycle status 없음 — 실행은 스케줄러+exec-one 의 몫).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]
 pub enum NodeEvent {
     Add {
         id: String,
         parent: Option<String>,
-        kind: String, // "phase" | "parallel" | "pipeline" | "agent"
+        kind: String, // "phase" | "agent" — parallel/pipeline 은 노드 아님(규칙 A)
         title: String,
         body: String,
+        prompt: String, // agent 프롬프트(스케줄러가 exec-one 으로 실행할 원본)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
         blocked_by: Vec<String>,
-    },
-    Status {
-        id: String,
-        status: String, // "inprogress" | "done"
-        result: String,
+        badge: String, // "검수전"(검증 전 기본) — phase 등 컨테이너는 빈 문자열(집계 배지는 칸반이 계산)
     },
 }
 
-enum Mode {
+/// parallel/pipeline 스코프 — blockedBy 를 형제(parallel)/체인(pipeline)으로 가른다. 노드는 만들지 않는다.
+enum GroupScope {
     Parallel,
-    Pipeline,
+    Pipeline { prev: Option<String> }, // 같은 item 체인의 직전 노드
 }
 
-pub struct WorkflowHost<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> {
+pub struct WorkflowHost {
     pub events: Vec<NodeEvent>,
     emit: Option<Box<dyn FnMut(&NodeEvent)>>, // 실시간 emit(stdout JSON line) — 없으면 buffer 만.
-    stack: Vec<String>,         // 부모 컨테이너(phase/group) — 무한뎁스
-    modes: Vec<Mode>,           // 현재 그룹 모드
-    prev_chain: Option<String>, // pipeline 체인 직전 노드(같은 item)
+    stack: Vec<String>,        // 컨테이너 부모(phase) — 무한뎁스. parallel/pipeline 은 안 쌓음.
+    scopes: Vec<GroupScope>,   // 현재 parallel/pipeline 스코프
     prev_phase: Option<String>, // phase 순차 blockedBy
     counter: usize,
-    exec: F,
 }
 
-impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> WorkflowHost<F> {
-    pub fn new(exec: F) -> Self {
+impl Default for WorkflowHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkflowHost {
+    pub fn new() -> Self {
         WorkflowHost {
             events: vec![],
             emit: None,
             stack: vec![],
-            modes: vec![],
-            prev_chain: None,
+            scopes: vec![],
             prev_phase: None,
             counter: 0,
-            exec,
         }
     }
     /// 실시간 emit 콜백 주입(stdout JSON line 등). 미주입 시 events buffer 만 채운다.
@@ -77,79 +83,84 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> WorkflowHost
         self.counter += 1;
         format!("{prefix}-{}", self.counter)
     }
-    fn opt_vec(s: &Option<String>) -> Vec<String> {
-        s.iter().cloned().collect()
+    fn opt_str(opts: &BTreeMap<String, Val>, key: &str) -> String {
+        opts.get(key).map(to_string).unwrap_or_default()
     }
 }
 
-impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for WorkflowHost<F> {
+impl Host for WorkflowHost {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
         let id = self.next_id("task");
         let parent = self.stack.last().cloned();
-        let title = opts.get("label").map(to_string).unwrap_or_default();
-        let in_pipeline = matches!(self.modes.last(), Some(Mode::Pipeline));
-        // pipeline 체인이면 직전 노드에 blockedBy, 그 외(단일/parallel)는 없음.
-        let blocked_by = if in_pipeline { Self::opt_vec(&self.prev_chain) } else { vec![] };
+        // 규칙 B: title = opts.title(LLM 발명), body = opts.description. label fallback 없음.
+        let title = Self::opt_str(opts, "title");
+        let body = Self::opt_str(opts, "description");
+        // 규칙 A: pipeline 스코프면 직전 노드에 blockedBy(체인), parallel/단일은 없음(형제).
+        let in_pipeline = matches!(self.scopes.last(), Some(GroupScope::Pipeline { .. }));
+        let blocked_by = match self.scopes.last() {
+            Some(GroupScope::Pipeline { prev }) => prev.clone().into_iter().collect(),
+            _ => vec![],
+        };
+        let schema = opts.get("schema").map(crate::interp::val_to_json).filter(|s| s.is_object());
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
             kind: "agent".into(),
             title,
-            body: prompt.into(),
+            body,
+            prompt: prompt.into(),
+            schema,
             blocked_by,
+            badge: "검수전".into(), // 규칙 D: 검증 전 드래프트 노드 기본 배지
         });
-        self.emit_node(NodeEvent::Status { id: id.clone(), status: "inprogress".into(), result: String::new() });
-        let res = (self.exec)(prompt, opts)?;
-        self.emit_node(NodeEvent::Status { id: id.clone(), status: "done".into(), result: to_string(&res) });
+        // pipeline 체인 전진(같은 item 의 다음 stage 가 이 노드에 blockedBy).
         if in_pipeline {
-            self.prev_chain = Some(id);
+            if let Some(GroupScope::Pipeline { prev }) = self.scopes.last_mut() {
+                *prev = Some(id);
+            }
         }
-        Ok(res)
+        // 규칙 C: 실행 안 함(발행만). interp 데이터 흐름은 schema-shaped stub 으로 잇는다(LLM 미호출).
+        Ok(stub_from_schema(opts.get("schema")))
     }
 
     fn phase(&mut self, title: &str) {
         let id = self.next_id("phase");
-        let blocked_by = Self::opt_vec(&self.prev_phase); // 직전 phase 에 의존(순차)
+        let blocked_by: Vec<String> = self.prev_phase.clone().into_iter().collect(); // 직전 phase 에 의존(순차)
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent: None,
             kind: "phase".into(),
             title: title.into(),
             body: String::new(),
+            prompt: String::new(),
+            schema: None,
             blocked_by,
+            badge: String::new(), // 컨테이너: 집계 배지는 칸반(subValidation)이 자식 oxf 로 계산
         });
         self.stack = vec![id.clone()]; // phase 는 최상위 단계 — stack 리셋
         self.prev_phase = Some(id);
-        self.prev_chain = None;
     }
 
     fn log(&mut self, _msg: &str) {}
 
+    /// 규칙 A: parallel/pipeline 진입 = *스코프*만 push(노드 발행 X). blockedBy 를 형제/체인으로 가른다.
     fn group_enter(&mut self, kind: &str) {
-        let id = self.next_id(kind);
-        let parent = self.stack.last().cloned();
-        // 컨테이너 노드(게이트). 그룹끼리만 blockedBy — 여기선 부모 컨테이너가 게이트라 blockedBy 비움.
-        self.emit_node(NodeEvent::Add {
-            id: id.clone(),
-            parent,
-            kind: kind.into(),
-            title: kind.into(),
-            body: String::new(),
-            blocked_by: vec![],
+        self.scopes.push(if kind == "pipeline" {
+            GroupScope::Pipeline { prev: None }
+        } else {
+            GroupScope::Parallel
         });
-        self.stack.push(id);
-        self.modes.push(if kind == "pipeline" { Mode::Pipeline } else { Mode::Parallel });
-        self.prev_chain = None;
     }
 
     fn group_exit(&mut self) {
-        self.stack.pop();
-        self.modes.pop();
-        self.prev_chain = None;
+        self.scopes.pop();
     }
 
     fn stage_boundary(&mut self) {
-        self.prev_chain = None; // 새 item 의 stage 체인 시작
+        // pipeline 의 새 item 체인 시작 — 현재 pipeline 스코프의 체인 리셋(item 간 독립).
+        if let Some(GroupScope::Pipeline { prev }) = self.scopes.last_mut() {
+            *prev = None;
+        }
     }
 }
 
@@ -157,26 +168,29 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Wor
 mod tests {
     use super::*;
 
-    type StubFn = fn(&str, &BTreeMap<String, Val>) -> Result<Val, String>;
-    fn stub(_p: &str, _o: &BTreeMap<String, Val>) -> Result<Val, String> {
-        Ok(Val::Str("ok".into()))
+    fn host() -> WorkflowHost {
+        WorkflowHost::new()
     }
-    fn host() -> WorkflowHost<StubFn> {
-        WorkflowHost::new(stub)
+    fn opts(pairs: &[(&str, &str)]) -> BTreeMap<String, Val> {
+        let mut m = BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert((*k).to_string(), Val::Str((*v).to_string()));
+        }
+        m
     }
-    /// Add 이벤트만 → (kind, id, parent, blocked_by).
-    fn adds(h: &WorkflowHost<StubFn>) -> Vec<(String, String, Option<String>, Vec<String>)> {
+    /// Add 이벤트 → (kind, id, parent, blocked_by, badge).
+    fn adds(h: &WorkflowHost) -> Vec<(String, String, Option<String>, Vec<String>, String)> {
         h.events
             .iter()
-            .filter_map(|e| match e {
-                NodeEvent::Add { kind, id, parent, blocked_by, .. } => {
-                    Some((kind.clone(), id.clone(), parent.clone(), blocked_by.clone()))
+            .map(|e| match e {
+                NodeEvent::Add { kind, id, parent, blocked_by, badge, .. } => {
+                    (kind.clone(), id.clone(), parent.clone(), blocked_by.clone(), badge.clone())
                 }
-                _ => None,
             })
             .collect()
     }
-    fn agents(h: &WorkflowHost<StubFn>) -> Vec<(String, Option<String>, Vec<String>)> {
+    /// agent 노드만 → (id, parent, blocked_by).
+    fn agents(h: &WorkflowHost) -> Vec<(String, Option<String>, Vec<String>)> {
         adds(h).into_iter().filter(|x| x.0 == "agent").map(|x| (x.1, x.2, x.3)).collect()
     }
 
@@ -190,23 +204,40 @@ mod tests {
     }
 
     #[test]
-    fn parallel_siblings_no_blockedby() {
+    fn rule_a_no_parallel_or_pipeline_nodes() {
+        // [규칙 A] parallel/pipeline 은 노드가 아니다 — 어떤 발행 이벤트도 그 kind 를 갖지 않는다.
         let mut h = host();
+        h.group_enter("parallel");
+        h.agent("a", &BTreeMap::new()).unwrap();
+        h.group_exit();
+        h.group_enter("pipeline");
+        h.stage_boundary();
+        h.agent("b", &BTreeMap::new()).unwrap();
+        h.group_exit();
+        for (kind, ..) in adds(&h) {
+            assert!(kind != "parallel" && kind != "pipeline", "구조 키워드가 노드가 됨: {kind}");
+        }
+    }
+
+    #[test]
+    fn rule_a_parallel_children_are_siblings() {
+        // parallel 자식 = 형제(동시): blockedBy 없음, 부모는 *바깥 컨테이너*(여기선 phase).
+        let mut h = host();
+        h.phase("분해");
         h.group_enter("parallel");
         h.agent("a", &BTreeMap::new()).unwrap();
         h.agent("b", &BTreeMap::new()).unwrap();
         h.group_exit();
-        let cont = &adds(&h)[0];
-        assert_eq!(cont.0, "parallel");
+        let phase_id = adds(&h).into_iter().find(|x| x.0 == "phase").unwrap().1;
         let a = agents(&h);
         assert_eq!(a.len(), 2);
         assert!(a[0].2.is_empty() && a[1].2.is_empty(), "동시: 둘 다 blockedBy 없음");
-        assert_eq!(a[0].1, Some(cont.1.clone()), "부모 = parallel 컨테이너");
-        assert_eq!(a[1].1, Some(cont.1.clone()));
+        assert_eq!(a[0].1, Some(phase_id.clone()), "부모 = 바깥 phase(parallel 컨테이너 아님)");
+        assert_eq!(a[1].1, Some(phase_id));
     }
 
     #[test]
-    fn pipeline_chains_blockedby() {
+    fn rule_a_pipeline_children_chain_blockedby() {
         let mut h = host();
         h.group_enter("pipeline");
         h.stage_boundary(); // item 시작
@@ -219,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_items_independent() {
+    fn rule_a_pipeline_items_independent() {
         let mut h = host();
         h.group_enter("pipeline");
         h.stage_boundary();
@@ -230,37 +261,152 @@ mod tests {
         h.agent("i2s2", &BTreeMap::new()).unwrap();
         h.group_exit();
         let a = agents(&h);
-        assert!(a[2].2.is_empty(), "item2 의 첫 stage 는 item1 과 독립(blockedBy 없음)");
+        assert!(a[2].2.is_empty(), "item2 첫 stage 는 item1 과 독립(blockedBy 없음)");
         assert_eq!(a[3].2, vec![a[2].0.clone()], "item2 stage2 blockedBy item2 stage1");
     }
 
     #[test]
-    fn phase_sequential_blockedby() {
+    fn rule_a_parallel_inside_pipeline_children_are_siblings() {
+        // parallel 이 pipeline 한 stage 안에 있으면 그 자식들은 형제(체인 X) — parallel 이 체인을 막는다.
+        let mut h = host();
+        h.group_enter("pipeline");
+        h.stage_boundary();
+        h.group_enter("parallel");
+        h.agent("x", &BTreeMap::new()).unwrap();
+        h.agent("y", &BTreeMap::new()).unwrap();
+        h.group_exit();
+        h.group_exit();
+        let a = agents(&h);
+        assert_eq!(a.len(), 2);
+        assert!(a[0].2.is_empty() && a[1].2.is_empty(), "pipeline 안의 parallel 자식도 형제(체인 X)");
+    }
+
+    #[test]
+    fn phase_is_container_node_sequential() {
         let mut h = host();
         h.phase("Scope");
         h.phase("Verify");
         h.phase("Synthesize");
         let p: Vec<_> = adds(&h).into_iter().filter(|x| x.0 == "phase").collect();
+        assert_eq!(p.len(), 3, "phase 는 컨테이너 노드");
         assert!(p[0].3.is_empty(), "Scope 첫 phase");
         assert_eq!(p[1].3, vec![p[0].1.clone()], "Verify blockedBy [Scope]");
         assert_eq!(p[2].3, vec![p[1].1.clone()], "Synthesize blockedBy [Verify]");
     }
 
     #[test]
-    fn nested_groups_infinite_depth() {
-        // parallel(claims) { parallel(votes) { agent } } — 무한뎁스 부모 체인.
+    fn rule_b_title_from_opts_title_body_from_description() {
         let mut h = host();
-        h.group_enter("parallel"); // G1
-        h.group_enter("parallel"); // G2 (G1 자식)
-        h.agent("vote", &BTreeMap::new()).unwrap();
-        h.group_exit();
-        h.group_exit();
-        let a = adds(&h);
-        let g1 = &a[0];
-        let g2 = &a[1];
-        let leaf = a.iter().find(|x| x.0 == "agent").unwrap();
-        assert_eq!(g1.2, None, "G1 최상위");
-        assert_eq!(g2.2, Some(g1.1.clone()), "G2 부모 = G1");
-        assert_eq!(leaf.2, Some(g2.1.clone()), "leaf 부모 = G2 (무한뎁스)");
+        h.agent("프롬프트 본문", &opts(&[("title", "재고 동기화"), ("description", "주문 시 재고 차감")]))
+            .unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { title, body, prompt, .. } => {
+                assert_eq!(title, "재고 동기화", "title = opts.title(LLM 발명)");
+                assert_eq!(body, "주문 시 재고 차감", "body = opts.description");
+                assert_eq!(prompt, "프롬프트 본문", "prompt = agent 본문(exec-one 원본)");
+            }
+        }
+    }
+
+    #[test]
+    fn rule_b_no_label_fallback() {
+        // [규칙 B] label 은 더 이상 title 로 쓰이지 않는다 — label 만 있고 title 없으면 title 은 빈 문자열.
+        let mut h = host();
+        h.agent("p", &opts(&[("label", "agent#1")])).unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { title, .. } => assert_eq!(title, "", "label fallback 폐기 — 기계 라벨이 title 로 새지 않음"),
+        }
+    }
+
+    #[test]
+    fn rule_d_agent_badge_is_pending() {
+        // [규칙 D] 발행 노드 = 드래프트 — 검증 전 배지 "검수전". status(예정/진행/완료) 축과 별개.
+        let mut h = host();
+        h.agent("p", &BTreeMap::new()).unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { badge, .. } => assert_eq!(badge, "검수전"),
+        }
+    }
+
+    #[test]
+    fn rule_c_publish_only_no_status_events() {
+        // [규칙 C] 발행만 — 모든 이벤트는 Add. 실행 lifecycle(status) 이벤트 없음(스케줄러+exec-one 의 몫).
+        let mut h = host();
+        h.agent("p", &BTreeMap::new()).unwrap();
+        h.phase("X");
+        assert!(h.events.iter().all(|e| matches!(e, NodeEvent::Add { .. })), "발행 이벤트는 Add 뿐");
+    }
+
+    // ── interp → host 통합: run_parallel/run_pipeline 가 실제로 형제/체인을 그리는지(직접 호출 아님) ──
+    use crate::interp::Interp;
+    use serde_json::json;
+
+    /// arrow (params)=>agent(prompt,{}) 의 ESTree 노드.
+    fn arrow_agent(params: &[&str], prompt: &str) -> serde_json::Value {
+        json!({
+            "type": "ArrowFunctionExpression",
+            "params": params.iter().map(|p| json!({"type":"Identifier","name":p})).collect::<Vec<_>>(),
+            "body": {"type":"CallExpression","callee":{"type":"Identifier","name":"agent"},
+                "arguments":[{"type":"Literal","value":prompt},{"type":"ObjectExpression","properties":[]}]}
+        })
+    }
+    fn run_program(prog: &serde_json::Value) -> WorkflowHost {
+        let mut wh = WorkflowHost::new();
+        Interp::new(&mut wh).run(prog, serde_json::Value::Null).expect("interp 해석");
+        wh
+    }
+
+    #[test]
+    fn interp_parallel_emits_siblings_no_node() {
+        // parallel([()=>agent("a"), ()=>agent("b")]) → 형제 2개, parallel 노드 0.
+        let prog = json!({"type":"Program","body":[{"type":"ExpressionStatement","expression":{
+            "type":"CallExpression","callee":{"type":"Identifier","name":"parallel"},
+            "arguments":[{"type":"ArrayExpression","elements":[arrow_agent(&[],"a"), arrow_agent(&[],"b")]}]
+        }}]});
+        let h = run_program(&prog);
+        for (kind, ..) in adds(&h) {
+            assert!(kind != "parallel", "parallel 이 노드가 됨");
+        }
+        let a = agents(&h);
+        assert_eq!(a.len(), 2, "agent 2");
+        assert!(a[0].2.is_empty() && a[1].2.is_empty(), "interp parallel → 형제(blockedBy 없음)");
+    }
+
+    #[test]
+    fn interp_pipeline_emits_chain_per_item_no_node() {
+        // pipeline(["a","b"], (x)=>agent("s1"), (x)=>agent("s2")) → item 마다 s1→s2 체인, pipeline 노드 0.
+        let prog = json!({"type":"Program","body":[{"type":"ExpressionStatement","expression":{
+            "type":"CallExpression","callee":{"type":"Identifier","name":"pipeline"},
+            "arguments":[
+                {"type":"ArrayExpression","elements":[{"type":"Literal","value":"a"},{"type":"Literal","value":"b"}]},
+                arrow_agent(&["x"],"s1"),
+                arrow_agent(&["x"],"s2")
+            ]
+        }}]});
+        let h = run_program(&prog);
+        for (kind, ..) in adds(&h) {
+            assert!(kind != "pipeline", "pipeline 이 노드가 됨");
+        }
+        let a = agents(&h);
+        assert_eq!(a.len(), 4, "item 2 × stage 2 = agent 4");
+        assert!(a[0].2.is_empty(), "item1 stage1 체인 시작");
+        assert_eq!(a[1].2, vec![a[0].0.clone()], "item1 stage2 blockedBy item1 stage1");
+        assert!(a[2].2.is_empty(), "item2 stage1 은 item1 과 독립(blockedBy 없음)");
+        assert_eq!(a[3].2, vec![a[2].0.clone()], "item2 stage2 blockedBy item2 stage1");
+    }
+
+    #[test]
+    fn emit_callback_receives_published_nodes() {
+        // with_emit 콜백이 실시간으로 발행 노드를 받는다(stdout JSON line 경로).
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        let seen = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = seen.clone();
+        let mut h = host().with_emit(Box::new(move |ev: &NodeEvent| {
+            let NodeEvent::Add { id, .. } = ev;
+            sink.borrow_mut().push(id.clone());
+        }));
+        h.agent("p", &BTreeMap::new()).unwrap();
+        assert_eq!(seen.borrow().len(), 1, "콜백이 발행 노드를 실시간 수신");
     }
 }

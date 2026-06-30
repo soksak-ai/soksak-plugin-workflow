@@ -22,12 +22,18 @@ fn opt_str(opts: &BTreeMap<String, Val>, key: &str) -> Option<String> {
 /// agent 프롬프트 = 본문 + (schema 있으면) 출력 형식 지시 + (lang 있으면) 출력 언어 계약.
 /// 언어 계약을 schema 뒤에 둔다 — 계약이 "the schema" 를 가리키고, 모델이 마지막에 읽는다.
 fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>, lang: Option<&Language>) -> String {
+    let schema = opts.get("schema").map(val_to_json);
+    build_prompt_with_schema(prompt, schema.as_ref().filter(|s| s.is_object()), lang)
+}
+
+/// build_prompt_with_schema — Json schema 로 프롬프트 조립(exec-one 등 opts 없는 경로 공유).
+/// 본문 → schema 지시 → 언어 계약 순(build_prompt 와 동일 계약).
+pub fn build_prompt_with_schema(prompt: &str, schema: Option<&Json>, lang: Option<&Language>) -> String {
     let mut full = prompt.to_string();
-    if let Some(schema) = opts.get("schema") {
-        let sj = val_to_json(schema);
+    if let Some(sj) = schema {
         if sj.is_object() {
             full.push_str(SCHEMA_INSTRUCTION);
-            full.push_str(&serde_json::to_string_pretty(&sj).unwrap_or_default());
+            full.push_str(&serde_json::to_string_pretty(sj).unwrap_or_default());
         }
     }
     if let Some(l) = lang {
@@ -39,7 +45,8 @@ fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>, lang: Option<&Langua
 /// 스키마 required 를 통과값으로 채운 stub(dry-run). status 는 done/validated/partial.
 /// 배열은 데이터 의존 fan-out 이 dry-run 에서도 한 번 타도록 샘플 1개를 채운다(실 카운트는
 /// 실행 시 agent 출력이 정함 — dry-run 은 구조 미리보기).
-fn stub_from_schema(schema: Option<&Val>) -> Val {
+/// 발행 전용 WorkflowHost(--emit)도 이 stub 으로 interp 데이터 흐름을 잇는다(LLM 미호출).
+pub fn stub_from_schema(schema: Option<&Val>) -> Val {
     let sj = schema.map(val_to_json).unwrap_or(Json::Null);
     Val::Obj(std::rc::Rc::new(std::cell::RefCell::new(stub_obj(&sj))))
 }
