@@ -730,4 +730,151 @@ mod tests {
         h.agent("p", &BTreeMap::new()).unwrap();
         assert_eq!(seen.borrow().len(), 1, "콜백이 발행 노드를 실시간 수신");
     }
+
+    /// Val::Obj 헬퍼 — stub runner 가 genPrompt/huntPrompt/auditPrompt 산출(트리)을 만들 때 씀.
+    fn val_obj(pairs: Vec<(&str, Val)>) -> Val {
+        let mut m = BTreeMap::new();
+        for (k, v) in pairs {
+            m.insert(k.to_string(), v);
+        }
+        Val::Obj(std::rc::Rc::new(std::cell::RefCell::new(m)))
+    }
+    fn val_arr_vals(vs: Vec<Val>) -> Val {
+        Val::Arr(std::rc::Rc::new(std::cell::RefCell::new(vs)))
+    }
+
+    /// [Phase5 e2e — AST→Rust 런타임] draft.skeleton.json program(generate stage) 을 ClaudeEmitHost(stub runner)
+    /// 로 돌려 genPrompt→가짜 트리(1그룹 2항목) 가 그룹/항목(badge=검수전, body=verifyPrompt) + Hunt/Audit task(blockedBy) emit 하는지.
+    /// claude·앱·소켓 없이 Rust Interp 만으로 전체 발행 흐름·순서 검증.
+    #[test]
+    fn draft_generate_stage_emits_groups_items_hunt_audit() {
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let program = skeleton.get("program").expect("program(완전 AST)");
+        let item = |t: &str, d: &str, o: &str| {
+            val_obj(vec![
+                ("title", Val::Str(t.into())),
+                ("description", Val::Str(d.into())),
+                ("origin", Val::Str(o.into())),
+            ])
+        };
+        let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
+            if p.contains("GENERATOR") {
+                let grp = val_obj(vec![
+                    ("category", Val::Str("재고".into())),
+                    ("items", val_arr_vals(vec![item("항목1", "설명1", "user"), item("항목2", "설명2", "agent")])),
+                ]);
+                Ok(val_obj(vec![
+                    ("title", Val::Str("테스트 덩어리".into())),
+                    ("titleOrigin", Val::Str("agent".into())),
+                    ("groups", val_arr_vals(vec![grp])),
+                ]))
+            } else {
+                Ok(Val::Str(String::new()))
+            }
+        });
+        let args = json!({ "stage": "generate", "directive": "테스트 지시", "chunkRef": "chunk" });
+        Interp::new(&mut h).run(program, args).expect("generate interp 해석");
+
+        let ev = &h.wh.events;
+        let groups = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "group")).count();
+        let items = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "item")).count();
+        assert_eq!(groups, 1, "generate → 그룹 1개 emit");
+        assert_eq!(items, 2, "generate → 항목 2개 emit");
+
+        // 항목 badge=검수전 + body=verifyPrompt(exec-one 입력)
+        let pend = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, badge, .. } if kind == "item" && badge.as_deref() == Some("검수전"))).count();
+        assert_eq!(pend, 2, "항목 badge=검수전");
+        let i0 = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id == "g0i0"));
+        assert!(matches!(i0, Some(NodeEvent::Add { prompt, .. }) if !prompt.is_empty()), "항목 body=verifyPrompt(빈 문자열 아님)");
+
+        // Hunt task blockedBy=[g0i0,g0i1] / Audit task blockedBy=[g0i0,g0i1,hunt] (①a 순서)
+        let hunt = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "hunt"));
+        assert!(
+            matches!(hunt, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["g0i0".to_string(), "g0i1".to_string()]),
+            "hunt blockedBy=[g0i0,g0i1] (항목 검증 후 실행)"
+        );
+        let audit = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "audit"));
+        assert!(
+            matches!(audit, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["g0i0".to_string(), "g0i1".to_string(), "hunt".to_string()]),
+            "audit blockedBy=[g0i0,g0i1,hunt] (항목+Hunt 후 실행)"
+        );
+    }
+
+    /// [Phase5 e2e] skeleton stage(args 없음) → chunk(isDraft) + Generate task(kind:task) emit.
+    #[test]
+    fn draft_skeleton_stage_emits_chunk_and_generate_task() {
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let program = skeleton.get("program").expect("program");
+        let mut h = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
+        Interp::new(&mut h).run(program, json!({ "title": "내 백로그" })).expect("skeleton interp");
+        let ev = &h.wh.events;
+        let chunk = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "chunk"));
+        assert!(matches!(chunk, Some(NodeEvent::Add { description, .. }) if description.contains("백로그") || !description.is_empty()), "chunk emit + description=DIRECTIVE");
+        let gen = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "gen"));
+        assert!(gen.is_some(), "Generate task(kind:task) emit");
+    }
+
+    /// [Phase5 e2e] hunt stage — huntPrompt(ledger)→additions → 추가항목(badge=검수전) emit (CHUNK_REF 직속).
+    #[test]
+    fn draft_hunt_stage_emits_additions() {
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let program = skeleton.get("program").expect("program");
+        let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
+            if p.contains("AUDITOR") {
+                Ok(Val::Str(String::new()))
+            } else if p.contains("GOAL-REACH") {
+                let add = val_obj(vec![
+                    ("title", Val::Str("추가항목".into())),
+                    ("description", Val::Str("누락 make-or-break".into())),
+                    ("category", Val::Str("재고".into())),
+                    ("origin", Val::Str("agent".into())),
+                ]);
+                Ok(val_obj(vec![("additions", val_arr_vals(vec![add]))]))
+            } else {
+                Ok(Val::Str(String::new()))
+            }
+        });
+        let args = json!({ "stage": "hunt", "ledger": [{ "title": "기존", "badge": "o", "category": "재고" }] });
+        Interp::new(&mut h).run(program, args).expect("hunt interp");
+        let ev = &h.wh.events;
+        let adds: Vec<&NodeEvent> = ev
+            .iter()
+            .filter(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id.starts_with("add")))
+            .collect();
+        assert_eq!(adds.len(), 1, "hunt → 추가항목 1개 emit");
+        assert!(
+            matches!(adds[0], NodeEvent::Add { kind, badge, parent, .. } if kind == "item" && badge.as_deref() == Some("검수전") && parent.as_deref() == Some("chunk")),
+            "추가항목 badge=검수전, parent=CHUNK_REF(덩어리 직속)"
+        );
+    }
+
+    /// [Phase5 e2e] audit stage — auditPrompt(ledger)→{complete,verdict} return (emit 없음).
+    #[test]
+    fn draft_audit_stage_returns_verdict_no_emit() {
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let program = skeleton.get("program").expect("program");
+        let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
+            if p.contains("AUDITOR") {
+                Ok(val_obj(vec![("complete", Val::Bool(true)), ("verdict", Val::Str("완결".into())), ("gaps", val_arr_vals(vec![])), ("contradictions", val_arr_vals(vec![])), ("sufficiency", Val::Str("충분".into()))]))
+            } else {
+                Ok(Val::Str(String::new()))
+            }
+        });
+        let args = json!({ "stage": "audit", "ledger": [{ "title": "항목", "badge": "o", "category": "재고" }] });
+        let ret = Interp::new(&mut h).run(program, args).expect("audit interp");
+        // emit 0 (audit는 return 만)
+        assert!(h.wh.events.is_empty(), "audit → 노드 emit 0 (return 만)");
+        // return 값이 {verdict, complete}
+        let verdict = match &ret {
+            Val::Obj(m) => {
+                let map = m.borrow();
+                match (map.get("verdict"), map.get("complete")) {
+                    (Some(Val::Str(v)), Some(Val::Bool(c))) => Some((v.clone(), *c)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        assert_eq!(verdict, Some(("완결".to_string(), true)), "audit return = verdict:'완결', complete:true");
+    }
 }
