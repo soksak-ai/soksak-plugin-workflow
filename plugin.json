@@ -1,0 +1,20 @@
+{
+  "spec": "soksak-spec-plugin@0.0.1",
+  "id": "soksak-plugin-workflow",
+  "name": "Workflow",
+  "version": "0.0.1",
+  "description": "워크플로 AST(추출기 추출)를 칸반 노드 DAG 로 실행·추적. agent=단일/parallel=동시/pipeline=체인, blockedBy 의존·스케줄러 동시 실행.",
+  "entry": "main.js",
+  "permissions": [
+    "process",
+    "commands"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "name": "workflow.run",
+        "title": "Run workflow → 칸반"
+      }
+    ]
+  }
+}

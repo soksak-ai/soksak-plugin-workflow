@@ -9,7 +9,9 @@ use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::host::{ClaudeHost, StubHost};
-use soksak_plugin::interp::{val_to_json, Interp};
+use soksak_plugin::interp::{val_to_json, Host, Interp};
+use soksak_plugin::scheduler::DEFAULT_CONCURRENCY;
+use soksak_plugin::workflow_host::{NodeEvent, WorkflowHost};
 use soksak_plugin::lang::Language;
 use std::collections::HashSet;
 
@@ -56,6 +58,8 @@ fn real_main() -> Result<(), String> {
     let mut allow_tools: Vec<String> = vec![];
     let mut dry_run = false;
     let mut lang: Option<Language> = None; // --lang: 출력 언어 계약
+    let mut kanban = false; // --kanban: 노드 발행(WorkflowHost) + stdout JSON line emit
+    let mut concurrency = DEFAULT_CONCURRENCY; // --concurrency: 동시 실행 상한(기본 8)
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -81,6 +85,11 @@ fn real_main() -> Result<(), String> {
                 lang = Some(Language::parse(v));
             }
             "--dry-run" => dry_run = true,
+            "--kanban" => kanban = true,
+            "--concurrency" => {
+                i += 1;
+                concurrency = argv.get(i).ok_or("--concurrency 값 누락")?.parse().map_err(|_| "--concurrency 는 정수")?;
+            }
             other => return Err(format!("미지 인자 {other:?}")),
         }
         i += 1;
@@ -138,6 +147,18 @@ fn real_main() -> Result<(), String> {
     let profile = if env.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN") { "oauth 프로필/oauth 프로필" } else { "인증 프로필" };
     eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p, 프로필={profile})");
     let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into(), lang };
+    if kanban {
+        // 칸반 모드: interp 가 노드 발행(WorkflowHost) + exec=claude. 노드 이벤트를 stdout JSON line 으로
+        // emit → main.js 가 받아 soksak-plugin-kanban node.add/edit 내부 command 로 중계. (concurrency 는 스케줄러 통합 시.)
+        eprintln!("[soksak] 칸반 모드 — 노드 이벤트 stdout emit (concurrency={concurrency})");
+        let mut wh = WorkflowHost::new(move |p, o| h.agent(p, o)).with_emit(Box::new(|ev: &NodeEvent| {
+            if let Ok(s) = serde_json::to_string(ev) {
+                println!("{s}");
+            }
+        }));
+        Interp::new(&mut wh).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
+        return Ok(());
+    }
     let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
     println!("{}", serde_json::to_string_pretty(&val_to_json(&result)).map_err(|e| e.to_string())?);
     Ok(())
