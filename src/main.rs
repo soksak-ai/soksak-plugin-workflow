@@ -49,6 +49,7 @@ fn real_main() -> Result<(), String> {
         eprintln!("  soksak-workflow <skeleton.json|-> --arg K=V ... [--dry-run] [--lang ko|en|…] [--allow-tools \"T1 T2\"]  # program 해석 실행");
         eprintln!("  soksak-workflow <skeleton.json|-> --emit [--lang ko]                                                  # 발행만(노드 DAG stdout, LLM 미호출)");
         eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
+        eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
         eprintln!("  soksak-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
         eprintln!("  --lang: 출력 언어 계약. 모든 agent 프롬프트에 주입 → 산출물이 그 언어로. args.lang 도 주입.");
         return Ok(());
