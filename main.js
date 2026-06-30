@@ -35,10 +35,29 @@ export function pickReady(nodes) {
   const hasChild = new Set();
   for (const n of list) if (n.parentId) hasChild.add(n.parentId);
   const depsDone = (n) => (n.blockedBy || []).every((b) => isDone(byId.get(b)));
+  // #6 audit 게이트 — 부모 사슬로 chunkId 자손인가(buildLedger 와 동일 climb).
+  const descends = (n, chunkId) => {
+    let p = n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === chunkId) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  const chunkHasPending = (chunkId) =>
+    list.some((n) => n.kind === "item" && n.badge === "검수전" && descends(n, chunkId));
+  const dependsOnTask = (n) => (n.blockedBy || []).some((b) => { const m = byId.get(b); return !!m && m.kind === "task"; });
   return list.filter((n) => {
     if (!depsDone(n)) return false;
     if (n.badge === "검수전" && !hasChild.has(n.id)) return true; // 항목 검증
-    if (n.kind === "task" && n.status !== "done") return true; // stage 작업 실행
+    if (n.kind === "task" && n.status !== "done") {
+      // #6: audit 류(다른 task 에 의존하는 후속 작업)는 정적 blockedBy 가 hunt 의 동적 추가항목(검수전)을
+      // 못 봐서 미검증 ledger 로 완결 인증할 위험. 덩어리에 검수전 항목이 남아 있으면 not-ready 로 막는다.
+      // generate(blockedBy 없음)·hunt(항목에만 의존)는 task 에 의존 안 해 게이트 비대상.
+      if (n.parentId && dependsOnTask(n) && chunkHasPending(n.parentId)) return false;
+      return true; // stage 작업 실행
+    }
     return false;
   });
 }

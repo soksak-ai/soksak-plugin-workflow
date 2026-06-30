@@ -74,6 +74,32 @@ test("pickReady — 빈/비배열 안전", () => {
   assert.deepEqual(pickReady(null), []);
 });
 
+test("pickReady — audit(다른 task 의존)는 덩어리에 검수전 항목 남으면 not-ready (#6 hunt 추가항목 게이트)", () => {
+  // audit.blockedBy=[원래 항목들, hunt] 는 정적이라 hunt 가 동적 발행한 추가항목(검수전)을 안 기다린다.
+  // → hunt done 되면 audit ready → 미검증 항목 섞인 ledger 로 완결 인증(버그). 덩어리에 검수전 남으면 막는다.
+  const nodes = [
+    { id: "chunk", kind: "chunk", parentId: null, status: "todo" },
+    { id: "g0", kind: "group", parentId: "chunk", status: "todo" },
+    { id: "i1", kind: "item", parentId: "g0", badge: "o", blockedBy: [], status: "todo" },
+    { id: "hunt", kind: "task", parentId: "chunk", blockedBy: ["i1"], status: "done" },
+    { id: "add0", kind: "item", parentId: "chunk", badge: "검수전", blockedBy: [], status: "todo" }, // hunt 추가항목 — 미검증
+    { id: "audit", kind: "task", parentId: "chunk", blockedBy: ["i1", "hunt"], status: "todo" },
+  ];
+  // add0(미검증 leaf)만 ready, audit 는 덩어리에 검수전 남아 게이트.
+  assert.deepEqual(pickReady(nodes).map((n) => n.id).sort(), ["add0"]);
+});
+
+test("pickReady — audit 는 덩어리 검수전 0 이면 ready (#6 게이트 통과)", () => {
+  const nodes = [
+    { id: "chunk", kind: "chunk", parentId: null, status: "todo" },
+    { id: "i1", kind: "item", parentId: "chunk", badge: "o", blockedBy: [], status: "todo" },
+    { id: "hunt", kind: "task", parentId: "chunk", blockedBy: ["i1"], status: "done" },
+    { id: "add0", kind: "item", parentId: "chunk", badge: "x", blockedBy: [], status: "todo" }, // 검증됨
+    { id: "audit", kind: "task", parentId: "chunk", blockedBy: ["i1", "hunt"], status: "todo" },
+  ];
+  assert.deepEqual(pickReady(nodes).map((n) => n.id), ["audit"]);
+});
+
 test("buildAddParams — 항목(prompt/schema)은 body=exec입력, kind/badge 통과", () => {
   const p = buildAddParams(
     { id: "i1", kind: "item", title: "재고 차감", description: "주문 시 차감", prompt: "verify…", schema: { type: "object" }, badge: "검수전" },
