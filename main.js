@@ -72,8 +72,10 @@ export async function reconcileTick(deps) {
 
 // ── app 연결(런타임) ──
 
-/** exec-one spawn — stdin 에 {prompt, schema?} 쓰고 stdout {oxf, result} 파싱. */
-function execOne(app, exe, env, body) {
+/** exec-one spawn — stdin 에 {prompt, schema?} 쓰고 stdout {oxf, result} 파싱.
+ *  onHeartbeat: exec-one 의 stderr(claude 스트림: thinking 델타·이벤트 jsonl)가 흐를 때마다 호출 →
+ *  스케줄러 staleness 리셋(살아있음). 둘 중 하나라도 흐르면 안 잘린다(긴 검색 대기 중 thinking 흐름). */
+function execOne(app, exe, env, body, onHeartbeat) {
   return new Promise((resolve, reject) => {
     let out = "";
     const dec = new TextDecoder();
@@ -83,6 +85,12 @@ function execOne(app, exe, env, body) {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
         });
+        // 살아있음 신호: stderr 활동(스트림 이벤트·thinking 델타)마다 heartbeat. 도는 동안 staleness 리셋.
+        if (onHeartbeat && app.process.onStderr) {
+          app.process.onStderr(handle, () => {
+            try { onHeartbeat(); } catch { /* heartbeat 실패는 exec 진행 막지 않음 */ }
+          });
+        }
         app.process.onExit(handle, (code) => {
           if (code !== 0) return reject(new Error(`exec-one exit ${code}`));
           try {
@@ -206,7 +214,8 @@ export default {
             listNodes: () => app.commands.execute(KANBAN + ".node.list", {}),
             getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
             editNode: (id, fields) => app.commands.execute(KANBAN + ".node.edit", { node: id, ...fields }),
-            execOne: (body) => execOne(app, runtime.bin, runtime.env, body),
+            // exec 중 스트림 활동마다 heartbeat → 코어 staleness 리셋(도는 동안 안 잘림). API 미구현이면 no-op.
+            execOne: (body) => execOne(app, runtime.bin, runtime.env, body, () => app.scheduler?.heartbeat?.(RECONCILE_ID)),
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
