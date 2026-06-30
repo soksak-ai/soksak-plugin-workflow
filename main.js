@@ -40,14 +40,20 @@ export default {
               if (ev.ev === "add") {
                 const parentId = ev.parent ? keyOf.get(ev.parent) : undefined;
                 const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id)).filter(Boolean);
-                const r = await app.commands.execute(KANBAN + ".node.add", {
+                const params = {
                   title: ev.title || ev.kind,
                   parentId,
                   body: ev.body || "",
                   blockedBy,
                   locked: true,
                   type: "task",
-                });
+                };
+                // 칸반 드래프트 계약(Phase 2): 마커는 드래프트 노드에만 — 일반 노드엔 안 넣음(보드 오염 방지).
+                // 항목=badge("검수전"), 덩어리 부모=isDraft, 복제 재제출=parentDraftId(덩어리 수준). 칸반이 oxf 집계.
+                if (ev.badge) params.badge = ev.badge;
+                if (ev.is_draft) params.isDraft = true;
+                if (ev.parent_draft_id) params.parentDraftId = ev.parent_draft_id;
+                const r = await app.commands.execute(KANBAN + ".node.add", params);
                 if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
               } else if (ev.ev === "status") {
                 const node = keyOf.get(ev.id);

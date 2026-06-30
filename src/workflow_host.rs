@@ -31,8 +31,21 @@ pub enum NodeEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
         blocked_by: Vec<String>,
-        badge: String, // "검수전"(검증 전 기본) — phase 등 컨테이너는 빈 문자열(집계 배지는 칸반이 계산)
+        // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
+        // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
+        // 칸반 subValidation 이 badge 보유 자손의 oxf 를 집계 → 그룹/덩어리 감사는 칸반이 자동 계산.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        badge: Option<String>,
+        #[serde(skip_serializing_if = "is_false")]
+        is_draft: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_draft_id: Option<String>,
     },
+}
+
+/// serde skip_serializing_if(bool) — false 면 직렬화 생략(일반 노드에 is_draft:false 안 새게).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// parallel/pipeline 스코프 — blockedBy 를 형제(parallel)/체인(pipeline)으로 가른다. 노드는 만들지 않는다.
@@ -86,6 +99,17 @@ impl WorkflowHost {
     fn opt_str(opts: &BTreeMap<String, Val>, key: &str) -> String {
         opts.get(key).map(to_string).unwrap_or_default()
     }
+    /// 비어있지 않은 문자열 opt → Some(드래프트 마커 통로: badge/parentDraftId). 없으면 None(생략).
+    fn opt_marker(opts: &BTreeMap<String, Val>, key: &str) -> Option<String> {
+        match opts.get(key) {
+            Some(Val::Str(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        }
+    }
+    /// bool opt(isDraft 등). Val::Bool(true) 만 true.
+    fn opt_bool(opts: &BTreeMap<String, Val>, key: &str) -> bool {
+        matches!(opts.get(key), Some(Val::Bool(true)))
+    }
 }
 
 impl Host for WorkflowHost {
@@ -102,6 +126,11 @@ impl Host for WorkflowHost {
             _ => vec![],
         };
         let schema = opts.get("schema").map(crate::interp::val_to_json).filter(|s| s.is_object());
+        // 칸반 드래프트 마커(통로): 워크플로(directive)가 항목엔 badge:"검수전", 덩어리엔 isDraft,
+        // 복제엔 parentDraftId 를 opts 로 박는다. 일반 노드는 셋 다 없음 → 보드 오염 없음.
+        let badge = Self::opt_marker(opts, "badge");
+        let is_draft = Self::opt_bool(opts, "isDraft");
+        let parent_draft_id = Self::opt_marker(opts, "parentDraftId");
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
@@ -111,7 +140,9 @@ impl Host for WorkflowHost {
             prompt: prompt.into(),
             schema,
             blocked_by,
-            badge: "검수전".into(), // 규칙 D: 검증 전 드래프트 노드 기본 배지
+            badge,
+            is_draft,
+            parent_draft_id,
         });
         // pipeline 체인 전진(같은 item 의 다음 stage 가 이 노드에 blockedBy).
         if in_pipeline {
@@ -135,7 +166,10 @@ impl Host for WorkflowHost {
             prompt: String::new(),
             schema: None,
             blocked_by,
-            badge: String::new(), // 컨테이너: 집계 배지는 칸반(subValidation)이 자식 oxf 로 계산
+            // 컨테이너: 드래프트 마커 없음. 집계 배지는 칸반(subValidation)이 자식 oxf 로 자동 계산.
+            badge: None,
+            is_draft: false,
+            parent_draft_id: None,
         });
         self.stack = vec![id.clone()]; // phase 는 최상위 단계 — stack 리셋
         self.prev_phase = Some(id);
@@ -178,13 +212,13 @@ mod tests {
         }
         m
     }
-    /// Add 이벤트 → (kind, id, parent, blocked_by, badge).
-    fn adds(h: &WorkflowHost) -> Vec<(String, String, Option<String>, Vec<String>, String)> {
+    /// Add 이벤트 → (kind, id, parent, blocked_by).
+    fn adds(h: &WorkflowHost) -> Vec<(String, String, Option<String>, Vec<String>)> {
         h.events
             .iter()
             .map(|e| match e {
-                NodeEvent::Add { kind, id, parent, blocked_by, badge, .. } => {
-                    (kind.clone(), id.clone(), parent.clone(), blocked_by.clone(), badge.clone())
+                NodeEvent::Add { kind, id, parent, blocked_by, .. } => {
+                    (kind.clone(), id.clone(), parent.clone(), blocked_by.clone())
                 }
             })
             .collect()
@@ -319,13 +353,59 @@ mod tests {
     }
 
     #[test]
-    fn rule_d_agent_badge_is_pending() {
-        // [규칙 D] 발행 노드 = 드래프트 — 검증 전 배지 "검수전". status(예정/진행/완료) 축과 별개.
+    fn draft_badge_only_when_opts_marks_item() {
+        // [칸반 계약] badge 는 드래프트 항목에만(opts.badge). 일반 노드엔 없음(보드 오염 방지).
+        let mut h = host();
+        h.agent("process", &BTreeMap::new()).unwrap(); // 일반 노드 → badge 없음
+        h.agent("item", &opts(&[("badge", "검수전")])).unwrap(); // 드래프트 항목 → badge
+        let badges: Vec<Option<String>> = h
+            .events
+            .iter()
+            .map(|e| match e {
+                NodeEvent::Add { badge, .. } => badge.clone(),
+            })
+            .collect();
+        assert_eq!(badges[0], None, "일반 노드엔 badge 없음(보드 오염 방지)");
+        assert_eq!(badges[1], Some("검수전".into()), "드래프트 항목 = opts.badge");
+    }
+
+    #[test]
+    fn draft_chunk_isdraft_and_clone_parentdraftid() {
+        // [칸반 계약] 덩어리 부모=isDraft, 복제 재제출=parentDraftId(덩어리 수준). opts 에서 통과.
+        let mut h = host();
+        let mut o = opts(&[("parentDraftId", "chunk-v1"), ("title", "재고 정합성")]);
+        o.insert("isDraft".into(), Val::Bool(true));
+        h.agent("chunk", &o).unwrap();
+        match &h.events[0] {
+            NodeEvent::Add { is_draft, parent_draft_id, badge, .. } => {
+                assert!(*is_draft, "덩어리 부모 isDraft");
+                assert_eq!(parent_draft_id.as_deref(), Some("chunk-v1"), "복제 계보(덩어리 수준)");
+                assert_eq!(badge, &None, "덩어리는 항목 badge 가 아님");
+            }
+        }
+    }
+
+    #[test]
+    fn plain_node_json_omits_draft_markers() {
+        // [칸반 계약] 직렬화 수준 — 일반 노드 JSON 엔 드래프트 마커가 *전혀* 안 실린다(보드 오염 방지).
         let mut h = host();
         h.agent("p", &BTreeMap::new()).unwrap();
-        match &h.events[0] {
-            NodeEvent::Add { badge, .. } => assert_eq!(badge, "검수전"),
+        h.phase("X");
+        for ev in &h.events {
+            let js = serde_json::to_string(ev).unwrap();
+            assert!(!js.contains("badge"), "일반 노드에 badge 없음: {js}");
+            assert!(!js.contains("is_draft"), "일반 노드에 is_draft 없음: {js}");
+            assert!(!js.contains("parent_draft_id"), "일반 노드에 parent_draft_id 없음: {js}");
         }
+    }
+
+    #[test]
+    fn draft_item_json_carries_badge() {
+        // 드래프트 항목은 JSON 에 badge 가 실린다(칸반 node.add 가 드래프트로 인식).
+        let mut h = host();
+        h.agent("item", &opts(&[("badge", "검수전")])).unwrap();
+        let js = serde_json::to_string(&h.events[0]).unwrap();
+        assert!(js.contains("\"badge\":\"검수전\""), "드래프트 항목 JSON 에 badge: {js}");
     }
 
     #[test]
