@@ -39,6 +39,7 @@ enum Mode {
 
 pub struct WorkflowHost<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> {
     pub events: Vec<NodeEvent>,
+    emit: Option<Box<dyn FnMut(&NodeEvent)>>, // 실시간 emit(stdout JSON line) — 없으면 buffer 만.
     stack: Vec<String>,         // 부모 컨테이너(phase/group) — 무한뎁스
     modes: Vec<Mode>,           // 현재 그룹 모드
     prev_chain: Option<String>, // pipeline 체인 직전 노드(같은 item)
@@ -51,6 +52,7 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> WorkflowHost
     pub fn new(exec: F) -> Self {
         WorkflowHost {
             events: vec![],
+            emit: None,
             stack: vec![],
             modes: vec![],
             prev_chain: None,
@@ -58,6 +60,18 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> WorkflowHost
             counter: 0,
             exec,
         }
+    }
+    /// 실시간 emit 콜백 주입(stdout JSON line 등). 미주입 시 events buffer 만 채운다.
+    pub fn with_emit(mut self, emit: Box<dyn FnMut(&NodeEvent)>) -> Self {
+        self.emit = Some(emit);
+        self
+    }
+    /// 노드 이벤트 발행: emit 콜백(실시간) + events buffer(검증·일괄).
+    fn emit_node(&mut self, ev: NodeEvent) {
+        if let Some(e) = self.emit.as_mut() {
+            e(&ev);
+        }
+        self.events.push(ev);
     }
     fn next_id(&mut self, prefix: &str) -> String {
         self.counter += 1;
@@ -76,7 +90,7 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Wor
         let in_pipeline = matches!(self.modes.last(), Some(Mode::Pipeline));
         // pipeline 체인이면 직전 노드에 blockedBy, 그 외(단일/parallel)는 없음.
         let blocked_by = if in_pipeline { Self::opt_vec(&self.prev_chain) } else { vec![] };
-        self.events.push(NodeEvent::Add {
+        self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
             kind: "agent".into(),
@@ -84,9 +98,9 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Wor
             body: prompt.into(),
             blocked_by,
         });
-        self.events.push(NodeEvent::Status { id: id.clone(), status: "inprogress".into(), result: String::new() });
+        self.emit_node(NodeEvent::Status { id: id.clone(), status: "inprogress".into(), result: String::new() });
         let res = (self.exec)(prompt, opts)?;
-        self.events.push(NodeEvent::Status { id: id.clone(), status: "done".into(), result: to_string(&res) });
+        self.emit_node(NodeEvent::Status { id: id.clone(), status: "done".into(), result: to_string(&res) });
         if in_pipeline {
             self.prev_chain = Some(id);
         }
@@ -96,7 +110,7 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Wor
     fn phase(&mut self, title: &str) {
         let id = self.next_id("phase");
         let blocked_by = Self::opt_vec(&self.prev_phase); // 직전 phase 에 의존(순차)
-        self.events.push(NodeEvent::Add {
+        self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent: None,
             kind: "phase".into(),
@@ -115,7 +129,7 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Wor
         let id = self.next_id(kind);
         let parent = self.stack.last().cloned();
         // 컨테이너 노드(게이트). 그룹끼리만 blockedBy — 여기선 부모 컨테이너가 게이트라 blockedBy 비움.
-        self.events.push(NodeEvent::Add {
+        self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
             kind: kind.into(),
