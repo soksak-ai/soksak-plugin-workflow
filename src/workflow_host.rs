@@ -24,12 +24,17 @@ pub enum NodeEvent {
     Add {
         id: String,
         parent: Option<String>,
-        kind: String, // "phase" | "agent" — parallel/pipeline 은 노드 아님(규칙 A)
+        // node kind — parallel/pipeline 은 노드 아님(규칙 A). 컨테이너="phase". 작업=opts.kind 통과:
+        // draft 모델 B → "chunk"(덩어리·isDraft) | "group"(기능분류) | "item"(요건·badge) | "task"(Generate/Hunt/Audit).
+        // 미지정 시 "agent"(일반 워크플로). main.js 가 kind 로 발행/실행 처리를 가른다.
+        kind: String,
         title: String,
         body: String,
         prompt: String, // agent 프롬프트(스케줄러가 exec-one 으로 실행할 원본)
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        category: Option<String>, // 의미 그룹 차원 라벨(group 노드 분류·item 의 소속). draft category 사후 군집.
         blocked_by: Vec<String>,
         // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
         // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
@@ -131,14 +136,18 @@ impl Host for WorkflowHost {
         let badge = Self::opt_marker(opts, "badge");
         let is_draft = Self::opt_bool(opts, "isDraft");
         let parent_draft_id = Self::opt_marker(opts, "parentDraftId");
+        // node kind/category — draft 모델 B 가 opts 로 박는다(chunk/group/item/task + 분류 차원). 미지정=agent.
+        let kind = Self::opt_marker(opts, "kind").unwrap_or_else(|| "agent".into());
+        let category = Self::opt_marker(opts, "category");
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
-            kind: "agent".into(),
+            kind,
             title,
             body,
             prompt: prompt.into(),
             schema,
+            category,
             blocked_by,
             badge,
             is_draft,
@@ -165,6 +174,7 @@ impl Host for WorkflowHost {
             body: String::new(),
             prompt: String::new(),
             schema: None,
+            category: None,
             blocked_by,
             // 컨테이너: 드래프트 마커 없음. 집계 배지는 칸반(subValidation)이 자식 oxf 로 자동 계산.
             badge: None,
@@ -367,6 +377,26 @@ mod tests {
             .collect();
         assert_eq!(badges[0], None, "일반 노드엔 badge 없음(보드 오염 방지)");
         assert_eq!(badges[1], Some("검수전".into()), "드래프트 항목 = opts.badge");
+    }
+
+    #[test]
+    fn draft_kind_and_category_from_opts() {
+        // [모델 B emit 확장] kind(chunk/group/item/task) + category 가 opts 에서 흘러온다. 미지정=agent.
+        let mut h = host();
+        h.agent("", &opts(&[("kind", "group"), ("category", "재고 관리"), ("title", "재고")])).unwrap();
+        h.agent("p", &BTreeMap::new()).unwrap(); // 미지정 → agent, category 없음
+        match &h.events[0] {
+            NodeEvent::Add { kind, category, .. } => {
+                assert_eq!(kind, "group");
+                assert_eq!(category.as_deref(), Some("재고 관리"));
+            }
+        }
+        match &h.events[1] {
+            NodeEvent::Add { kind, category, .. } => {
+                assert_eq!(kind, "agent", "미지정 기본 kind");
+                assert_eq!(category, &None, "category 미지정 시 생략");
+            }
+        }
     }
 
     #[test]
