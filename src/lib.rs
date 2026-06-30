@@ -10,5 +10,6 @@ pub mod host;
 pub mod interp;
 pub mod lang;
 pub mod provider;
+pub mod scheduler;
 pub mod skeleton;
 pub mod workflow_host;
