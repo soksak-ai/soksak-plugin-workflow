@@ -38,7 +38,7 @@ const COMMON = `SHARED CONCEPTS:
 
 // ── 입력 해석 + 복제 계보(parentDraftId, 덩어리 수준만 — 개선본 재제출 시 args 로 주입).
 let DIRECTIVE = ''
-if (args && args.split) DIRECTIVE = args
+if (typeof args === 'string') DIRECTIVE = args   // 클론 VM 은 member(Str,'split')=Undefined → `args.split` 은 영영 falsy. string 판정은 typeof 로.
 else if (args && args.directive) DIRECTIVE = args.directive
 else if (args && args.DIRECTIVE) DIRECTIVE = args.DIRECTIVE
 else if (args && args.IDEA) DIRECTIVE = args.IDEA

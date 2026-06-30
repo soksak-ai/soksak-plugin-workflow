@@ -694,6 +694,29 @@ mod tests {
     }
 
     #[test]
+    fn draft_string_args_sets_directive_not_sample() {
+        // [#7] args 가 문자열(지시어)이면 draft.js 가 DIRECTIVE=args 로 받아야 한다. 클론 VM 의 member(Str,"split")
+        // 은 Undefined 라 구 `if (args && args.split)` 분기는 영영 falsy → string 지시어 폐기 → SAMPLE 폴백 버그.
+        // 수정(typeof args === 'string') 후엔 emit 된 덩어리(chunk) description = 넘긴 문자열.
+        // fixtures/draft.skeleton.json = `node 추출기/src/cli.js parse workflows/draft.js` 산출(draft.js 변경 시 재생성).
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let program = skeleton.get("program").expect("program(완전 AST)");
+        let mut wh = WorkflowHost::new();
+        Interp::new(&mut wh)
+            .run(program, Json::String("내 고유 지시어 XYZ".to_string()))
+            .expect("interp 해석");
+        let chunk_desc = wh.events.iter().find_map(|ev| {
+            let NodeEvent::Add { kind, description, .. } = ev;
+            if kind == "chunk" { Some(description.clone()) } else { None }
+        });
+        assert_eq!(
+            chunk_desc.as_deref(),
+            Some("내 고유 지시어 XYZ"),
+            "string args → DIRECTIVE=args (SAMPLE 폴백 아님)"
+        );
+    }
+
+    #[test]
     fn emit_callback_receives_published_nodes() {
         // with_emit 콜백이 실시간으로 발행 노드를 받는다(stdout JSON line 경로).
         use std::cell::RefCell;
