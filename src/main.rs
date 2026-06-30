@@ -213,9 +213,10 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let (env, profile) = auth_env()?;
     eprintln!("[soksak] exec-one (model={model}, 프로필={profile}) → claude -p");
     let full = build_prompt_with_schema(&input.prompt, input.schema.as_ref(), lang.as_ref());
-    // 10800s(3h): lease=프로세스-생존 — 도는 중 안 잘림. 코어 zombie_backstop(3h)·register timeout_ms 와 천장 일치
-    // (claude 가 backstop 전에 자체 종료 안 하게 ≥backstop). hang 방지 하드캡은 유지하되 넉넉히.
-    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 10800 };
+    // 7200s(2h): provider 캡 = claude 무한 방지용. lease=프로세스-생존이라 천장 통일 불필요 — 정상은 provider 가
+    // claude 종료→onExit→reply(검색 fan-out 1h+ 수용). register timeout_ms(zombie_backstop 3h)는 그것도 실패한
+    // 좀비 전용(provider 캡보다 길게). 중복은 lease(도는 중 재발화 X)로 0 — 천장 일치 안 해도 안전.
+    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200 };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
     let result = if input.schema.is_some() {
         run_agent(&req, &env)?

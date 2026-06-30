@@ -249,9 +249,9 @@ export default {
           id: RECONCILE_ID,
           trigger: { kind: "reconcile" },
           command: RECONCILE_CMD,
-          // lease=프로세스-생존: 핸들러가 onExit 까지 reply 보류(검색 1시간이든 안 잘림). timeout_ms 는 zombie
-          // backstop 천장(3h) 과 일치 — provider 캡=register timeout_ms=코어 zombie_backstop=3h. 도는 중 안 자르고
-          // 진짜 좀비만 backstop. (core-scheduler 가 zombie_backstop_ms wire — 값 확정 시 정렬.)
+          // lease=프로세스-생존: 핸들러가 onExit 까지 reply 보류(검색 1시간이든 안 잘림). 천장 통일 불필요 —
+          // 정상은 provider 캡(2h)이 claude 종료시키고, timeout_ms = zombie_backstop(3h)는 그것도 실패한 좀비
+          // 전용(provider 보다 길게). 중복은 lease 가 막는다(도는 중 재발화 X). core 가 zombie_backstop_ms wire.
           timeout_ms: 10800000,
           // 529 과부하 등 일시 실패 backoff 재시도(즉시 재시도 X — 지연 후 자연 복구). 실패=reconcileTick ok:false.
           retry: { max: 5, base_ms: 3000, max_ms: 60000 },
