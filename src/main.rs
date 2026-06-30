@@ -15,11 +15,11 @@ use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
 use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost, StubHost};
-use soksak_plugin::interp::{val_to_json, Interp};
+use soksak_plugin::interp::{val_to_json, Host, Interp, Val};
 use soksak_plugin::lang::Language;
 use soksak_plugin::provider::{run_agent, run_agent_text, AgentRequest};
-use soksak_plugin::workflow_host::{NodeEvent, WorkflowHost};
-use std::collections::HashSet;
+use soksak_plugin::workflow_host::{ClaudeEmitHost, NodeEvent, WorkflowHost};
+use std::collections::{BTreeMap, HashSet};
 
 const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
 
@@ -76,6 +76,13 @@ fn real_main() -> Result<(), String> {
     // 발행(interp)과 분리된 stateless 실행기. 코어 스케줄러가 칸반 ready 노드 하나를 이 경로로 실행한다.
     if argv[0] == "exec-one" {
         return run_exec_one(&argv);
+    }
+
+    // exec-stage — stage 작업 실행(모델 B 동적 발행). stdin {skeleton:{program}, stage, args:{directive, chunkRef}}
+    // → ClaudeEmitHost 로 해석(opts.publish 없으면 claude, 있으면 자식 노드 발행) → 자식 NodeEvent JSON line
+    // stdout + 최종 {ev:result}. main.js reconcile 가 kind=task 노드를 이 경로로 실행해 그룹/항목 동적 발행.
+    if argv[0] == "exec-stage" {
+        return run_exec_stage(&argv);
     }
 
     let path = &argv[0];
@@ -224,5 +231,74 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
         Value::String(run_agent_text(&req, &env)?)
     };
     println!("{}", serde_json::to_string_pretty(&exec_one::build_output(result)).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// run_exec_stage — stage 작업 실행(모델 B). stdin {skeleton:{program}, stage, args, model?} → ClaudeEmitHost 해석.
+/// opts.publish 없는 agent(예: genPrompt)는 claude 실행, opts.publish:true agent 는 자식 노드 발행(stdout JSON line).
+/// 최종 워크플로 return 은 {ev:result, value} 로. main.js reconcile 가 kind=task 노드를 이걸로 실행해 동적 발행.
+fn run_exec_stage(argv: &[String]) -> Result<(), String> {
+    let mut lang: Option<Language> = None;
+    let mut allow_tools: Vec<String> = vec![];
+    let mut model_override: Option<String> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--lang" => {
+                i += 1;
+                lang = Some(Language::parse(argv.get(i).ok_or("--lang 값 누락")?));
+            }
+            "--allow-tools" => {
+                i += 1;
+                let t = argv.get(i).ok_or("--allow-tools 값 누락")?;
+                allow_tools = t.split_whitespace().map(|s| s.to_string()).collect();
+            }
+            "--model" => {
+                i += 1;
+                model_override = Some(argv.get(i).ok_or("--model 값 누락")?.clone());
+            }
+            other => return Err(format!("exec-stage: 미지 인자 {other:?}")),
+        }
+        i += 1;
+    }
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| format!("read stdin: {e}"))?;
+    let input: Value = serde_json::from_str(raw.trim()).map_err(|e| format!("exec-stage 입력 JSON 파싱: {e}"))?;
+    // skeleton.program(완전 AST) 또는 program 직접.
+    let program = input
+        .get("skeleton")
+        .and_then(|s| s.get("program"))
+        .or_else(|| input.get("program"))
+        .cloned()
+        .ok_or("exec-stage 입력에 skeleton.program(완전 AST) 필요")?;
+    let stage = input.get("stage").and_then(|s| s.as_str()).ok_or("exec-stage 입력에 stage 필요")?.to_string();
+    // args = input.args(객체) + stage + lang 주입.
+    let mut args_obj = match input.get("args") {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    };
+    args_obj.insert("stage".to_string(), Value::String(stage.clone()));
+    if let Some(l) = &lang {
+        args_obj.insert("lang".to_string(), Value::String(l.code.clone()));
+    }
+    let args_json = Value::Object(args_obj);
+    let model = model_override
+        .or_else(|| input.get("model").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+
+    let (env, profile) = auth_env()?;
+    eprintln!("[soksak] exec-stage stage={stage} (model={model}, 프로필={profile})");
+    // claude 러너 = ClaudeHost(비-publish agent 만 탄다). publish agent 는 ClaudeEmitHost.wh 가 발행.
+    let mut ch = ClaudeHost { env, allow_tools, default_model: model, lang };
+    let run = move |p: &str, o: &BTreeMap<String, Val>| ch.agent(p, o);
+    let mut h = ClaudeEmitHost::new(run).with_emit(Box::new(|ev: &NodeEvent| {
+        if let Ok(s) = serde_json::to_string(ev) {
+            println!("{s}");
+        }
+    }));
+    let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("exec-stage interpret: {e}"))?;
+    // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).
+    let out = json!({ "ev": "result", "value": val_to_json(&result) });
+    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
     Ok(())
 }

@@ -210,6 +210,53 @@ impl Host for WorkflowHost {
     }
 }
 
+/// ClaudeEmitHost — exec-stage 호스트. opts.publish 로 실행(claude) vs 발행(노드)을 가른다(규칙 C·결정3):
+/// - opts.publish 없음 → 주입된 run(claude) 실행. stage 의 LLM 작업(예: genPrompt) = 진짜 호출, 결과로 데이터흐름.
+/// - opts.publish:true → WorkflowHost 위임(자식 노드 발행, schema-shaped stub 반환). claude 안 돌림.
+/// 즉 한 stage exec = claude 1+회 + 결과 트리를 항목/그룹 노드로 emit. 멱등은 스케줄러(done 재실행 X).
+/// run = 주입(테스트는 fake, 실행은 ClaudeHost.agent). 발행 콜백(stdout)은 wh 에 위임.
+pub struct ClaudeEmitHost<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> {
+    pub wh: WorkflowHost,
+    run: F,
+}
+
+impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> ClaudeEmitHost<F> {
+    pub fn new(run: F) -> Self {
+        ClaudeEmitHost { wh: WorkflowHost::new(), run }
+    }
+    /// 발행 노드 실시간 emit(stdout JSON line) — wh 에 위임.
+    pub fn with_emit(mut self, emit: Box<dyn FnMut(&NodeEvent)>) -> Self {
+        self.wh = self.wh.with_emit(emit);
+        self
+    }
+    fn is_publish(opts: &BTreeMap<String, Val>) -> bool {
+        matches!(opts.get("publish"), Some(Val::Bool(true)))
+    }
+}
+
+impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for ClaudeEmitHost<F> {
+    fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
+        if Self::is_publish(opts) {
+            self.wh.agent(prompt, opts) // 발행만(노드 emit + stub)
+        } else {
+            (self.run)(prompt, opts) // claude 실행(stage 의 LLM 작업)
+        }
+    }
+    fn phase(&mut self, title: &str) {
+        self.wh.phase(title);
+    }
+    fn log(&mut self, _msg: &str) {}
+    fn group_enter(&mut self, kind: &str) {
+        self.wh.group_enter(kind);
+    }
+    fn group_exit(&mut self) {
+        self.wh.group_exit();
+    }
+    fn stage_boundary(&mut self) {
+        self.wh.stage_boundary();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +444,30 @@ mod tests {
             NodeEvent::Add { kind, category, .. } => {
                 assert_eq!(kind, "agent", "미지정 기본 kind");
                 assert_eq!(category, &None, "category 미지정 시 생략");
+            }
+        }
+    }
+
+    #[test]
+    fn claude_emit_host_publish_emits_else_runs() {
+        // [exec-stage] opts.publish:true → 노드 발행(claude X). 없음 → 주입 run(claude) 실행.
+        let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(format!("ran:{p}"))));
+        // 비-publish(genPrompt) → run 실행, 노드 발행 안 함.
+        let r = h.agent("genPrompt", &BTreeMap::new()).unwrap();
+        assert_eq!(to_string(&r), "ran:genPrompt", "비-publish 는 주입 run(claude) 실행");
+        assert!(h.wh.events.is_empty(), "비-publish 는 노드 발행 0");
+        // publish 항목 → 노드 발행(claude 안 돌림), prompt=verifyPrompt 가 body 로.
+        let mut o = opts(&[("kind", "item"), ("nodeId", "g0i0"), ("parent", "g0"), ("title", "재고 차감"), ("badge", "검수전")]);
+        o.insert("publish".into(), Val::Bool(true));
+        h.agent("재고 차감 검증 프롬프트", &o).unwrap();
+        assert_eq!(h.wh.events.len(), 1, "publish 는 노드 1개 발행");
+        match &h.wh.events[0] {
+            NodeEvent::Add { kind, id, parent, prompt, badge, .. } => {
+                assert_eq!(kind, "item");
+                assert_eq!(id, "g0i0");
+                assert_eq!(parent.as_deref(), Some("g0"));
+                assert_eq!(prompt, "재고 차감 검증 프롬프트", "항목 prompt=verifyPrompt(exec-one 입력)");
+                assert_eq!(badge.as_deref(), Some("검수전"));
             }
         }
     }

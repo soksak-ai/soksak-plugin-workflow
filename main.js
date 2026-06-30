@@ -255,6 +255,9 @@ export default {
           timeout_ms: 10800000,
           // 529 과부하 등 일시 실패 backoff 재시도(즉시 재시도 X — 지연 후 자연 복구). 실패=reconcileTick ok:false.
           retry: { max: 5, base_ms: 3000, max_ms: 60000 },
+          // lease=프로세스-생존: 코어가 unclamped reply-wait(핸들러 onExit 까지) + zombie_backstop 으로 간다.
+          // exec-one/exec-stage 가 검색 1h+ 돌아도 안 잘리고, 도는 중 재발화 0(lease).
+          process_lease: true,
         });
       } catch (e) {
         app.bus?.emit?.("workflow.error", { message: `scheduler.register: ${String(e)}` });
