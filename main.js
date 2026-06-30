@@ -34,6 +34,23 @@ export function pickReady(nodes) {
   );
 }
 
+/** classifyResult — exec-one 산출(result)의 모양으로 처리 분기를 정한다(모델 B 동적 발행).
+ *  draft 스테이지마다 산출 스키마가 달라 main.js reconcile 가 이걸로 가른다:
+ *  - generate: {title, groups[]} → 덩어리 title 갱신 + 그룹/항목 동적 발행(--emit expand 재호출).
+ *  - hunt:     {additions[]}      → 누락 항목(badge=검수전) 동적 발행.
+ *  - audit:    {complete|verdict} → 덩어리 감사 기록.
+ *  - verify:   {status|oxf=o/x/f} → 항목 배지 갱신(execResultToEdit).
+ *  - plain:    그 외(raw 텍스트 등) → 결과만 기록. */
+export function classifyResult(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return "plain";
+  if (Array.isArray(result.groups)) return "generate";
+  if (Array.isArray(result.additions)) return "hunt";
+  if (typeof result.complete === "boolean" || typeof result.verdict === "string") return "audit";
+  const v = result.oxf || result.status;
+  if (v === "o" || v === "x" || v === "f") return "verify";
+  return "plain";
+}
+
 /** exec-one {oxf, result} → node.edit 필드. oxf 유효(o/x/f)면 badge 갱신. result 는 항상 기록.
  *  oxf 없으면(검증 아님/무판정) badge 미변경 — 진척 없음(reconcileTick 이 self-poke 안 함). */
 export function execResultToEdit(execOut) {
