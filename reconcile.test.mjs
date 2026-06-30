@@ -75,6 +75,23 @@ test("buildAddParams — 그룹(prompt 없음)은 body=ev.body, 드래프트 마
   assert.equal(p.isDraft, undefined);
 });
 
+test("buildAddParams — kind=task + taskCtx → body=exec-stage 입력(skeleton 임베드)", () => {
+  const ev = { id: "gen", kind: "task", title: "Generate", prompt: "generate" };
+  const p = buildAddParams(ev, "k-chunk", [], { skeleton: { program: { type: "Program" } }, directive: "약국 SaaS" });
+  assert.equal(p.kind, "task");
+  const body = JSON.parse(p.body);
+  assert.deepEqual(body.skeleton, { program: { type: "Program" } }, "skeleton 임베드(main.js, draft.js 무관여)");
+  assert.equal(body.stage, "generate", "stage=ev.prompt(스테이지명)");
+  assert.equal(body.args.directive, "약국 SaaS");
+  assert.equal(body.args.chunkRef, "k-chunk", "chunkRef=부모(덩어리)");
+  assert.equal(p.badge, undefined, "stage 작업은 badge 없음");
+});
+
+test("buildAddParams — kind=task 인데 taskCtx 없으면 일반 body(skeleton 미임베드)", () => {
+  const p = buildAddParams({ id: "gen", kind: "task", prompt: "generate" }, "k1", []);
+  assert.equal(JSON.parse(p.body).prompt, "generate", "taskCtx 없으면 exec-one 입력 형태로 폴백");
+});
+
 test("classifyResult — 스테이지 산출 모양으로 분기(모델 B)", () => {
   assert.equal(classifyResult({ title: "약국", groups: [] }), "generate");
   assert.equal(classifyResult({ additions: [{ title: "x" }] }), "hunt");

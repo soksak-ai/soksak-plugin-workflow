@@ -98,15 +98,27 @@ export async function reconcileTick(deps) {
 }
 
 /** 발행 이벤트(ev) → 칸반 node.add 파라미터(공유 — 발행 relay·exec-stage 자식 relay 동일).
- *  parentId/blockedBy 는 호출자가 keyOf 로 미리 해결해 넘긴다. body = exec-one 입력(prompt/schema) 또는 ev.body. */
-export function buildAddParams(ev, parentId, blockedBy) {
-  const execInput = ev.prompt
-    ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
-    : ev.body || "";
+ *  parentId/blockedBy 는 호출자가 keyOf 로 미리 해결해 넘긴다. body:
+ *  - kind=task(stage 작업) + taskCtx{skeleton,directive} → exec-stage 입력 {skeleton, stage(=ev.prompt), args{directive,chunkRef}}.
+ *    chunkRef=부모(덩어리). reconcile 가 이 body 를 exec-stage stdin 으로 그대로 파이프. (main.js 가 skeleton 임베드 — draft.js 무관여.)
+ *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema} 또는 ev.body. */
+export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
+  let body;
+  if (ev.kind === "task" && taskCtx && taskCtx.skeleton) {
+    body = JSON.stringify({
+      skeleton: taskCtx.skeleton,
+      stage: ev.prompt || "generate",
+      args: { directive: taskCtx.directive, chunkRef: parentId },
+    });
+  } else {
+    body = ev.prompt
+      ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
+      : ev.body || "";
+  }
   const params = {
     title: ev.title || ev.kind,
     parentId,
-    body: execInput,
+    body,
     blockedBy: blockedBy || [],
     locked: true,
     type: "task",
@@ -128,12 +140,20 @@ async function reconcileStage(deps, target, body) {
   } catch (e) {
     return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
   }
+  // 자식 stage 노드(Hunt/Audit)에 skeleton 전파 — 이 task 입력 body 에서 추출(같은 워크플로 골격 재실행).
+  let childCtx;
+  try {
+    const inp = JSON.parse(body);
+    if (inp && inp.skeleton) childCtx = { skeleton: inp.skeleton, directive: inp.args && inp.args.directive };
+  } catch {
+    /* body 가 exec-stage 입력이 아니면 전파 없음(자식에 task 없을 때) */
+  }
   const children = (staged && staged.children) || [];
   const keyOf = new Map();
   for (const ev of children) {
     const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
     const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
-    const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy));
+    const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy, childCtx));
     if (nodeId) keyOf.set(ev.id, nodeId);
   }
   // 덩어리 갱신: generate→title, audit→verdict(result). 덩어리 = stage 노드의 parent.
@@ -215,8 +235,8 @@ function execStage(app, exe, env, body) {
 export default {
   async activate(ctx) {
     const app = ctx.app;
-    // 실행 런타임(workflow.run 이 갱신). reconcile 핸들러가 exec-one spawn 에 쓴다.
-    const runtime = { bin: "soksak-workflow", env: undefined };
+    // 실행 런타임(workflow.run 이 갱신). reconcile 핸들러가 exec-one/exec-stage spawn 에, relay 가 task body 임베드에 쓴다.
+    const runtime = { bin: "soksak-workflow", env: undefined, skeleton: undefined, directive: undefined };
 
     ctx.subscriptions.push(
       app.commands.register("workflow.run", {
@@ -226,12 +246,16 @@ export default {
           skeletonPath: { type: "string", description: "skeleton JSON 파일 경로(인자)" },
           bin: { type: "string", description: "soksak-workflow 바이너리 경로(기본 PATH)" },
           env: { type: "json", description: "exec-one(claude -p) 에 주입할 env(인증 프로필 ANTHROPIC_*). 발행은 토큰 불필요." },
+          directive: { type: "string", description: "입력 지시어(아이디어) — stage 작업 노드 body 에 임베드(exec-stage args.directive)." },
         },
         returns: "{ ok }",
-        handler: async ({ skeleton, skeletonPath, bin, env }) => {
+        handler: async ({ skeleton, skeletonPath, bin, env, directive }) => {
           const exe = bin || "soksak-workflow";
           runtime.bin = exe;
-          runtime.env = env; // reconcile exec-one 이 쓸 인증 env 캡처
+          runtime.env = env; // reconcile exec-one/exec-stage 가 쓸 인증 env 캡처
+          runtime.directive = directive;
+          // skeleton 캡처(인라인 문자열) — stage 작업 노드 body 에 임베드해 reconcile 이 exec-stage 로 재실행.
+          try { runtime.skeleton = skeleton ? JSON.parse(skeleton) : undefined; } catch { runtime.skeleton = undefined; }
           const input = skeletonPath || "-";
           const args = [input, "--emit", "--lang", "ko"];
           const handle = await app.process.spawn(exe, args, {}); // 발행은 LLM 미호출 → env 불필요
@@ -250,7 +274,9 @@ export default {
                 // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
                 const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
                 const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
-                const params = buildAddParams(ev, parentId, blockedBy); // 발행 relay·exec-stage relay 공유
+                // stage 작업(kind=task) 노드는 body 에 skeleton 임베드(exec-stage 입력). 항목/그룹은 무관.
+                const taskCtx = runtime.skeleton ? { skeleton: runtime.skeleton, directive: runtime.directive } : undefined;
+                const params = buildAddParams(ev, parentId, blockedBy, taskCtx); // 발행 relay·exec-stage relay 공유
                 const r = await app.commands.execute(KANBAN + ".node.add", params);
                 if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
               }
