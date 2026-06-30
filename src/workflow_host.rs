@@ -119,8 +119,10 @@ impl WorkflowHost {
 
 impl Host for WorkflowHost {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
-        let id = self.next_id("task");
-        let parent = self.stack.last().cloned();
+        // 명시적 트리(draft expand): opts.nodeId(자기 id)+opts.parent(부모 ref) 로 덩어리>그룹>항목 부모 사슬을
+        // 워크플로가 직접 그린다(인터프리터 컨테이너 수술 회피). 미지정 시 자동 id + 현재 컨테이너(phase).
+        let id = Self::opt_marker(opts, "nodeId").unwrap_or_else(|| self.next_id("task"));
+        let parent = Self::opt_marker(opts, "parent").or_else(|| self.stack.last().cloned());
         // 규칙 B: title = opts.title(LLM 발명), body = opts.description. label fallback 없음.
         let title = Self::opt_str(opts, "title");
         let body = Self::opt_str(opts, "description");
@@ -395,6 +397,35 @@ mod tests {
             NodeEvent::Add { kind, category, .. } => {
                 assert_eq!(kind, "agent", "미지정 기본 kind");
                 assert_eq!(category, &None, "category 미지정 시 생략");
+            }
+        }
+    }
+
+    #[test]
+    fn draft_explicit_nodeid_parent_tree() {
+        // [모델 B expand] opts.nodeId/parent 로 덩어리>그룹>항목 명시적 부모 사슬을 그린다(자동 id/stack 무시).
+        let mut h = host();
+        let mut g = opts(&[("kind", "group"), ("nodeId", "g0"), ("parent", "CHUNK-7"), ("title", "재고")]);
+        g.insert("category".into(), Val::Str("재고".into()));
+        h.agent("", &g).unwrap();
+        let it = opts(&[("kind", "item"), ("nodeId", "g0i0"), ("parent", "g0"), ("title", "재고 차감"), ("badge", "검수전")]);
+        h.agent("주문 시 재고를 차감해야 한다 — 검증 프롬프트", &it).unwrap();
+        // 그룹: id=g0, parent=기존 덩어리(CHUNK-7).
+        match &h.events[0] {
+            NodeEvent::Add { id, parent, kind, .. } => {
+                assert_eq!(id, "g0");
+                assert_eq!(parent.as_deref(), Some("CHUNK-7"), "그룹 부모 = 기존 덩어리 ref");
+                assert_eq!(kind, "group");
+            }
+        }
+        // 항목: id=g0i0, parent=g0(그룹), prompt=verify 본문(칸반 body 로 갈 exec 입력).
+        match &h.events[1] {
+            NodeEvent::Add { id, parent, kind, prompt, badge, .. } => {
+                assert_eq!(id, "g0i0");
+                assert_eq!(parent.as_deref(), Some("g0"), "항목 부모 = 그룹");
+                assert_eq!(kind, "item");
+                assert_eq!(prompt, "주문 시 재고를 차감해야 한다 — 검증 프롬프트", "항목 prompt=verifyPrompt(exec 입력)");
+                assert_eq!(badge.as_deref(), Some("검수전"));
             }
         }
     }
