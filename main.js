@@ -117,10 +117,11 @@ export async function reconcileTick(deps) {
 }
 
 /** 발행 이벤트(ev) → 칸반 node.add 파라미터(공유 — 발행 relay·exec-stage 자식 relay 동일).
+ *  세 축 분리 매핑(규칙 B): title(요건명) / description(요건 설명, 사람용) / body(exec 입력, 사람에 안 보임).
  *  parentId/blockedBy 는 호출자가 keyOf 로 미리 해결해 넘긴다. body:
  *  - kind=task(stage 작업) + taskCtx{skeleton,directive} → exec-stage 입력 {skeleton, stage(=ev.prompt), args{directive,chunkRef}}.
- *    chunkRef=부모(덩어리). reconcile 가 이 body 를 exec-stage stdin 으로 그대로 파이프. (main.js 가 skeleton 임베드 — draft.js 무관여.)
- *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema} 또는 ev.body. */
+ *    chunkRef=부모(덩어리). main.js 가 skeleton 임베드 — draft.js 무관여.
+ *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema}. prompt 없으면(그룹/덩어리) body 빈 문자열. */
 export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
   let body;
   if (ev.kind === "task" && taskCtx && taskCtx.skeleton) {
@@ -132,7 +133,7 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
   } else {
     body = ev.prompt
       ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
-      : ev.body || "";
+      : "";
   }
   const params = {
     title: ev.title || ev.kind,
@@ -143,6 +144,7 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
     type: "task",
   };
   if (ev.kind) params.kind = ev.kind; // free-form — reconcile 가 stage 작업 식별에 씀
+  if (ev.description) params.description = ev.description; // 규칙 B: 요건 설명(사람용 칸반 표시, body 와 별개 축)
   if (ev.badge) params.badge = ev.badge;
   if (ev.is_draft) params.isDraft = true;
   if (ev.parent_draft_id) params.parentDraftId = ev.parent_draft_id;

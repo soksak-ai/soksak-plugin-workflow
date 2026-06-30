@@ -29,8 +29,8 @@ pub enum NodeEvent {
         // 미지정 시 "agent"(일반 워크플로). main.js 가 kind 로 발행/실행 처리를 가른다.
         kind: String,
         title: String,
-        body: String,
-        prompt: String, // agent 프롬프트(스케줄러가 exec-one 으로 실행할 원본)
+        description: String, // 규칙 B: 요건 설명(사람용, 칸반 description 필드). exec 입력 아님 — body 와 별개 축.
+        prompt: String, // agent 프롬프트(verifyPrompt 등). main.js relay 가 schema 와 묶어 칸반 body(exec-one 입력)로.
         #[serde(skip_serializing_if = "Option::is_none")]
         schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,9 +123,9 @@ impl Host for WorkflowHost {
         // 워크플로가 직접 그린다(인터프리터 컨테이너 수술 회피). 미지정 시 자동 id + 현재 컨테이너(phase).
         let id = Self::opt_marker(opts, "nodeId").unwrap_or_else(|| self.next_id("task"));
         let parent = Self::opt_marker(opts, "parent").or_else(|| self.stack.last().cloned());
-        // 규칙 B: title = opts.title(LLM 발명), body = opts.description. label fallback 없음.
+        // 규칙 B: title = opts.title(LLM 발명), description = opts.description(사람용). label fallback 없음.
         let title = Self::opt_str(opts, "title");
-        let body = Self::opt_str(opts, "description");
+        let description = Self::opt_str(opts, "description");
         // 규칙 A: pipeline 스코프면 직전 노드에 blockedBy(체인), parallel/단일은 없음(형제).
         let in_pipeline = matches!(self.scopes.last(), Some(GroupScope::Pipeline { .. }));
         let blocked_by = match self.scopes.last() {
@@ -146,7 +146,7 @@ impl Host for WorkflowHost {
             parent,
             kind,
             title,
-            body,
+            description,
             prompt: prompt.into(),
             schema,
             category,
@@ -173,7 +173,7 @@ impl Host for WorkflowHost {
             parent: None,
             kind: "phase".into(),
             title: title.into(),
-            body: String::new(),
+            description: String::new(),
             prompt: String::new(),
             schema: None,
             category: None,
@@ -388,15 +388,15 @@ mod tests {
     }
 
     #[test]
-    fn rule_b_title_from_opts_title_body_from_description() {
+    fn rule_b_title_and_description_from_opts() {
         let mut h = host();
         h.agent("프롬프트 본문", &opts(&[("title", "재고 동기화"), ("description", "주문 시 재고 차감")]))
             .unwrap();
         match &h.events[0] {
-            NodeEvent::Add { title, body, prompt, .. } => {
+            NodeEvent::Add { title, description, prompt, .. } => {
                 assert_eq!(title, "재고 동기화", "title = opts.title(LLM 발명)");
-                assert_eq!(body, "주문 시 재고 차감", "body = opts.description");
-                assert_eq!(prompt, "프롬프트 본문", "prompt = agent 본문(exec-one 원본)");
+                assert_eq!(description, "주문 시 재고 차감", "description = opts.description(사람용, body 와 별개)");
+                assert_eq!(prompt, "프롬프트 본문", "prompt = agent 본문(verifyPrompt — 칸반 body 로)");
             }
         }
     }

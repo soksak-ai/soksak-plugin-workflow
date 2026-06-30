@@ -63,14 +63,16 @@ test("buildAddParams — 항목(prompt/schema)은 body=exec입력, kind/badge �
   assert.equal(p.parentId, "k-1");
   assert.equal(p.kind, "item");
   assert.equal(p.badge, "검수전");
-  assert.deepEqual(JSON.parse(p.body), { prompt: "verify…", schema: { type: "object" } }, "body=exec-one 입력");
+  assert.equal(p.description, "주문 시 차감", "규칙 B: description=요건설명(사람용, body 와 별개 축)");
+  assert.deepEqual(JSON.parse(p.body), { prompt: "verify…", schema: { type: "object" } }, "body=exec-one 입력(verifyPrompt)");
   assert.equal(p.locked, true);
 });
 
-test("buildAddParams — 그룹(prompt 없음)은 body=ev.body, 드래프트 마커 없음", () => {
+test("buildAddParams — 그룹(prompt 없음)은 body 빈 문자열, 드래프트 마커 없음", () => {
   const p = buildAddParams({ id: "g0", kind: "group", title: "재고", category: "재고" }, "chunk-7", []);
   assert.equal(p.kind, "group");
   assert.equal(p.body, "");
+  assert.equal(p.description, undefined, "그룹은 description 없음");
   assert.equal(p.badge, undefined, "그룹은 badge 없음");
   assert.equal(p.isDraft, undefined);
 });
