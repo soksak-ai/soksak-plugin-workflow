@@ -14,20 +14,14 @@
 set -uo pipefail
 HERE="${0:A:h}"
 
-# 1) 이 셸에 인증 프로필 이 없으면(스크립트 서브셸) 사용자 zsh rc 에서 로드.
-if ! whence -w 인증 프로필 >/dev/null 2>&1; then
-  for rc in ~/.zshenv ~/.zshrc ~/.config/zsh/.zshrc; do
-    [[ -r $rc ]] && source "$rc" >/dev/null 2>&1
-  done
-fi
-whence -w 인증 프로필 >/dev/null 2>&1 || { print -u2 "run-e2e: 인증 프로필 미정의 — zsh rc 에서 로드 실패"; exit 1; }
-
-# 2) 인증 프로필 이 주입하는 ANTHROPIC_* env 캡처(값 미출력).
+# 1) claude 래퍼는 인터랙티브 zsh(.zshrc)에서만 정의된다 → zsh -ic 로 로드해 env 캡처.
+#    비인터랙티브 서브셸/스크립트/백그라운드에서도 확실히 잡는 유일한 방법(rc source 는 interactive 가드에 막힘).
+#    claude 를 섀도우해 래퍼가 주입하는 ANTHROPIC_* 만 600 권한 tmp 파일로 덤프(값 미출력).
 TMPD="${CLAUDE_JOB_DIR:-${TMPDIR:-/tmp}}/soksak-e2e"; mkdir -p "$TMPD"
-EF="$TMPD/인증 프로필.env"; : > "$EF"; chmod 600 "$EF"
-claude() { command env | grep -E '^(ANTHROPIC_[A-Z_]+|CLAUDE_ACCOUNT_NAME)=' > "$EF"; return 0; }
-인증 프로필 --version >/dev/null 2>&1 || 인증 프로필 >/dev/null 2>&1 </dev/null || true
-grep -q '^ANTHROPIC_AUTH_TOKEN=' "$EF" || { print -u2 "run-e2e: 인증 프로필 env 캡처 실패(인증 프로필 정의 확인)"; exit 1; }
+W="${SOKSAK_CLAUDE_WRAPPER:-claude}"
+EF="$TMPD/auth.env"; : > "$EF"; chmod 600 "$EF"
+zsh -ic 'claude(){ command env | grep -E "^(ANTHROPIC_[A-Z_]+|CLAUDE_ACCOUNT_NAME)=" > "'"$EF"'"; }; '"$W"' --version >/dev/null 2>&1 || '"$W"' >/dev/null 2>&1 </dev/null' >/dev/null 2>&1 || true
+grep -q '^ANTHROPIC_AUTH_TOKEN=' "$EF" || { print -u2 "run-e2e: 인증 env 캡처 실패 — 인터랙티브 zsh 의 claude 진입점($W)이 ANTHROPIC_AUTH_TOKEN 을 주입하는지 확인"; exit 1; }
 set -a; source "$EF"; set +a
 
 # 3) cargo PATH 보장 + make 타깃 실행.
