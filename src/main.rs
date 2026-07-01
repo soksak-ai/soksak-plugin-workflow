@@ -328,9 +328,24 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// plugin_root — 이 바이너리가 속한 플러그인 루트(self-contained references/·tools/ 소재).
+/// current_exe(<plugin>/target/<profile>/soksak-workflow)의 조상 중 `references/draft-skill.md` 를 가진 첫 디렉토리.
+/// generate-skeleton 이 외부 리포(추출기) 없이 자기 트리의 지시어·파서를 찾는 근거.
+fn plugin_root() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let mut dir = exe.parent();
+    while let Some(d) = dir {
+        if d.join("references/draft-skill.md").is_file() {
+            return Some(d.to_path_buf());
+        }
+        dir = d.parent();
+    }
+    None
+}
+
 /// run_generate_skeleton — generate-skeleton 서브커맨드. 아이디어 → gen.js(LLM 저작) → skeleton stdout.
-/// system=SKILL+api+patterns+draft-skill(--refs dir), user=아이디어+③파생(+lang 계약). schema 없음(gen.js=JS 소스).
-/// gen.js 는 파일로 떨궈(cli.js parse 는 파일 인자만) `node <cc>/src/cli.js parse` → skeleton. --gen-out 시 gen.js 보존.
+/// system=SKILL+api+patterns+draft-skill(**플러그인 번들 references/**, --refs 로 override 가능), user=아이디어+③파생.
+/// gen.js 는 파일로 떨궈 `node <plugin>/tools/parse-cli.mjs <gen.js>`(self-contained, vendored acorn) → skeleton. --gen-out 시 보존.
 fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     let mut idea = String::new();
     let mut model = DEFAULT_MODEL.to_string();
@@ -367,10 +382,12 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     if idea.trim().is_empty() {
         return Err("generate-skeleton: --idea 필수".to_string());
     }
-    // refs dir = <추출기>/references. --refs 우선, 없으면 env WORKFLOW_DIR/references.
+    // refs dir 해석: ① --refs, ② env WORKFLOW_DIR/references(레거시 override), ③ **플러그인 번들**(self-contained 기본).
+    // 기본 = 이 바이너리가 속한 플러그인 트리의 references/ — 외부 리포(추출기) 런타임 의존 없음.
     let refs_dir = refs
         .or_else(|| std::env::var("WORKFLOW_DIR").ok().filter(|d| !d.is_empty()).map(|d| format!("{d}/references")))
-        .ok_or("generate-skeleton: --refs <추출기>/references 또는 env WORKFLOW_DIR 필요")?;
+        .or_else(|| plugin_root().map(|r| format!("{}/references", r.display())))
+        .ok_or("generate-skeleton: references 해석 실패 — --refs 또는 플러그인 번들(references/draft-skill.md) 확인")?;
     let read_ref = |rel: &str| -> Result<String, String> {
         std::fs::read_to_string(format!("{refs_dir}/{rel}")).map_err(|e| format!("refs 읽기 {refs_dir}/{rel}: {e}"))
     };
@@ -415,23 +432,21 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     };
     std::fs::write(&gen_path, &gen_js).map_err(|e| format!("gen.js 쓰기 {gen_path}: {e}"))?;
 
-    // node <추출기>/src/cli.js parse <gen_path> → skeleton JSON stdout.
-    let cc_root = std::path::Path::new(&refs_dir)
-        .parent()
-        .ok_or("generate-skeleton: refs_dir 부모(추출기 root) 해석 실패")?;
-    let cli = cc_root.join("src").join("cli.js");
+    // 파서 = **플러그인 번들** tools/parse-cli.mjs (self-contained, vendored acorn) → skeleton JSON stdout.
+    let parser = plugin_root()
+        .map(|r| r.join("tools").join("parse-cli.mjs"))
+        .ok_or("generate-skeleton: 번들 파서(tools/parse-cli.mjs) 해석 실패 — 플러그인 트리 확인")?;
     let out = std::process::Command::new("node")
-        .arg(&cli)
-        .arg("parse")
+        .arg(&parser)
         .arg(&gen_path)
         .output()
-        .map_err(|e| format!("node parse spawn: {e} (cli={})", cli.display()))?;
+        .map_err(|e| format!("node parse spawn: {e} (parser={})", parser.display()))?;
     if !out.status.success() {
         if gen_out.is_none() {
             let _ = std::fs::remove_file(&gen_path);
         }
         return Err(format!(
-            "추출기 parse 실패(gen.js 가 interp 서브셋 위반?): {}",
+            "워크플로 parse 실패(gen.js 가 interp 서브셋 위반?): {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }

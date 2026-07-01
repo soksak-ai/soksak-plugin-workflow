@@ -466,7 +466,7 @@ async function reconcileStage(deps, target, body, nodes) {
 // ── app 연결(런타임) ──
 
 /** genSkeletonArgs — generate-skeleton CLI 인자 조립(순수, 테스트 대상). idea 필수, 나머지 선택.
- *  아이디어 → gen.js(LLM 저작) → skeleton. --refs 는 추출기 references 경로, --gen-out 은 gen.js 보존. */
+ *  아이디어 → gen.js(LLM 저작) → skeleton. --refs 는 references override(기본=플러그인 번들), --gen-out 은 gen.js 보존. */
 export function genSkeletonArgs({ idea, model, refs, genOut, lang } = {}) {
   if (!idea) throw new Error("genSkeletonArgs: idea 필수");
   const args = ["generate-skeleton", "--idea", idea, "--lang", lang || "ko"];
@@ -585,7 +585,7 @@ export default {
           skeletonPath: { type: "string", description: "skeleton JSON 파일 경로(인자)" },
           bin: { type: "string", description: "soksak-workflow 바이너리 경로(기본 PATH)" },
           model: { type: "string", description: "generate-skeleton 저작 모델(기본 프로필 기본값)." },
-          refs: { type: "string", description: "generate-skeleton system 재료 경로(<추출기>/references)." },
+          refs: { type: "string", description: "references override 경로(기본=플러그인 번들 self-contained)." },
           env: { type: "json", description: "generate-skeleton·exec-one(claude -p) 에 주입할 인증 env(ANTHROPIC_*). 순수 발행(--emit)은 토큰 불필요." },
           directive: { type: "string", description: "입력 지시어 — stage 작업 노드 body 에 임베드(exec-stage args.directive). 없으면 idea 로 승격." },
         },
