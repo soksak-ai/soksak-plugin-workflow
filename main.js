@@ -277,6 +277,40 @@ async function reconcileStage(deps, target, body, nodes) {
 
 // ── app 연결(런타임) ──
 
+/** genSkeletonArgs — generate-skeleton CLI 인자 조립(순수, 테스트 대상). idea 필수, 나머지 선택.
+ *  아이디어 → gen.js(LLM 저작) → skeleton. --refs 는 추출기 references 경로, --gen-out 은 gen.js 보존. */
+export function genSkeletonArgs({ idea, model, refs, genOut, lang } = {}) {
+  if (!idea) throw new Error("genSkeletonArgs: idea 필수");
+  const args = ["generate-skeleton", "--idea", idea, "--lang", lang || "ko"];
+  if (model) args.push("--model", model);
+  if (refs) args.push("--refs", refs);
+  if (genOut) args.push("--gen-out", genOut);
+  return args;
+}
+
+/** generate-skeleton spawn — 아이디어 → gen.js(LLM 저작) → skeleton JSON(stdout 문자열 resolve).
+ *  claude 호출 → env(인증 프로필) 필요(발행 spawn 과 다름). lease=프로세스-생존(onExit 까지 대기). idea 는 argv(stdin 아님). */
+function genSkeleton(app, exe, env, spec) {
+  return new Promise((resolve, reject) => {
+    let out = "";
+    const dec = new TextDecoder();
+    const opts = env && typeof env === "object" ? { env } : {};
+    Promise.resolve(app.process.spawn(exe, genSkeletonArgs(spec), opts))
+      .then((handle) => {
+        app.process.onData(handle, (b) => {
+          out += dec.decode(b, { stream: true });
+        });
+        app.process.onExit(handle, (code) => {
+          if (code !== 0) return reject(new Error(`generate-skeleton exit ${code}`));
+          const t = out.trim();
+          if (!t.startsWith("{")) return reject(new Error(`generate-skeleton 출력이 skeleton JSON 아님: ${t.slice(0, 200)}`));
+          resolve(t);
+        });
+      })
+      .catch(reject);
+  });
+}
+
 /** exec-one spawn — stdin 에 {prompt, schema?} 쓰고 stdout {oxf, result} 파싱.
  *  lease=프로세스-생존: spawn → **onExit await → 그제야 resolve/reject**. 도는 중(검색 1시간이든)엔 reply 금지 —
  *  스케줄러가 lease 로 기다린다. heartbeat 발신 없음(폐기). 정상 exit+결과=resolve, 비정상/무결과=reject(→ok:false). */
@@ -346,20 +380,27 @@ export default {
 
     ctx.subscriptions.push(
       app.commands.register("workflow.run", {
-        description: "워크플로 skeleton(AST) 을 발행해 칸반에 노드 DAG 로 그리고, reconcile 로 실행을 건다.",
+        description: "아이디어(idea) 또는 skeleton(AST) 을 받아 칸반에 노드 DAG 로 발행하고, reconcile 로 실행을 건다. idea 면 내부에서 generate-skeleton(gen.js→skeleton) 을 먼저 돈다.",
         params: {
-          skeleton: { type: "string", description: "skeleton JSON 문자열(stdin)" },
+          idea: { type: "string", description: "사용자 아이디어 — 내부 generate-skeleton(gen.js→skeleton)으로 발행. skeleton/skeletonPath 없을 때." },
+          skeleton: { type: "string", description: "skeleton JSON 문자열(stdin). idea 대신 직접 공급(하위호환)." },
           skeletonPath: { type: "string", description: "skeleton JSON 파일 경로(인자)" },
           bin: { type: "string", description: "soksak-workflow 바이너리 경로(기본 PATH)" },
-          env: { type: "json", description: "exec-one(claude -p) 에 주입할 env(인증 프로필 ANTHROPIC_*). 발행은 토큰 불필요." },
-          directive: { type: "string", description: "입력 지시어(아이디어) — stage 작업 노드 body 에 임베드(exec-stage args.directive)." },
+          model: { type: "string", description: "generate-skeleton 저작 모델(기본 프로필 기본값)." },
+          refs: { type: "string", description: "generate-skeleton system 재료 경로(<추출기>/references)." },
+          env: { type: "json", description: "generate-skeleton·exec-one(claude -p) 에 주입할 인증 env(ANTHROPIC_*). 순수 발행(--emit)은 토큰 불필요." },
+          directive: { type: "string", description: "입력 지시어 — stage 작업 노드 body 에 임베드(exec-stage args.directive). 없으면 idea 로 승격." },
         },
         returns: "{ ok }",
-        handler: async ({ skeleton, skeletonPath, bin, env, directive }) => {
+        handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive }) => {
           const exe = bin || "soksak-workflow";
           runtime.bin = exe;
           runtime.env = env; // reconcile exec-one/exec-stage 가 쓸 인증 env 캡처
-          runtime.directive = directive;
+          runtime.directive = directive || idea; // stage 작업 노드 directive: 명시 directive 우선, 없으면 idea
+          // idea 만 주어지면(skeleton/skeletonPath 없음) → generate-skeleton 으로 gen.js→skeleton 저작해 발행에 흘림.
+          if (idea && !skeleton && !skeletonPath) {
+            skeleton = await genSkeleton(app, exe, env, { idea, model, refs });
+          }
           // skeleton 캡처(인라인 문자열) — stage 작업 노드 body 에 임베드해 reconcile 이 exec-stage 로 재실행.
           try { runtime.skeleton = skeleton ? JSON.parse(skeleton) : undefined; } catch { runtime.skeleton = undefined; }
           const input = skeletonPath || "-";

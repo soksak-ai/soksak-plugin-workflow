@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -478,4 +478,18 @@ test("reconcileTick — 정규화 item 템플릿 미발견 시 안전 실패(ok:
   const r = await reconcileTick(deps);
   assert.equal(r.ok, false, "미발견 → 안전 실패(backoff 대상)");
   assert.equal(edits.length, 0, "노드 미변경(멱등)");
+});
+
+// ── generate-skeleton 인자 조립(workflow.run idea 배선의 순수부) ──
+test("genSkeletonArgs — idea 만: generate-skeleton --idea --lang ko", () => {
+  assert.deepEqual(genSkeletonArgs({ idea: "약국 SaaS" }), ["generate-skeleton", "--idea", "약국 SaaS", "--lang", "ko"]);
+});
+
+test("genSkeletonArgs — model/refs/gen-out 추가 + lang 오버라이드", () => {
+  const args = genSkeletonArgs({ idea: "novel", model: "glm-5.2", refs: "/cc/references", genOut: "/o/gen.js", lang: "en" });
+  assert.deepEqual(args, ["generate-skeleton", "--idea", "novel", "--lang", "en", "--model", "glm-5.2", "--refs", "/cc/references", "--gen-out", "/o/gen.js"]);
+});
+
+test("genSkeletonArgs — idea 없으면 throw(발행 오입력 차단)", () => {
+  assert.throws(() => genSkeletonArgs({ model: "x" }), /idea 필수/);
 });
