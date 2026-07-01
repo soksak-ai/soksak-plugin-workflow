@@ -413,6 +413,17 @@ test("buildAddParams — 정규화 item(promptRole+vars)은 body={promptHash,var
   assert.equal(p.badge, "검수전");
 });
 
+test("buildAddParams — 정규화 item varRefs → body.refs(role→hash): directive 콘텐츠 주소 참조(vars 에 텍스트 안 박음)", () => {
+  const roleToHash = new Map([["verify", "hT"], ["directive", "hD"]]);
+  const ev = { kind: "item", prompt_role: "verify", vars: { title: "T", category: "재고" }, var_refs: { directive: "directive" }, title: "요건", badge: "검수전" };
+  const p = buildAddParams(ev, "gid", [], undefined, roleToHash);
+  const body = JSON.parse(p.body);
+  assert.equal(body.promptHash, "hT");
+  assert.deepEqual(body.vars, { title: "T", category: "재고" }, "작은 per-item 값만 인라인");
+  assert.deepEqual(body.refs, { directive: "hD" }, "directive 는 hash 참조(항목마다 복붙 X)");
+  assert.equal(body.vars.directive, undefined, "directive 텍스트가 vars 에 없음");
+});
+
 test("buildAddParams — promptRole 없으면 기존 {prompt}(하위호환)", () => {
   const ev = { kind: "item", prompt: "완성 프롬프트", schema: { x: 1 } };
   const p = buildAddParams(ev, "gid", [], undefined, new Map());
@@ -444,6 +455,21 @@ test("reconcileTick — 정규화 item(promptHash) 은 prompt.resolve 로 조립
   assert.equal(r.ok, true);
   assert.deepEqual(resolved[0], ["H1", { title: "슬롯" }], "promptHash+vars 로 resolve");
   // exec-one 이 받은 body 는 조립된 완성 prompt(+schema)
+});
+
+test("reconcileTick — 정규화 item refs 를 prompt.resolve 로 전달(directive 콘텐츠 주소 deref)", async () => {
+  const resolved = [];
+  const deps = {
+    listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
+    getNode: async () => ({ node: { body: JSON.stringify({ promptHash: "H1", vars: { title: "슬롯" }, refs: { directive: "hD" } }) } }),
+    resolvePrompt: async (hash, vars, refs) => { resolved.push([hash, vars, refs]); return { ok: true, prompt: "완성" }; },
+    execOne: async () => ({ oxf: "o", result: "ok" }),
+    editNode: async () => {},
+    poke: async () => {},
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(resolved[0], ["H1", { title: "슬롯" }, { directive: "hD" }], "hash+vars+refs 전달(directive deref)");
 });
 
 test("reconcileTick — 하위호환: promptHash 없는 body 는 그대로 exec-one(resolve 안 함)", async () => {

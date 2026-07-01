@@ -9,18 +9,25 @@ use crate::derive_directive::DomainDirective;
 /// draft-skill.md 계약은 "순수 JS 본문만"이나 모델이 펜스를 붙일 수 있어 방어적으로 처리.
 pub fn strip_js_fence(raw: &str) -> String {
     let t = raw.trim();
-    if let Some(rest) = t.strip_prefix("```") {
+    // 1) 코드펜스가 있으면(앞뒤 prose 무관) 첫 ``` … ``` 안 본문을 추출.
+    if let Some(open) = t.find("```") {
+        let after_open = &t[open + 3..];
         // 여는 펜스 줄의 언어 태그(js/javascript 등)를 버리고 다음 줄부터 본문.
-        let after_lang = match rest.find('\n') {
-            Some(nl) => &rest[nl + 1..],
-            None => "",
+        let after_lang = match after_open.find('\n') {
+            Some(nl) => &after_open[nl + 1..],
+            None => after_open,
         };
-        // 닫는 펜스(마지막 ```)까지가 본문.
-        let body = match after_lang.rfind("```") {
+        // 닫는 펜스(다음 ```)까지가 본문. 없으면 끝까지(잘림 방지).
+        let body = match after_lang.find("```") {
             Some(end) => &after_lang[..end],
             None => after_lang,
         };
         return body.trim().to_string();
+    }
+    // 2) 펜스 없이 코드 앞에 prose(설명)를 붙인 경우 — 워크플로 계약상 파일은 `export const meta` 로 시작.
+    //    그 지점부터 슬라이스(선행 prose 제거). 없으면 원문 trim.
+    if let Some(idx) = t.find("export const meta") {
+        return t[idx..].trim().to_string();
     }
     t.to_string()
 }
@@ -75,9 +82,16 @@ mod tests {
 
     #[test]
     fn strip_js_fence_with_prose_around_fence() {
-        // 모델이 펜스 앞뒤로 설명을 붙여도 펜스 안 본문만 — 단 여는 펜스가 맨 앞일 때만(계약: 본문만).
-        let wrapped = "```js\nconst a = 1\n```";
+        // 모델이 펜스 앞뒤로 설명을 붙여도 첫 펜스 안 본문만 추출(find-anywhere).
+        let wrapped = "여기 코드입니다:\n```js\nconst a = 1\n```\n이상입니다.";
         assert_eq!(strip_js_fence(wrapped), "const a = 1");
+    }
+
+    #[test]
+    fn strip_js_fence_leading_prose_no_fence_export_anchor() {
+        // 펜스 없이 코드 앞에 설명(한국어 등)이 붙으면 export const meta 부터 슬라이스(선행 prose 제거).
+        let raw = "이 워크플로는 다음과 같습니다:\n\nexport const meta = { name: 'x' }\nphase('A')";
+        assert_eq!(strip_js_fence(raw), "export const meta = { name: 'x' }\nphase('A')");
     }
 
     #[test]

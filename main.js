@@ -148,7 +148,19 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
     const role = ev.prompt_role || ev.promptRole;
     const hash = roleToHash && roleToHash.get ? roleToHash.get(role) : undefined;
     const vars = ev.vars || {};
-    body = JSON.stringify(ev.schema ? { promptHash: hash, vars, schema: ev.schema } : { promptHash: hash, vars });
+    // varRefs: {{key}} → 등록 role 라벨 → hash. 큰 공유값(directive)은 prompts 저장소 1행, 노드는 hash 참조(항목마다 복붙 X).
+    const varRefs = ev.var_refs || ev.varRefs;
+    const refs = {};
+    if (varRefs && roleToHash && roleToHash.get) {
+      for (const [k, label] of Object.entries(varRefs)) {
+        const h = roleToHash.get(label);
+        if (h) refs[k] = h;
+      }
+    }
+    const base = { promptHash: hash, vars };
+    if (Object.keys(refs).length) base.refs = refs;
+    if (ev.schema) base.schema = ev.schema;
+    body = JSON.stringify(base);
   } else {
     body = ev.prompt
       ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
@@ -192,7 +204,7 @@ async function resolveBody(body, deps) {
     return body;
   }
   if (!p || !p.promptHash) return body; // 하위호환: 기존 {prompt,schema} 그대로
-  const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}) : null;
+  const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}, p.refs || {}) : null;
   if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
   return JSON.stringify(p.schema ? { prompt: res.prompt, schema: p.schema } : { prompt: res.prompt });
 }
@@ -502,7 +514,7 @@ export default {
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
             putPrompt: (text) => app.commands.execute(KANBAN + ".prompt.put", { text }),
-            resolvePrompt: (hash, vars) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars }),
+            resolvePrompt: (hash, vars, refs) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars, refs }),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
           return await reconcileTick(deps);

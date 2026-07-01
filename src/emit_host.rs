@@ -48,6 +48,8 @@ pub enum NodeEvent {
         vars: Option<Json>, // item: {{key}} 바인딩 변수({category,title,description,directive}). 소비 시점 조립.
         #[serde(skip_serializing_if = "Option::is_none")]
         register_prompts: Option<Json>, // chunk/stage 1회: {role: 템플릿텍스트}. main.js 가 prompt.put(sha256 dedup).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        var_refs: Option<Json>, // item: {{key}} → 등록 role 라벨. main.js 가 role→hash → node body refs. 큰 공유값(directive) 콘텐츠 주소 참조(항목마다 복붙 X).
         blocked_by: Vec<String>,
         // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
         // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
@@ -181,6 +183,7 @@ impl Host for EmitHost {
         let prompt_role = Self::opt_marker(opts, "promptRole");
         let vars = opts.get("vars").map(crate::interp::val_to_json).filter(|v| v.is_object());
         let register_prompts = opts.get("registerPrompts").map(crate::interp::val_to_json).filter(|v| v.is_object());
+        let var_refs = opts.get("varRefs").map(crate::interp::val_to_json).filter(|v| v.is_object());
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
@@ -194,6 +197,7 @@ impl Host for EmitHost {
             prompt_role,
             vars,
             register_prompts,
+            var_refs,
             blocked_by,
             badge,
             is_draft,
@@ -226,6 +230,7 @@ impl Host for EmitHost {
             prompt_role: None,
             vars: None,
             register_prompts: None,
+            var_refs: None,
             blocked_by,
             // 컨테이너: 드래프트 마커 없음. 집계 배지는 칸반(subValidation)이 자식 oxf 로 자동 계산.
             badge: None,
@@ -846,11 +851,16 @@ mod tests {
         let i0 = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id == "g0i0"));
         // 정규화(콘텐츠 주소화): 항목은 완성 프롬프트를 body 에 안 박고 promptRole='verify' + vars 로 참조 —
         // 소비 시점(main.js relay)에 sha256 템플릿+vars 로 조립. 따라서 emit 의 prompt 는 빈 문자열이 정상.
+        // 3수준 정규화: prompt '' + vars(작은 per-item 값) + var_refs(directive 콘텐츠 주소 참조, 항목마다 복붙 X).
         assert!(
-            matches!(i0, Some(NodeEvent::Add { prompt, prompt_role, vars, .. })
-                if prompt.is_empty() && prompt_role.as_deref() == Some("verify") && vars.is_some()),
-            "항목 body 정규화: prompt 빈 문자열 + promptRole='verify' + vars 존재"
+            matches!(i0, Some(NodeEvent::Add { prompt, prompt_role, vars, var_refs, .. })
+                if prompt.is_empty() && prompt_role.as_deref() == Some("verify") && vars.is_some() && var_refs.is_some()),
+            "항목 정규화: prompt '' + promptRole=verify + vars(작은값) + var_refs(directive 콘텐츠 주소 참조)"
         );
+        // vars 에 directive 텍스트가 박히면 안 됨(청크당 1행으로 dedup — var_refs 로만 참조).
+        if let Some(NodeEvent::Add { vars: Some(v), .. }) = i0 {
+            assert!(v.get("directive").is_none(), "directive 는 vars 에 없어야(복붙 방지) — var_refs 로 참조");
+        }
 
         // Hunt task blockedBy=[g0i0,g0i1] / Audit task blockedBy=[g0i0,g0i1,hunt] (①a 순서)
         let hunt = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "hunt"));
