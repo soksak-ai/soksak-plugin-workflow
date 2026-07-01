@@ -756,8 +756,9 @@ mod tests {
         // [#7] args 가 문자열(지시어)이면 draft.js 가 DIRECTIVE=args 로 받아야 한다. 클론 VM 의 member(Str,"split")
         // 은 Undefined 라 구 `if (args && args.split)` 분기는 영영 falsy → string 지시어 폐기 → SAMPLE 폴백 버그.
         // 수정(typeof args === 'string') 후엔 emit 된 덩어리(chunk) description = 넘긴 문자열.
-        // fixtures/draft.skeleton.json = `node 추출기/src/cli.js parse workflows/draft.js` 산출(draft.js 변경 시 재생성).
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        // fixtures/gen.pharmacy.skeleton.json = generate-skeleton(glm-5.2, 약국 SaaS) 실측 산출(gen.js→parse). 실행 워크플로=gen.js.
+        // (재생성: make -C authoring e2e && make -C authoring commit-fixture. draft.js 는 backup 비교물, 여기 미참여.)
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
         let mut wh = EmitHost::new();
         Interp::new(&mut wh)
@@ -801,12 +802,12 @@ mod tests {
         Val::Arr(std::rc::Rc::new(std::cell::RefCell::new(vs)))
     }
 
-    /// [Phase5 e2e — AST→Rust 런타임] draft.skeleton.json program(generate stage) 을 ClaudeEmitHost(stub runner)
+    /// [Phase5 e2e — AST→Rust 런타임] gen.pharmacy.skeleton.json program(generate stage) 을 ClaudeEmitHost(stub runner)
     /// 로 돌려 genPrompt→가짜 트리(1그룹 2항목) 가 그룹/항목(badge=검수전, body=verifyPrompt) + Hunt/Audit task(blockedBy) emit 하는지.
     /// claude·앱·소켓 없이 Rust Interp 만으로 전체 발행 흐름·순서 검증.
     #[test]
     fn draft_generate_stage_emits_groups_items_hunt_audit() {
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
         let item = |t: &str, d: &str, o: &str| {
             val_obj(vec![
@@ -843,7 +844,13 @@ mod tests {
         let pend = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, badge, .. } if kind == "item" && badge.as_deref() == Some("검수전"))).count();
         assert_eq!(pend, 2, "항목 badge=검수전");
         let i0 = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id == "g0i0"));
-        assert!(matches!(i0, Some(NodeEvent::Add { prompt, .. }) if !prompt.is_empty()), "항목 body=verifyPrompt(빈 문자열 아님)");
+        // 정규화(콘텐츠 주소화): 항목은 완성 프롬프트를 body 에 안 박고 promptRole='verify' + vars 로 참조 —
+        // 소비 시점(main.js relay)에 sha256 템플릿+vars 로 조립. 따라서 emit 의 prompt 는 빈 문자열이 정상.
+        assert!(
+            matches!(i0, Some(NodeEvent::Add { prompt, prompt_role, vars, .. })
+                if prompt.is_empty() && prompt_role.as_deref() == Some("verify") && vars.is_some()),
+            "항목 body 정규화: prompt 빈 문자열 + promptRole='verify' + vars 존재"
+        );
 
         // Hunt task blockedBy=[g0i0,g0i1] / Audit task blockedBy=[g0i0,g0i1,hunt] (①a 순서)
         let hunt = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "hunt"));
@@ -861,7 +868,7 @@ mod tests {
     /// [Phase5 e2e] skeleton stage(args 없음) → chunk(isDraft) + Generate task(kind:task) emit.
     #[test]
     fn draft_skeleton_stage_emits_chunk_and_generate_task() {
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
         let mut h = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
         Interp::new(&mut h).run(program, json!({ "title": "내 백로그" })).expect("skeleton interp");
@@ -875,7 +882,7 @@ mod tests {
     /// [Phase5 e2e] hunt stage — huntPrompt(ledger)→additions → 추가항목(badge=검수전) emit (CHUNK_REF 직속).
     #[test]
     fn draft_hunt_stage_emits_additions() {
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
         let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
             if p.contains("AUDITOR") {
@@ -909,7 +916,7 @@ mod tests {
     /// [Phase5 e2e] audit stage — auditPrompt(ledger)→{complete,verdict} return (emit 없음).
     #[test]
     fn draft_audit_stage_returns_verdict_no_emit() {
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
+        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
         let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
             if p.contains("AUDITOR") {
