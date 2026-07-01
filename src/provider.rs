@@ -33,6 +33,10 @@ pub struct AgentRequest<'a> {
     pub schema: Option<Value>,
     /// claude `--effort`. 추론 깊이. agent opts.effort 로 override, 기본 xhigh(최고 — 도출·검증·판정 품질 우선).
     pub effort: String,
+    /// true 면 **순수 텍스트 반환 계약** — 파일/실행/검색 도구를 전면 차단(--disallowedTools 로).
+    /// generate-skeleton(gen.js 저작)에만 씀: 도구가 열려 있으면 모델이 gen.js 를 파일로 쓰려다 실패(빈 --allowedTools
+    /// 를 claude CLI 가 무시함). false = 종래(Task 만 금지, allowed_tools 정책 따름).
+    pub text_only: bool,
 }
 
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
@@ -49,7 +53,13 @@ fn claude_args(req: &AgentRequest) -> Vec<String> {
         "--allowedTools".into(),
         req.allowed_tools.join(" "),
         "--disallowedTools".into(),
-        "Task".into(), // sub-agent 금지 — real Claude 가 async agent 띄우고 무한대기하는 hang 방지.
+        // Task 는 항상 금지(sub-agent → async hang 방지). text_only(저작)는 모든 파일/실행/검색 도구도 차단해
+        // 모델이 순수 JS 텍스트만 반환하게(빈 --allowedTools 는 CLI 가 무시하므로 disallow 로 강제).
+        if req.text_only {
+            "Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit WebFetch WebSearch TodoWrite".into()
+        } else {
+            "Task".into()
+        },
         "--model".into(),
         req.model.into(),
     ];
@@ -308,7 +318,7 @@ mod tests {
     fn system_prompt_appends_flag_when_some() {
         let req = AgentRequest {
             prompt: "USER_PROMPT".into(),
-            model: "haiku",
+            model: "haiku", text_only: false,
             allowed_tools: vec![],
             timeout_secs: 10,
             system_prompt: Some("SKILL_AST_SYSTEM".into()),
@@ -326,7 +336,7 @@ mod tests {
     fn system_prompt_omitted_when_none() {
         let req = AgentRequest {
             prompt: "p".into(),
-            model: "haiku",
+            model: "haiku", text_only: false,
             allowed_tools: vec![],
             timeout_secs: 10,
             system_prompt: None,

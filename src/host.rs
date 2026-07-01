@@ -120,7 +120,7 @@ impl Host for ClaudeHost {
         let effort = opt_str(opts, "effort").unwrap_or_else(|| "xhigh".to_string());
         let full = build_prompt_with_schema(prompt, None, self.lang.as_ref());
         eprintln!("[soksak] agent {label:?} (model={model}, effort={effort}) → claude -p");
-        let req = AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone(), timeout_secs: 3600, system_prompt: None, schema, effort };
+        let req = AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone(), timeout_secs: 3600, system_prompt: None, schema, effort, text_only: false };
         // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트 그대로 — plain agent 에 JSON 파싱 강요 금지.
         let res = if opts.get("schema").is_some() {
             run_agent(&req, &self.env).map(|out| json_to_val(&out))

@@ -218,7 +218,7 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     // claude 종료→onExit→reply(검색 fan-out 1h+ 수용). register timeout_ms(zombie_backstop 3h)는 그것도 실패한
     // 좀비 전용(provider 캡보다 길게). 중복은 lease(도는 중 재발화 X)로 0 — 천장 일치 안 해도 안전.
     let has_schema = input.schema.is_some();
-    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200, system_prompt: None, schema: input.schema, effort: "xhigh".into() };
+    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200, system_prompt: None, schema: input.schema, effort: "xhigh".into(), text_only: false };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
     let result = if has_schema {
         run_agent(&req, &env)?
@@ -398,7 +398,7 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         model: &model,
         allowed_tools: vec![],
         timeout_secs: 7200,
-        system_prompt: Some(system),
+        system_prompt: Some(system), text_only: true,
         schema: None,
         effort: "xhigh".into(),
     };
