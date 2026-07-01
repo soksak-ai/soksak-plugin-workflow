@@ -888,10 +888,12 @@ mod tests {
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
         let mut h = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
-        Interp::new(&mut h).run(program, json!({ "title": "내 백로그" })).expect("skeleton interp");
+        // directive 는 args 로 주입(런타임은 workflow.run 이 runtime.directive 전달) — chunk description = DIRECTIVE.
+        // gen.js 는 SAMPLE 폴백 없음(정상): directive 미주입이면 desc 빈 문자열이 맞다.
+        Interp::new(&mut h).run(program, json!({ "title": "내 백로그", "directive": "약국 재고 SaaS 지시어" })).expect("skeleton interp");
         let ev = &h.wh.events;
         let chunk = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "chunk"));
-        assert!(matches!(chunk, Some(NodeEvent::Add { description, .. }) if description.contains("백로그") || !description.is_empty()), "chunk emit + description=DIRECTIVE");
+        assert!(matches!(chunk, Some(NodeEvent::Add { description, .. }) if description.contains("약국")), "chunk emit + description=DIRECTIVE(args 주입)");
         let gen = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "gen"));
         assert!(gen.is_some(), "Generate task(kind:task) emit");
     }

@@ -24,10 +24,17 @@ pub fn strip_js_fence(raw: &str) -> String {
         };
         return body.trim().to_string();
     }
-    // 2) 펜스 없이 코드 앞에 prose(설명)를 붙인 경우 — 워크플로 계약상 파일은 `export const meta` 로 시작.
-    //    그 지점부터 슬라이스(선행 prose 제거). 없으면 원문 trim.
-    if let Some(idx) = t.find("export const meta") {
-        return t[idx..].trim().to_string();
+    // 2) 펜스 없이 코드 앞에 prose(설명)를 붙인 경우 — 파일은 `export const meta` 로 시작(계약).
+    //    **줄 시작(또는 문서 시작)의 export 만 앵커** — LLM 이 prose 에서 인용한 `export const meta`(줄 중간,
+    //    백틱/별표 뒤)에 속지 않게. 그 지점부터 슬라이스(선행 prose 제거). 없으면 원문 trim.
+    let anchor = "export const meta";
+    let mut from = 0;
+    while let Some(rel) = t[from..].find(anchor) {
+        let idx = from + rel;
+        if idx == 0 || t.as_bytes()[idx - 1] == b'\n' {
+            return t[idx..].trim().to_string();
+        }
+        from = idx + anchor.len();
     }
     t.to_string()
 }
@@ -91,6 +98,13 @@ mod tests {
     fn strip_js_fence_leading_prose_no_fence_export_anchor() {
         // 펜스 없이 코드 앞에 설명(한국어 등)이 붙으면 export const meta 부터 슬라이스(선행 prose 제거).
         let raw = "이 워크플로는 다음과 같습니다:\n\nexport const meta = { name: 'x' }\nphase('A')";
+        assert_eq!(strip_js_fence(raw), "export const meta = { name: 'x' }\nphase('A')");
+    }
+
+    #[test]
+    fn strip_js_fence_ignores_prose_quoted_export_anchor() {
+        // LLM 이 prose 에서 `export const meta`(줄 중간, 백틱 뒤)를 인용해도 — 실제 코드(줄 시작 export)를 앵커.
+        let raw = "파일은 반드시 `export const meta` 로 시작해야 합니다.\n\nexport const meta = { name: 'x' }\nphase('A')";
         assert_eq!(strip_js_fence(raw), "export const meta = { name: 'x' }\nphase('A')");
     }
 
