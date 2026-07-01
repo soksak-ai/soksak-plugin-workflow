@@ -30,7 +30,8 @@ pub enum NodeEvent {
         kind: String,
         title: String,
         description: String, // 규칙 B: 요건 설명(사람용, 칸반 description 필드). exec 입력 아님 — body 와 별개 축.
-        prompt: String, // agent 프롬프트(verifyPrompt 등). main.js relay 가 schema 와 묶어 칸반 body(exec-one 입력)로.
+        #[serde(skip_serializing_if = "String::is_empty")]
+        prompt: String, // agent 프롬프트(verifyPrompt 등). 정규화 item·task 는 빈 문자열 → 직렬화 생략(군더더기 0).
         // task 노드(generate/hunt/audit) 의 stage — opts.stage 통로. main.js relay 가 stage 필드로 exec-stage body 임베드.
         // 일반/항목/그룹 노드는 없음(생략). task 노드 prompt 는 비운다 — stage 가 별도 축.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,6 +53,7 @@ pub enum NodeEvent {
         var_refs: Option<Json>, // item: {{key}} → 등록 role 라벨. main.js 가 role→hash → node body refs. 큰 공유값(directive) 콘텐츠 주소 참조(항목마다 복붙 X).
         #[serde(skip_serializing_if = "Option::is_none")]
         schema_ref: Option<String>, // item: 출력 schema 의 등록 role 라벨. main.js 가 role→hash → schemaHash(VERIFY_SCHEMA 1행 참조, 47× 복붙 제거).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
         blocked_by: Vec<String>,
         // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
         // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
