@@ -50,6 +50,8 @@ pub enum NodeEvent {
         register_prompts: Option<Json>, // chunk/stage 1회: {role: 템플릿텍스트}. main.js 가 prompt.put(sha256 dedup).
         #[serde(skip_serializing_if = "Option::is_none")]
         var_refs: Option<Json>, // item: {{key}} → 등록 role 라벨. main.js 가 role→hash → node body refs. 큰 공유값(directive) 콘텐츠 주소 참조(항목마다 복붙 X).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        schema_ref: Option<String>, // item: 출력 schema 의 등록 role 라벨. main.js 가 role→hash → schemaHash(VERIFY_SCHEMA 1행 참조, 47× 복붙 제거).
         blocked_by: Vec<String>,
         // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
         // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
@@ -184,6 +186,7 @@ impl Host for EmitHost {
         let vars = opts.get("vars").map(crate::interp::val_to_json).filter(|v| v.is_object());
         let register_prompts = opts.get("registerPrompts").map(crate::interp::val_to_json).filter(|v| v.is_object());
         let var_refs = opts.get("varRefs").map(crate::interp::val_to_json).filter(|v| v.is_object());
+        let schema_ref = Self::opt_marker(opts, "schemaRef");
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
@@ -198,6 +201,7 @@ impl Host for EmitHost {
             vars,
             register_prompts,
             var_refs,
+            schema_ref,
             blocked_by,
             badge,
             is_draft,
@@ -231,6 +235,7 @@ impl Host for EmitHost {
             vars: None,
             register_prompts: None,
             var_refs: None,
+            schema_ref: None,
             blocked_by,
             // 컨테이너: 드래프트 마커 없음. 집계 배지는 칸반(subValidation)이 자식 oxf 로 자동 계산.
             badge: None,

@@ -159,7 +159,11 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
     }
     const base = { promptHash: hash, vars };
     if (Object.keys(refs).length) base.refs = refs;
-    if (ev.schema) base.schema = ev.schema;
+    // schema: schemaRef(콘텐츠 주소, 등록 role 라벨) 우선 → schemaHash. 없으면 인라인 schema(하위호환).
+    const schemaRefLabel = ev.schema_ref || ev.schemaRef;
+    const schemaHash = schemaRefLabel && roleToHash && roleToHash.get ? roleToHash.get(schemaRefLabel) : undefined;
+    if (schemaHash) base.schemaHash = schemaHash;
+    else if (ev.schema) base.schema = ev.schema;
     body = JSON.stringify(base);
   } else {
     body = ev.prompt
@@ -188,7 +192,9 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
 export async function registerPromptTemplates(registerPrompts, putPrompt) {
   const roleToHash = new Map();
   for (const [role, text] of Object.entries(registerPrompts || {})) {
-    const r = await putPrompt(String(text)); // kanban prompt.put → {ok,hash}
+    // 문자열(템플릿)은 그대로, 객체(schema 등)는 JSON 직렬화(clone VM 은 JSON.stringify 회피 — 여기서 처리).
+    const payload = typeof text === "string" ? text : JSON.stringify(text);
+    const r = await putPrompt(payload); // kanban prompt.put → {ok,hash}
     if (r && r.hash) roleToHash.set(role, r.hash);
   }
   return roleToHash;
@@ -206,7 +212,15 @@ async function resolveBody(body, deps) {
   if (!p || !p.promptHash) return body; // 하위호환: 기존 {prompt,schema} 그대로
   const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}, p.refs || {}) : null;
   if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
-  return JSON.stringify(p.schema ? { prompt: res.prompt, schema: p.schema } : { prompt: res.prompt });
+  // schema: schemaHash(콘텐츠 주소) deref → 파싱. 없으면 인라인 p.schema(하위호환).
+  let schema = p.schema;
+  if (p.schemaHash) {
+    const sr = deps.getPrompt ? await deps.getPrompt(p.schemaHash) : null;
+    const text = sr && (sr.text != null ? sr.text : sr);
+    if (typeof text !== "string") return body; // schema 미발견 → 안전 실패(backoff)
+    try { schema = JSON.parse(text); } catch { return body; }
+  }
+  return JSON.stringify(schema ? { prompt: res.prompt, schema } : { prompt: res.prompt });
 }
 
 /** reconcileStage — kind=task 노드를 exec-stage 로 실행 → 자식 노드 발행 + 덩어리 갱신 + status=done(멱등) + poke.
@@ -515,6 +529,7 @@ export default {
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
             putPrompt: (text) => app.commands.execute(KANBAN + ".prompt.put", { text }),
             resolvePrompt: (hash, vars, refs) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars, refs }),
+            getPrompt: (hash) => app.commands.execute(KANBAN + ".prompt.get", { hash }),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
           return await reconcileTick(deps);

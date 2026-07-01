@@ -424,6 +424,23 @@ test("buildAddParams — 정규화 item varRefs → body.refs(role→hash): dire
   assert.equal(body.vars.directive, undefined, "directive 텍스트가 vars 에 없음");
 });
 
+test("buildAddParams — item schema_ref → body.schemaHash(콘텐츠 주소, 인라인 schema 47× 복붙 제거)", () => {
+  const roleToHash = new Map([["verify", "hT"], ["schema", "hS"]]);
+  const ev = { kind: "item", prompt_role: "verify", vars: { title: "T" }, schema_ref: "schema", title: "요건", badge: "검수전" };
+  const p = buildAddParams(ev, "gid", [], undefined, roleToHash);
+  const body = JSON.parse(p.body);
+  assert.equal(body.schemaHash, "hS", "schemaRef→schemaHash");
+  assert.equal(body.schema, undefined, "인라인 schema 안 박음(1행 참조)");
+});
+
+test("buildAddParams — schema_ref 없으면 인라인 schema(하위호환)", () => {
+  const ev = { kind: "item", prompt_role: "verify", vars: {}, schema: { type: "object" }, title: "요건" };
+  const p = buildAddParams(ev, "gid", [], undefined, new Map([["verify", "hT"]]));
+  const body = JSON.parse(p.body);
+  assert.deepEqual(body.schema, { type: "object" }, "하위호환: 인라인 schema 유지");
+  assert.equal(body.schemaHash, undefined);
+});
+
 test("buildAddParams — promptRole 없으면 기존 {prompt}(하위호환)", () => {
   const ev = { kind: "item", prompt: "완성 프롬프트", schema: { x: 1 } };
   const p = buildAddParams(ev, "gid", [], undefined, new Map());
@@ -470,6 +487,23 @@ test("reconcileTick — 정규화 item refs 를 prompt.resolve 로 전달(direct
   const r = await reconcileTick(deps);
   assert.equal(r.ok, true);
   assert.deepEqual(resolved[0], ["H1", { title: "슬롯" }, { directive: "hD" }], "hash+vars+refs 전달(directive deref)");
+});
+
+test("reconcileTick — item schemaHash 를 getPrompt 로 deref+parse → exec-one schema", async () => {
+  const execd = [];
+  const deps = {
+    listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
+    getNode: async () => ({ node: { body: JSON.stringify({ promptHash: "H1", vars: {}, schemaHash: "hS" }) } }),
+    resolvePrompt: async () => ({ ok: true, prompt: "완성 프롬프트" }),
+    getPrompt: async (hash) => ({ ok: true, text: hash === "hS" ? JSON.stringify({ type: "object", required: ["oxf"] }) : null }),
+    execOne: async (body) => { execd.push(JSON.parse(body)); return { oxf: "o", result: "ok" }; },
+    editNode: async () => {},
+    poke: async () => {},
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(execd[0].schema, { type: "object", required: ["oxf"] }, "schemaHash deref+parse → exec-one schema");
+  assert.equal(execd[0].prompt, "완성 프롬프트");
 });
 
 test("reconcileTick — 하위호환: promptHash 없는 body 는 그대로 exec-one(resolve 안 함)", async () => {
