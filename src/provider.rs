@@ -219,23 +219,6 @@ pub fn run_agent(req: &AgentRequest, env: &[(String, String)]) -> Result<Value, 
     parse_json_lenient(&text)
 }
 
-/// extract_result_text — `--output-format json` 이벤트(배열 또는 단일)에서 result.result 텍스트.
-fn extract_result_text(events: &Value) -> Result<String, String> {
-    let arr = match events {
-        Value::Array(a) => a.clone(),
-        single => vec![single.clone()],
-    };
-    for ev in &arr {
-        if ev.get("type").and_then(|t| t.as_str()) == Some("result") {
-            // result 필드(문자열) 또는 result.result.
-            if let Some(s) = ev.get("result").and_then(|r| r.as_str()) {
-                return Ok(s.to_string());
-            }
-        }
-    }
-    Err("claude 출력에 type=result 이벤트 없음".to_string())
-}
-
 /// parse_json_lenient — 코드펜스(```json) 제거 후 JSON 파싱. 앞뒤 prose 가 있으면
 /// 첫 `{`~마지막 `}` 구간 추출 시도(모델이 펜스/설명을 붙이는 경우 대비).
 pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
@@ -318,22 +301,6 @@ mod tests {
     fn parse_with_surrounding_prose() {
         let v = parse_json_lenient("Here is the result:\n{\"angles\":[\"x\",\"y\"]}\nDone.").unwrap();
         assert_eq!(v["angles"], json!(["x", "y"]));
-    }
-
-    #[test]
-    fn extract_result_from_events() {
-        let events = json!([
-            {"type":"system","subtype":"init"},
-            {"type":"assistant"},
-            {"type":"result","result":"{\"ok\":true}"}
-        ]);
-        assert_eq!(extract_result_text(&events).unwrap(), "{\"ok\":true}");
-    }
-
-    #[test]
-    fn missing_result_errors() {
-        let events = json!([{"type":"system"}]);
-        assert!(extract_result_text(&events).is_err());
     }
 
     /// system_prompt 가 Some 면 --append-system-prompt <내용> 이 args 에 추가된다(user prompt 와 분리).

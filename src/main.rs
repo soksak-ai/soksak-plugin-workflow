@@ -13,6 +13,7 @@ use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
+use soksak_plugin::generate_skeleton::{build_system_prompt, build_user_prompt, strip_js_fence};
 use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost};
 use soksak_plugin::interp::{val_to_json, Host, Interp, Val};
 use soksak_plugin::lang::Language;
@@ -55,6 +56,7 @@ fn real_main() -> Result<(), String> {
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
         eprintln!("  soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]                                  # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)");
+        eprintln!("  soksak-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → gen.js(LLM 저작) → skeleton stdout");
         eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
         eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
         eprintln!("  soksak-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
@@ -91,6 +93,12 @@ fn real_main() -> Result<(), String> {
     // stdout + 최종 {ev:result}. main.js reconcile 가 kind=task 노드를 이 경로로 실행해 그룹/항목 동적 발행.
     if argv[0] == "exec-stage" {
         return run_exec_stage(&argv);
+    }
+
+    // generate-skeleton — 아이디어 → gen.js(LLM 저작) → node 추출기 parse → skeleton stdout.
+    // system=범용 Workflow 스킬 + soksak draft-skill.md, user=아이디어+③파생. 실행 워크플로 산출(draft.js 아님).
+    if argv[0] == "generate-skeleton" {
+        return run_generate_skeleton(&argv);
     }
 
     let path = &argv[0];
@@ -287,5 +295,122 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).
     let out = json!({ "ev": "result", "value": val_to_json(&result) });
     println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// run_generate_skeleton — generate-skeleton 서브커맨드. 아이디어 → gen.js(LLM 저작) → skeleton stdout.
+/// system=SKILL+api+patterns+draft-skill(--refs dir), user=아이디어+③파생(+lang 계약). schema 없음(gen.js=JS 소스).
+/// gen.js 는 파일로 떨궈(cli.js parse 는 파일 인자만) `node <cc>/src/cli.js parse` → skeleton. --gen-out 시 gen.js 보존.
+fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
+    let mut idea = String::new();
+    let mut model = DEFAULT_MODEL.to_string();
+    let mut lang: Option<Language> = None;
+    let mut gen_out: Option<String> = None;
+    let mut refs: Option<String> = None;
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--idea" => {
+                i += 1;
+                idea = argv.get(i).cloned().ok_or("--idea 값 누락")?;
+            }
+            "--model" => {
+                i += 1;
+                model = argv.get(i).cloned().ok_or("--model 값 누락")?;
+            }
+            "--lang" => {
+                i += 1;
+                lang = Some(Language::parse(argv.get(i).ok_or("--lang 값 누락")?));
+            }
+            "--gen-out" => {
+                i += 1;
+                gen_out = Some(argv.get(i).cloned().ok_or("--gen-out 값 누락")?);
+            }
+            "--refs" => {
+                i += 1;
+                refs = Some(argv.get(i).cloned().ok_or("--refs 값 누락")?);
+            }
+            other => return Err(format!("generate-skeleton: 미지 인자 {other:?}")),
+        }
+        i += 1;
+    }
+    if idea.trim().is_empty() {
+        return Err("generate-skeleton: --idea 필수".to_string());
+    }
+    // refs dir = <추출기>/references. --refs 우선, 없으면 env WORKFLOW_DIR/references.
+    let refs_dir = refs
+        .or_else(|| std::env::var("WORKFLOW_DIR").ok().filter(|d| !d.is_empty()).map(|d| format!("{d}/references")))
+        .ok_or("generate-skeleton: --refs <추출기>/references 또는 env WORKFLOW_DIR 필요")?;
+    let read_ref = |rel: &str| -> Result<String, String> {
+        std::fs::read_to_string(format!("{refs_dir}/{rel}")).map_err(|e| format!("refs 읽기 {refs_dir}/{rel}: {e}"))
+    };
+    // system 층 = 범용 Workflow 저작 스킬 + soksak draft 역할 지시어(전문).
+    let system = build_system_prompt(
+        &read_ref("workflow/SKILL.md")?,
+        &read_ref("workflow/api-reference.md")?,
+        &read_ref("workflow/patterns.md")?,
+        &read_ref("draft-skill.md")?,
+    );
+    // ③파생 도메인 지시어 → user 프롬프트 힌트.
+    let directives = synth_directives(&idea, &builtin_library());
+    let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
+    eprintln!("[soksak] generate-skeleton: ③파생 도메인 {:?} → 지시어 {}개", matched, directives.len());
+    let mut user = build_user_prompt(&idea, &directives);
+    if let Some(l) = &lang {
+        user.push_str(&l.contract());
+    }
+
+    // LLM 저작 — 인증 프로필, effort xhigh, schema 없음(gen.js 는 JS 소스 → run_agent_text raw). 529 backoff 는 provider.
+    let (env, profile) = auth_env()?;
+    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 저작");
+    let req = AgentRequest {
+        prompt: user,
+        model: &model,
+        allowed_tools: vec![],
+        timeout_secs: 7200,
+        system_prompt: Some(system),
+        schema: None,
+        effort: "xhigh".into(),
+    };
+    let raw = run_agent_text(&req, &env)?;
+    let gen_js = strip_js_fence(&raw);
+    if gen_js.trim().is_empty() {
+        return Err("generate-skeleton: 저작 산출이 비어있음(인증/모델/네트워크 확인)".to_string());
+    }
+
+    // gen.js 파일로 — cli.js parse 는 stdin 미지원(파일 인자만). --gen-out 없으면 temp(파싱 후 삭제).
+    let gen_path = match &gen_out {
+        Some(p) => p.clone(),
+        None => format!("{}/soksak-gen-{}.js", std::env::temp_dir().display(), std::process::id()),
+    };
+    std::fs::write(&gen_path, &gen_js).map_err(|e| format!("gen.js 쓰기 {gen_path}: {e}"))?;
+
+    // node <추출기>/src/cli.js parse <gen_path> → skeleton JSON stdout.
+    let cc_root = std::path::Path::new(&refs_dir)
+        .parent()
+        .ok_or("generate-skeleton: refs_dir 부모(추출기 root) 해석 실패")?;
+    let cli = cc_root.join("src").join("cli.js");
+    let out = std::process::Command::new("node")
+        .arg(&cli)
+        .arg("parse")
+        .arg(&gen_path)
+        .output()
+        .map_err(|e| format!("node parse spawn: {e} (cli={})", cli.display()))?;
+    if !out.status.success() {
+        if gen_out.is_none() {
+            let _ = std::fs::remove_file(&gen_path);
+        }
+        return Err(format!(
+            "추출기 parse 실패(gen.js 가 interp 서브셋 위반?): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    // skeleton stdout 통과.
+    print!("{}", String::from_utf8_lossy(&out.stdout));
+    if gen_out.is_none() {
+        let _ = std::fs::remove_file(&gen_path);
+    } else {
+        eprintln!("[soksak] gen.js 보존 → {gen_path}");
+    }
     Ok(())
 }

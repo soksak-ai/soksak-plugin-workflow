@@ -7,6 +7,7 @@ pub mod directive_loop;
 pub mod domain_lib;
 pub mod exec;
 pub mod exec_one;
+pub mod generate_skeleton;
 pub mod host;
 pub mod interp;
 pub mod lang;
