@@ -109,9 +109,15 @@ export async function reconcileTick(deps) {
     return reconcileStage(deps, target, body, nodes);
   }
   // 항목 검증 — exec-one(verifyPrompt) → 배지.
-  // 정규화 item: body={promptHash,vars,schema} → kanban prompt.resolve(hash,vars) 로 완성 prompt 조립(소비 시점).
-  // 조립기 단일화(kanban bindVars) — exec-one 은 여전 {prompt,schema} 만 받음(무상태 유지).
-  const execBody = await resolveBody(body, deps);
+  // 정규화 item: body={promptHash,refs,schemaHash} → kanban prompt.resolve 로 완성 prompt 조립(소비 시점).
+  // vars 는 body 에 복붙하지 않고 **노드 필드(title/description) + 부모 카테고리(group.title)** 에서 조립 —
+  // 항목마다 title/description/category 중복 저장 제거(정규화). directive 는 refs(콘텐츠 주소).
+  const parent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined;
+  const fieldVars = {};
+  if (node.title != null) fieldVars.title = node.title;
+  if (node.description != null) fieldVars.description = node.description;
+  if (parent && parent.title != null) fieldVars.category = parent.title;
+  const execBody = await resolveBody(body, deps, fieldVars);
   let execOut;
   try {
     execOut = await deps.execOne(execBody);
@@ -201,7 +207,7 @@ export async function registerPromptTemplates(registerPrompts, putPrompt) {
 
 /** resolveBody — 정규화 item body({promptHash,vars,schema}) 를 완성 {prompt,schema} 로(소비 시점 조립).
  *  kanban prompt.resolve(hash,vars) 단일 조립기 사용. promptHash 없으면(하위호환) body 그대로. */
-async function resolveBody(body, deps) {
+async function resolveBody(body, deps, extraVars) {
   let p;
   try {
     p = JSON.parse(body);
@@ -209,7 +215,9 @@ async function resolveBody(body, deps) {
     return body;
   }
   if (!p || !p.promptHash) return body; // 하위호환: 기존 {prompt,schema} 그대로
-  const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}, p.refs || {}) : null;
+  // vars = body.vars(하위호환) + extraVars(노드 필드: title/description/category). extraVars 우선.
+  const vars = { ...(p.vars || {}), ...(extraVars || {}) };
+  const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, vars, p.refs || {}) : null;
   if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
   // schema: schemaHash(콘텐츠 주소) deref → 네이티브 객체(stringify/parse 왕복 없음). 없으면 인라인 p.schema(하위호환).
   let schema = p.schema;

@@ -506,6 +506,28 @@ test("reconcileTick — item schemaHash 를 getPrompt 로 deref+parse → exec-o
   assert.equal(execd[0].prompt, "완성 프롬프트");
 });
 
+test("reconcileTick — 정규화 item vars 를 노드 필드(title/description)+부모 카테고리에서 조립(body 복붙 0)", async () => {
+  const resolved = [];
+  const deps = {
+    listNodes: async () => ({ nodes: [
+      { id: "g0", kind: "group", title: "재고·위치" },
+      { id: "i1", kind: "item", badge: "검수전", parentId: "g0" },
+    ] }),
+    getNode: async () => ({ node: { title: "슬롯≠재고", description: "슬롯은 위치", parentId: "g0", body: JSON.stringify({ promptHash: "H1", refs: { directive: "hD" } }) } }),
+    resolvePrompt: async (hash, vars, refs) => { resolved.push([hash, vars, refs]); return { ok: true, prompt: "완성" }; },
+    execOne: async () => ({ oxf: "o", result: "ok" }),
+    editNode: async () => {},
+    poke: async () => {},
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(
+    resolved[0],
+    ["H1", { title: "슬롯≠재고", description: "슬롯은 위치", category: "재고·위치" }, { directive: "hD" }],
+    "vars(title/description←노드 필드, category←부모 group.title) 소비 시점 조립, refs 유지",
+  );
+});
+
 test("reconcileTick — 하위호환: promptHash 없는 body 는 그대로 exec-one(resolve 안 함)", async () => {
   let resolveCalled = false;
   const deps = {
