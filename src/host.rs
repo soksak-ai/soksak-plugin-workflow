@@ -1,12 +1,12 @@
 //! host — 인터프리터의 agent 호출을 실제로 처리하는 host 구현.
-//!   ClaudeHost: agent → claude -p(인증 프로필 GLM). 워크플로를 진짜로 실행.
-//!   StubHost:   agent → 호출 기록 + 스키마 모양 통과 placeholder(LLM 미호출). dry-run 미리보기.
+//!   ClaudeHost: agent → claude -p(인증 프로필 GLM). exec-stage/exec-one 의 claude 러너(단위 agent 실행).
+//! stub_from_schema 는 발행 호스트(--emit)가 LLM 없이 interp 데이터 흐름을 잇는 데 공유한다.
 //! 런타임은 program 을 해석하고, LLM 효과만 이 host 로 위임한다.
 
 use crate::interp::{json_to_val, val_to_json, Host, Val};
 use crate::lang::Language;
 use crate::provider::{run_agent, run_agent_text, AgentRequest};
-use serde_json::{json, Value as Json};
+use serde_json::Value as Json;
 use std::collections::BTreeMap;
 
 const SCHEMA_INSTRUCTION: &str =
@@ -19,14 +19,8 @@ fn opt_str(opts: &BTreeMap<String, Val>, key: &str) -> Option<String> {
     }
 }
 
-/// agent 프롬프트 = 본문 + (schema 있으면) 출력 형식 지시 + (lang 있으면) 출력 언어 계약.
+/// build_prompt_with_schema — Json schema 로 프롬프트 조립(exec-one/exec-stage 러너 공유).
 /// 언어 계약을 schema 뒤에 둔다 — 계약이 "the schema" 를 가리키고, 모델이 마지막에 읽는다.
-fn build_prompt(prompt: &str, opts: &BTreeMap<String, Val>, lang: Option<&Language>) -> String {
-    let schema = opts.get("schema").map(val_to_json);
-    build_prompt_with_schema(prompt, schema.as_ref().filter(|s| s.is_object()), lang)
-}
-
-/// build_prompt_with_schema — Json schema 로 프롬프트 조립(exec-one 등 opts 없는 경로 공유).
 /// 본문 → schema 지시 → 언어 계약 순(build_prompt 와 동일 계약).
 pub fn build_prompt_with_schema(prompt: &str, schema: Option<&Json>, lang: Option<&Language>) -> String {
     let mut full = prompt.to_string();
@@ -45,7 +39,7 @@ pub fn build_prompt_with_schema(prompt: &str, schema: Option<&Json>, lang: Optio
 /// 스키마 required 를 통과값으로 채운 stub(dry-run). status 는 done/validated/partial.
 /// 배열은 데이터 의존 fan-out 이 dry-run 에서도 한 번 타도록 샘플 1개를 채운다(실 카운트는
 /// 실행 시 agent 출력이 정함 — dry-run 은 구조 미리보기).
-/// 발행 전용 WorkflowHost(--emit)도 이 stub 으로 interp 데이터 흐름을 잇는다(LLM 미호출).
+/// 발행 전용 EmitHost(--emit)도 이 stub 으로 interp 데이터 흐름을 잇는다(LLM 미호출).
 pub fn stub_from_schema(schema: Option<&Val>) -> Val {
     let sj = schema.map(val_to_json).unwrap_or(Json::Null);
     Val::Obj(std::rc::Rc::new(std::cell::RefCell::new(stub_obj(&sj))))
@@ -121,9 +115,12 @@ impl Host for ClaudeHost {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
         let model = opt_str(opts, "model").unwrap_or_else(|| self.default_model.clone());
         let label = opt_str(opts, "label").unwrap_or_default();
-        let full = build_prompt(prompt, opts, self.lang.as_ref());
-        eprintln!("[soksak] agent {label:?} (model={model}) → claude -p");
-        let req = AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone(), timeout_secs: 3600 };
+        // schema 는 --json-schema 강제(provider.rs)로 넘기고 prompt 에는 붙이지 않는다(이중 지시 회피).
+        let schema = opts.get("schema").map(val_to_json).filter(|s| s.is_object());
+        let effort = opt_str(opts, "effort").unwrap_or_else(|| "xhigh".to_string());
+        let full = build_prompt_with_schema(prompt, None, self.lang.as_ref());
+        eprintln!("[soksak] agent {label:?} (model={model}, effort={effort}) → claude -p");
+        let req = AgentRequest { prompt: full, model: &model, allowed_tools: self.allow_tools.clone(), timeout_secs: 3600, system_prompt: None, schema, effort };
         // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트 그대로 — plain agent 에 JSON 파싱 강요 금지.
         let res = if opts.get("schema").is_some() {
             run_agent(&req, &self.env).map(|out| json_to_val(&out))
@@ -147,141 +144,26 @@ impl Host for ClaudeHost {
     }
 }
 
-/// StubHost — agent 미호출, 호출 trace 기록 + 스키마 stub. dry-run.
-pub struct StubHost {
-    pub trace: Vec<Json>,
-    pub default_model: String,
-    /// 출력 언어 계약. dry-run 은 LLM 미호출이라 산출물 내용엔 영향 없지만, trace 에 기록해
-    /// 미리보기가 "산출물이 이 언어로 나옴" 을 충실히 보여준다(실행과 동일 계약).
-    pub lang: Option<Language>,
-    seq: usize,
-}
-impl StubHost {
-    pub fn new(default_model: String) -> Self {
-        StubHost { trace: vec![], default_model, lang: None, seq: 0 }
-    }
-    /// with_lang — 출력 언어 계약 지정(빌더).
-    pub fn with_lang(mut self, lang: Option<Language>) -> Self {
-        self.lang = lang;
-        self
-    }
-}
-impl Host for StubHost {
-    fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
-        self.seq += 1;
-        let label = opt_str(opts, "label").unwrap_or_default();
-        let model = opt_str(opts, "model").unwrap_or_else(|| self.default_model.clone());
-        let schema_required = opts
-            .get("schema")
-            .map(val_to_json)
-            .and_then(|s| s.get("required").cloned());
-        self.trace.push(json!({
-            "seq": self.seq,
-            "label": label,
-            "model": model,
-            "lang": self.lang.as_ref().map(|l| l.code.clone()),
-            "schemaRequired": schema_required,
-            "promptHead": prompt.chars().take(160).collect::<String>(),
-            "promptLen": prompt.chars().count(),
-        }));
-        Ok(stub_from_schema(opts.get("schema")))
-    }
-    fn phase(&mut self, title: &str) {
-        self.trace.push(json!({ "phase": title }));
-    }
-    fn log(&mut self, msg: &str) {
-        self.trace.push(json!({ "log": msg }));
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interp::Interp;
-
-    #[test]
-    fn stub_host_dry_run_captures_full_cockpit() {
-        // StubHost 로 cockpit 해석 → agent trace 에 전 agent(9). agent 수는 워크플로가 정함.
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/cockpit.skeleton.json")).unwrap();
-        let program = skeleton.get("program").unwrap();
-        let mut h = StubHost::new("opus".into());
-        Interp::new(&mut h).run(program, Json::Null).unwrap();
-        let agents: Vec<String> = h
-            .trace
-            .iter()
-            .filter_map(|t| t.get("label").and_then(|l| l.as_str()).map(String::from))
-            .filter(|l| !l.is_empty())
-            .collect();
-        assert_eq!(agents.len(), 9, "dry-run 도 실행이라 전 agent: {agents:?}");
-        for id in ["S0", "C1", "C2", "C3", "SPK-b", "SPK-c", "SPK-d", "T1", "T3"] {
-            assert!(agents.iter().any(|a| a == id), "{id} 누락");
-        }
-    }
-
-    #[test]
-    fn stub_host_dry_run_deep_research_full_structure() {
-        // deep-research 는 데이터의존 fan-out(pipeline/Map/Set/Array.from/UpdateExpr/try-catch/
-        // Promise then-catch-finally) 워크플로. dry-run 이 갭(미지원) 없이 전 단계를 관통해야 한다:
-        // scope → search → fetch → 3-vote verify → synthesize. 하나라도 조용히 삼키면 단계 누락.
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/deep-research.skeleton.json")).unwrap();
-        let program = skeleton.get("program").unwrap();
-        let mut h = StubHost::new("opus".into());
-        // args 는 cc 계약대로 verbatim — 질문 문자열.
-        Interp::new(&mut h)
-            .run(program, Json::String("How does Rust async work?".into()))
-            .expect("갭 없이 해석 — 미지원 구문/메서드면 Err 로 터진다");
-        let labels: Vec<String> = h
-            .trace
-            .iter()
-            .filter_map(|t| t.get("label").and_then(|l| l.as_str()).map(String::from))
-            .filter(|l| !l.is_empty())
-            .collect();
-        // 전 단계 agent 타입이 trace 에(데이터 샘플 1개씩 → 최소 fan-out 구조).
-        assert!(labels.iter().any(|l| l == "scope"), "scope 누락: {labels:?}");
-        assert!(labels.iter().any(|l| l.starts_with("search:")), "search 누락: {labels:?}");
-        assert!(labels.iter().any(|l| l.starts_with("fetch:")), "fetch 누락(pipeline stage2): {labels:?}");
-        assert_eq!(labels.iter().filter(|l| l.starts_with("v")).count(), 3, "3-vote verify 누락: {labels:?}");
-        assert!(labels.iter().any(|l| l == "synthesize"), "synthesize 누락(verify 게이트 통과 실패): {labels:?}");
-        let phases: Vec<String> = h.trace.iter().filter_map(|t| t.get("phase").and_then(|p| p.as_str()).map(String::from)).collect();
-        for ph in ["Scope", "Verify", "Synthesize"] {
-            assert!(phases.iter().any(|p| p == ph), "phase {ph} 미도달: {phases:?}");
-        }
-    }
+    use serde_json::json;
 
     #[test]
     fn build_prompt_appends_language_contract() {
-        // [기준] lang 지정 시 agent 프롬프트 끝에 출력 언어 계약이 붙는다(execute 가 실제로 보냄).
-        let opts: BTreeMap<String, Val> = BTreeMap::new();
-        let no_lang = build_prompt("본문", &opts, None);
+        // [기준] lang 지정 시 agent 프롬프트 끝에 출력 언어 계약이 붙는다(exec-one/exec-stage 러너가 실제로 보냄).
+        let no_lang = build_prompt_with_schema("본문", None, None);
         assert_eq!(no_lang, "본문", "lang 없으면 본문 그대로");
-        let en = build_prompt("body", &opts, Some(&Language::parse("en")));
+        let en = build_prompt_with_schema("body", None, Some(&Language::parse("en")));
         assert!(en.starts_with("body"));
         assert!(en.contains("Output language"));
         assert!(en.contains("Do NOT"));
         // schema 와 함께면: 본문 → schema → 언어 계약 순.
-        let mut o2: BTreeMap<String, Val> = BTreeMap::new();
-        o2.insert("schema".into(), json_to_val(&json!({ "type": "object", "required": ["x"] })));
-        let ko = build_prompt("body", &o2, Some(&Language::parse("ko")));
+        let schema = json!({ "type": "object", "required": ["x"] });
+        let ko = build_prompt_with_schema("body", Some(&schema), Some(&Language::parse("ko")));
         let i_schema = ko.find("Output format").unwrap();
         let i_lang = ko.find("출력 언어").unwrap();
         assert!(i_schema < i_lang, "schema 지시 뒤에 언어 계약");
-    }
-
-    #[test]
-    fn stub_host_records_lang_in_trace() {
-        // dry-run 미리보기가 출력 언어를 충실히 보여준다 — 각 agent trace 에 lang 코드.
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/cockpit.skeleton.json")).unwrap();
-        let program = skeleton.get("program").unwrap();
-        let mut h = StubHost::new("opus".into()).with_lang(Some(Language::parse("en")));
-        Interp::new(&mut h).run(program, Json::Null).unwrap();
-        let langs: Vec<String> = h
-            .trace
-            .iter()
-            .filter(|t| t.get("label").and_then(|l| l.as_str()).map_or(false, |s| !s.is_empty()))
-            .filter_map(|t| t.get("lang").and_then(|l| l.as_str()).map(String::from))
-            .collect();
-        assert_eq!(langs.len(), 9, "전 agent trace 에 lang");
-        assert!(langs.iter().all(|l| l == "en"), "전부 en: {langs:?}");
     }
 
     #[test]

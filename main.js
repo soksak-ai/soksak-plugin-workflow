@@ -109,9 +109,12 @@ export async function reconcileTick(deps) {
     return reconcileStage(deps, target, body, nodes);
   }
   // 항목 검증 — exec-one(verifyPrompt) → 배지.
+  // 정규화 item: body={promptHash,vars,schema} → kanban prompt.resolve(hash,vars) 로 완성 prompt 조립(소비 시점).
+  // 조립기 단일화(kanban bindVars) — exec-one 은 여전 {prompt,schema} 만 받음(무상태 유지).
+  const execBody = await resolveBody(body, deps);
   let execOut;
   try {
-    execOut = await deps.execOne(body);
+    execOut = await deps.execOne(execBody);
   } catch (e) {
     // 529 과부하·timeout 등 일시 실패 → ok:false. 노드 미변경(badge=검수전 유지) → 코어 backoff 재시도가 자연 복구.
     return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
@@ -129,8 +132,9 @@ export async function reconcileTick(deps) {
  *  - kind=task(stage 작업): stage=ev.stage(NodeEvent.stage 필드 — prompt 아님). taskCtx{skeleton,directive} 있으면
  *    exec-stage 입력 {skeleton, stage, args{directive,chunkRef}}. chunkRef=부모(덩어리). main.js 가 skeleton 임베드 — draft.js 무관여.
  *    skeleton 없으면(방어적) {stage} 만. task 노드 prompt 는 비운다.
- *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema}. prompt 없으면(그룹/덩어리) body 빈 문자열. */
-export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
+ *  - 정규화 항목 → {promptHash, vars, schema}(참조만 — 완성 프롬프트 안 박음). roleToHash 로 promptRole→hash 치환.
+ *  - 그 외(항목) → exec-one 입력 {prompt(=verifyPrompt), schema}. prompt 없으면(그룹/덩어리) body 빈 문자열. (하위호환) */
+export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
   let body;
   if (ev.kind === "task") {
     const stage = ev.stage || "generate";
@@ -139,6 +143,12 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
         ? { skeleton: taskCtx.skeleton, stage, args: { directive: taskCtx.directive, chunkRef: parentId } }
         : { stage }
     );
+  } else if (ev.prompt_role || ev.promptRole) {
+    // 정규화 item — 콘텐츠 주소화 참조. role→hash(roleToHash 는 이번 발행 배치의 registerPrompts 등록 결과).
+    const role = ev.prompt_role || ev.promptRole;
+    const hash = roleToHash && roleToHash.get ? roleToHash.get(role) : undefined;
+    const vars = ev.vars || {};
+    body = JSON.stringify(ev.schema ? { promptHash: hash, vars, schema: ev.schema } : { promptHash: hash, vars });
   } else {
     body = ev.prompt
       ? JSON.stringify(ev.schema ? { prompt: ev.prompt, schema: ev.schema } : { prompt: ev.prompt })
@@ -154,10 +164,37 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx) {
   };
   if (ev.kind) params.kind = ev.kind; // free-form — reconcile 가 stage 작업 식별에 씀
   if (ev.description) params.description = ev.description; // 규칙 B: 요건 설명(사람용 칸반 표시, body 와 별개 축)
+  if (ev.origin) params.origin = ev.origin; // 규칙 D: 요건 출처(user/agent/search) 추적 — item 본질 메타
   if (ev.badge) params.badge = ev.badge;
   if (ev.is_draft) params.isDraft = true;
   if (ev.parent_draft_id) params.parentDraftId = ev.parent_draft_id;
   return params;
+}
+
+/** registerPromptTemplates — registerPrompts({role:text}) 를 kanban prompt.put 으로 등록(sha256 dedup).
+ *  role→hash 맵 반환(buildAddParams 가 item promptRole→promptHash 치환에 씀). putPrompt(text)→{hash}. */
+export async function registerPromptTemplates(registerPrompts, putPrompt) {
+  const roleToHash = new Map();
+  for (const [role, text] of Object.entries(registerPrompts || {})) {
+    const r = await putPrompt(String(text)); // kanban prompt.put → {ok,hash}
+    if (r && r.hash) roleToHash.set(role, r.hash);
+  }
+  return roleToHash;
+}
+
+/** resolveBody — 정규화 item body({promptHash,vars,schema}) 를 완성 {prompt,schema} 로(소비 시점 조립).
+ *  kanban prompt.resolve(hash,vars) 단일 조립기 사용. promptHash 없으면(하위호환) body 그대로. */
+async function resolveBody(body, deps) {
+  let p;
+  try {
+    p = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (!p || !p.promptHash) return body; // 하위호환: 기존 {prompt,schema} 그대로
+  const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}) : null;
+  if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
+  return JSON.stringify(p.schema ? { prompt: res.prompt, schema: p.schema } : { prompt: res.prompt });
 }
 
 /** reconcileStage — kind=task 노드를 exec-stage 로 실행 → 자식 노드 발행 + 덩어리 갱신 + status=done(멱등) + poke.
@@ -214,10 +251,15 @@ async function reconcileStage(deps, target, body, nodes) {
   }
   const children = (staged && staged.children) || [];
   const keyOf = new Map();
+  const roleToHash = new Map(); // 정규화: exec-stage 자식 발행의 registerPrompts → prompt.put → item 참조.
   for (const ev of children) {
+    if (ev.register_prompts || ev.registerPrompts) {
+      const reg = await registerPromptTemplates(ev.register_prompts || ev.registerPrompts, deps.putPrompt);
+      for (const [role, hash] of reg) roleToHash.set(role, hash);
+    }
     const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
     const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
-    const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy, childCtx));
+    const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy, childCtx, roleToHash));
     if (nodeId) keyOf.set(ev.id, nodeId);
   }
   // 덩어리 갱신: generate→title, audit→verdict(result). 덩어리 = stage 노드의 parent.
@@ -329,18 +371,25 @@ export default {
           const queue = [];
           let processing = false;
 
+          const roleToHash = new Map(); // 프롬프트 정규화: registerPrompts 등록 결과(role→sha256). item 발행이 참조.
           const handleEv = async (line) => {
             if (!line.startsWith("{")) return;
             let ev;
             try { ev = JSON.parse(line); } catch { return; }
             try {
               if (ev.ev === "add") {
+                // 정규화: chunk/stage 의 registerPrompts({role:text}) → kanban prompt.put(sha256 dedup) → roleToHash.
+                if (ev.register_prompts || ev.registerPrompts) {
+                  const putPrompt = (text) => app.commands.execute(KANBAN + ".prompt.put", { text });
+                  const reg = await registerPromptTemplates(ev.register_prompts || ev.registerPrompts, putPrompt);
+                  for (const [role, hash] of reg) roleToHash.set(role, hash);
+                }
                 // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
                 const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
                 const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
                 // stage 작업(kind=task) 노드는 body 에 skeleton 임베드(exec-stage 입력). 항목/그룹은 무관.
                 const taskCtx = runtime.skeleton ? { skeleton: runtime.skeleton, directive: runtime.directive } : undefined;
-                const params = buildAddParams(ev, parentId, blockedBy, taskCtx); // 발행 relay·exec-stage relay 공유
+                const params = buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash); // 발행 relay·exec-stage relay 공유
                 const r = await app.commands.execute(KANBAN + ".node.add", params);
                 if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
               }
@@ -410,6 +459,9 @@ export default {
               return buildLedger((listed && listed.nodes) || [], chunkId);
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
+            // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
+            putPrompt: (text) => app.commands.execute(KANBAN + ".prompt.put", { text }),
+            resolvePrompt: (hash, vars) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars }),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
           return await reconcileTick(deps);

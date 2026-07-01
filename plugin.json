@@ -17,7 +17,7 @@
     "commands": [
       {
         "name": "workflow.run",
-        "title": "Run workflow → 칸반"
+        "title": "워크플로 발행 → 칸반(실행=reconcile 스케줄러)"
       },
       {
         "name": "workflow.reconcile",

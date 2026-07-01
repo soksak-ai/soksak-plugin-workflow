@@ -1,4 +1,4 @@
-//! workflow_host — Host 구현: interp 의 agent/parallel/pipeline 을 칸반 노드 *발행*으로 매핑.
+//! emit_host — 발행 Host 구현: interp 의 agent/parallel/pipeline 을 칸반 노드 *발행*으로 매핑.
 //!
 //! 규칙(rule_workflow_pipeline_node_model) 준수:
 //! - 규칙 A: 노드는 작업이다. parallel/pipeline 은 **노드가 아니다** — 관계다.
@@ -39,6 +39,15 @@ pub enum NodeEvent {
         schema: Option<Json>, // 구조화 출력 계약(exec-one 용). 없으면 raw 텍스트 agent.
         #[serde(skip_serializing_if = "Option::is_none")]
         category: Option<String>, // 의미 그룹 차원 라벨(group 노드 분류·item 의 소속). draft category 사후 군집.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        origin: Option<String>, // 요건 출처(user/agent/search) — 규칙 D 출처 추적의 본질 메타. GEN it.origin → verify 갱신.
+        // ── 프롬프트 정규화(콘텐츠 주소화) 통로 — Rust 는 해시 모름, 텍스트/role 만 relay. main.js 가 sha256·치환.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        prompt_role: Option<String>, // item: 논리 role(verify/hunt/audit). main.js relay 가 role→promptHash 치환.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        vars: Option<Json>, // item: {{key}} 바인딩 변수({category,title,description,directive}). 소비 시점 조립.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        register_prompts: Option<Json>, // chunk/stage 1회: {role: 템플릿텍스트}. main.js 가 prompt.put(sha256 dedup).
         blocked_by: Vec<String>,
         // 칸반 드래프트 계약(Phase 2): 항목=badge("검수전"), 덩어리 부모=is_draft, 복제 재제출=parent_draft_id.
         // 마커는 *드래프트 노드에만* 붙는다 — 일반 노드엔 없음(보드 오염 방지). 정책은 워크플로(opts), 여긴 통로일 뿐.
@@ -63,7 +72,7 @@ enum GroupScope {
     Pipeline { prev: Option<String> }, // 같은 item 체인의 직전 노드
 }
 
-pub struct WorkflowHost {
+pub struct EmitHost {
     pub events: Vec<NodeEvent>,
     emit: Option<Box<dyn FnMut(&NodeEvent)>>, // 실시간 emit(stdout JSON line) — 없으면 buffer 만.
     stack: Vec<String>,        // 컨테이너 부모(phase) — 무한뎁스. parallel/pipeline 은 안 쌓음.
@@ -72,15 +81,15 @@ pub struct WorkflowHost {
     counter: usize,
 }
 
-impl Default for WorkflowHost {
+impl Default for EmitHost {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl WorkflowHost {
+impl EmitHost {
     pub fn new() -> Self {
-        WorkflowHost {
+        EmitHost {
             events: vec![],
             emit: None,
             stack: vec![],
@@ -135,7 +144,7 @@ impl WorkflowHost {
     }
 }
 
-impl Host for WorkflowHost {
+impl Host for EmitHost {
     fn agent(&mut self, prompt: &str, opts: &BTreeMap<String, Val>) -> Result<Val, String> {
         // 명시적 트리(draft expand): opts.nodeId(자기 id)+opts.parent(부모 ref) 로 덩어리>그룹>항목 부모 사슬을
         // 워크플로가 직접 그린다(인터프리터 컨테이너 수술 회피). 미지정 시 자동 id + 현재 컨테이너(phase).
@@ -163,8 +172,15 @@ impl Host for WorkflowHost {
         // node kind/category — draft 모델 B 가 opts 로 박는다(chunk/group/item/task + 분류 차원). 미지정=agent.
         let kind = Self::opt_marker(opts, "kind").unwrap_or_else(|| "agent".into());
         let category = Self::opt_marker(opts, "category");
+        // 요건 출처(user/agent/search) — opts.origin. item 본질 메타(규칙 D 출처 추적).
+        let origin = Self::opt_marker(opts, "origin");
         // task 노드 stage(generate/hunt/audit) — opts.stage. 일반/항목/그룹은 없음 → 생략.
         let stage = Self::opt_marker(opts, "stage");
+        // 프롬프트 정규화 통로(콘텐츠 주소화): item 은 promptRole+vars(참조), chunk/stage 는 registerPrompts(등록).
+        // Rust 는 텍스트/role 만 relay — sha256·치환은 main.js(kanban prompt.put). 완성 프롬프트를 node 에 안 박는다.
+        let prompt_role = Self::opt_marker(opts, "promptRole");
+        let vars = opts.get("vars").map(crate::interp::val_to_json).filter(|v| v.is_object());
+        let register_prompts = opts.get("registerPrompts").map(crate::interp::val_to_json).filter(|v| v.is_object());
         self.emit_node(NodeEvent::Add {
             id: id.clone(),
             parent,
@@ -174,6 +190,10 @@ impl Host for WorkflowHost {
             prompt: prompt.into(),
             schema,
             category,
+            origin,
+            prompt_role,
+            vars,
+            register_prompts,
             blocked_by,
             badge,
             is_draft,
@@ -202,6 +222,10 @@ impl Host for WorkflowHost {
             prompt: String::new(),
             schema: None,
             category: None,
+            origin: None,
+            prompt_role: None,
+            vars: None,
+            register_prompts: None,
             blocked_by,
             // 컨테이너: 드래프트 마커 없음. 집계 배지는 칸반(subValidation)이 자식 oxf 로 자동 계산.
             badge: None,
@@ -238,17 +262,17 @@ impl Host for WorkflowHost {
 
 /// ClaudeEmitHost — exec-stage 호스트. opts.publish 로 실행(claude) vs 발행(노드)을 가른다(규칙 C·결정3):
 /// - opts.publish 없음 → 주입된 run(claude) 실행. stage 의 LLM 작업(예: genPrompt) = 진짜 호출, 결과로 데이터흐름.
-/// - opts.publish:true → WorkflowHost 위임(자식 노드 발행, schema-shaped stub 반환). claude 안 돌림.
+/// - opts.publish:true → EmitHost 위임(자식 노드 발행, schema-shaped stub 반환). claude 안 돌림.
 /// 즉 한 stage exec = claude 1+회 + 결과 트리를 항목/그룹 노드로 emit. 멱등은 스케줄러(done 재실행 X).
 /// run = 주입(테스트는 fake, 실행은 ClaudeHost.agent). 발행 콜백(stdout)은 wh 에 위임.
 pub struct ClaudeEmitHost<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> {
-    pub wh: WorkflowHost,
+    pub wh: EmitHost,
     run: F,
 }
 
 impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> ClaudeEmitHost<F> {
     pub fn new(run: F) -> Self {
-        ClaudeEmitHost { wh: WorkflowHost::new(), run }
+        ClaudeEmitHost { wh: EmitHost::new(), run }
     }
     /// 발행 노드 실시간 emit(stdout JSON line) — wh 에 위임.
     pub fn with_emit(mut self, emit: Box<dyn FnMut(&NodeEvent)>) -> Self {
@@ -287,8 +311,8 @@ impl<F: FnMut(&str, &BTreeMap<String, Val>) -> Result<Val, String>> Host for Cla
 mod tests {
     use super::*;
 
-    fn host() -> WorkflowHost {
-        WorkflowHost::new()
+    fn host() -> EmitHost {
+        EmitHost::new()
     }
     fn opts(pairs: &[(&str, &str)]) -> BTreeMap<String, Val> {
         let mut m = BTreeMap::new();
@@ -302,7 +326,7 @@ mod tests {
         Val::Arr(std::rc::Rc::new(std::cell::RefCell::new(ids.iter().map(|s| Val::Str((*s).to_string())).collect())))
     }
     /// Add 이벤트 → (kind, id, parent, blocked_by).
-    fn adds(h: &WorkflowHost) -> Vec<(String, String, Option<String>, Vec<String>)> {
+    fn adds(h: &EmitHost) -> Vec<(String, String, Option<String>, Vec<String>)> {
         h.events
             .iter()
             .map(|e| match e {
@@ -313,7 +337,7 @@ mod tests {
             .collect()
     }
     /// agent 노드만 → (id, parent, blocked_by).
-    fn agents(h: &WorkflowHost) -> Vec<(String, Option<String>, Vec<String>)> {
+    fn agents(h: &EmitHost) -> Vec<(String, Option<String>, Vec<String>)> {
         adds(h).into_iter().filter(|x| x.0 == "agent").map(|x| (x.1, x.2, x.3)).collect()
     }
 
@@ -479,6 +503,40 @@ mod tests {
     }
 
     #[test]
+    fn draft_prompt_normalization_channel() {
+        // [프롬프트 정규화] item = promptRole+vars(참조), chunk = registerPrompts(등록). Rust 는 텍스트/role 만 relay.
+        let mut h = host();
+        // chunk: registerPrompts 등록 통로
+        let mut chunk_opts = opts(&[("kind", "chunk")]);
+        chunk_opts.insert(
+            "registerPrompts".into(),
+            val_obj(vec![("verify", Val::Str("SHARED... {{title}}".into()))]),
+        );
+        h.agent("", &chunk_opts).unwrap();
+        // item: promptRole + vars 참조(1번째 인자 빈 문자열 — 완성 프롬프트 안 실림)
+        let mut item_opts = opts(&[("kind", "item"), ("promptRole", "verify")]);
+        item_opts.insert("vars".into(), val_obj(vec![("title", Val::Str("슬롯≠재고".into()))]));
+        h.agent("", &item_opts).unwrap();
+
+        // chunk 이벤트: register_prompts 있음, prompt_role 없음
+        match &h.events[0] {
+            NodeEvent::Add { register_prompts, prompt_role, .. } => {
+                assert!(register_prompts.is_some(), "chunk 에 registerPrompts relay");
+                assert_eq!(prompt_role, &None);
+            }
+        }
+        // item 이벤트: prompt_role='verify', vars 있음, prompt(1번째 인자)=빈 문자열
+        match &h.events[1] {
+            NodeEvent::Add { prompt_role, vars, prompt, register_prompts, .. } => {
+                assert_eq!(prompt_role.as_deref(), Some("verify"), "item promptRole relay");
+                assert!(vars.is_some(), "item vars relay");
+                assert_eq!(prompt, "", "정규화 item 은 완성 프롬프트 안 실음(1번째 인자 빈 문자열)");
+                assert_eq!(register_prompts, &None, "item 엔 registerPrompts 없음");
+            }
+        }
+    }
+
+    #[test]
     fn claude_emit_host_publish_emits_else_runs() {
         // [exec-stage] opts.publish:true → 노드 발행(claude X). 없음 → 주입 run(claude) 실행.
         let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(format!("ran:{p}"))));
@@ -505,7 +563,7 @@ mod tests {
     #[test]
     fn claude_emit_host_publish_carries_blockedby_and_description() {
         // [exec-stage 경로] ClaudeEmitHost.publish 가 opts.blockedBy→ev.blocked_by + opts.description→ev.description 를
-        // 함께 emit(publish 분기 = WorkflowHost.agent 위임). 없으면 Hunt 가 항목 검증 전 ready(B) + 요건설명 표시 깨짐(A).
+        // 함께 emit(publish 분기 = EmitHost.agent 위임). 없으면 Hunt 가 항목 검증 전 ready(B) + 요건설명 표시 깨짐(A).
         let mut h = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
         let mut o = opts(&[("kind", "task"), ("stage", "hunt"), ("nodeId", "hunt"), ("title", "누락 탐색"), ("description", "전체 원장 누락 탐색")]);
         o.insert("publish".into(), Val::Bool(true));
@@ -648,8 +706,8 @@ mod tests {
                 "arguments":[{"type":"Literal","value":prompt},{"type":"ObjectExpression","properties":[]}]}
         })
     }
-    fn run_program(prog: &serde_json::Value) -> WorkflowHost {
-        let mut wh = WorkflowHost::new();
+    fn run_program(prog: &serde_json::Value) -> EmitHost {
+        let mut wh = EmitHost::new();
         Interp::new(&mut wh).run(prog, serde_json::Value::Null).expect("interp 해석");
         wh
     }
@@ -701,7 +759,7 @@ mod tests {
         // fixtures/draft.skeleton.json = `node 추출기/src/cli.js parse workflows/draft.js` 산출(draft.js 변경 시 재생성).
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/draft.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
-        let mut wh = WorkflowHost::new();
+        let mut wh = EmitHost::new();
         Interp::new(&mut wh)
             .run(program, Json::String("내 고유 지시어 XYZ".to_string()))
             .expect("interp 해석");

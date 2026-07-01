@@ -24,29 +24,83 @@ pub struct AgentRequest<'a> {
     /// 넉넉히 3600s(1시간). exec-one 은 코어와 천장 일치: provider 캡=register timeout_ms=ipc 클램프=3600s.
     /// 셋 일치라야 발화 timeout 으로 lease 중복 실행이 안 난다.
     pub timeout_secs: u64,
+    /// system prompt(claude `--append-system-prompt`). user prompt(`-p`)와 분리 —
+    /// SKILL.md(AST 사용법) + cc 추출 AST(구조 예시) 등이 system 층에, derive 지시어+아이디어가 user 층.
+    /// None 이면 종래 동작(system 주입 없음).
+    pub system_prompt: Option<String>,
+    /// JSON Schema(claude `--json-schema`) — StructuredOutput 강제. agent 가 schema 준수 객체 반환(필수 필드 보장).
+    /// api-reference 계약(schema → forced StructuredOutput → validated object). None 이면 raw 텍스트.
+    pub schema: Option<Value>,
+    /// claude `--effort`. 추론 깊이. agent opts.effort 로 override, 기본 xhigh(최고 — 도출·검증·판정 품질 우선).
+    pub effort: String,
 }
 
-/// run_agent_text — claude -p 로 agent 실행, result 텍스트(raw)를 반환.
-/// author(마크다운 스펙처럼 JSON 이 아닌 산출)용. env=인증 프로필. run_agent 의 raw-text 형제.
+/// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
+/// run_agent_text 가 timeout 래퍼로 이 args 를 `claude` 에 적용한다. system_prompt 가 Some 이면
+/// `--append-system-prompt <내용>` 추가(user prompt 와 분리 — claude CLI 공식 플래그).
+fn claude_args(req: &AgentRequest) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".into(),
+        req.prompt.clone(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--verbose".into(),
+        "--strict-mcp-config".into(),
+        "--allowedTools".into(),
+        req.allowed_tools.join(" "),
+        "--disallowedTools".into(),
+        "Task".into(), // sub-agent 금지 — real Claude 가 async agent 띄우고 무한대기하는 hang 방지.
+        "--model".into(),
+        req.model.into(),
+    ];
+    if let Some(sp) = &req.system_prompt {
+        args.push("--append-system-prompt".into());
+        args.push(sp.clone());
+    }
+    if let Some(sc) = &req.schema {
+        args.push("--json-schema".into());
+        args.push(sc.to_string());
+    }
+    args.push("--effort".into());
+    args.push(req.effort.clone());
+    args
+}
+
+/// run_agent_text — claude -p 로 agent 실행, result 텍스트(raw) 반환. **529 과부하 backoff 재시도** 포함.
+/// 인증 프로필(제공자) 529 는 일시적 → 지수 backoff 로 복구(메모리 정책: 529 backoff 재시도). max 5회.
 pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
+    let max = 5u32;
+    let mut backoff_secs = 3.0f64;
+    for attempt in 0..max {
+        match run_agent_text_once(req, env) {
+            Ok(s) => return Ok(s),
+            Err(e) if is_529(&e) && attempt + 1 < max => {
+                eprintln!("[soksak] 529 과부하(인증 프로필) — {backoff_secs:.0}s 후 재시도 ({}/{})", attempt + 1, max);
+                std::thread::sleep(std::time::Duration::from_secs_f64(backoff_secs));
+                backoff_secs = (backoff_secs * 2.0).min(60.0);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
+}
+
+/// is_529 — 인증 프로필(제공자) 일시 과부하 에러(529/overloaded/temporarily) 판정.
+fn is_529(err: &str) -> bool {
+    err.contains("529") || err.contains("overloaded") || err.contains("temporarily")
+}
+
+/// run_agent_text_once — claude -p 단일 실행(재시도 없음). 529 감지(stream text) 시 Err 를 529 로.
+fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
+    let mut transient_529 = false; // stream 중 [text] API Error 529/overloaded 감지.
     // timeout 하드캡(req.timeout_secs) — hung claude 호출(WebSearch 폭주 등)이 루프를 영원히 막지 못하게.
-    // timeout 만료 → 비-success status → Err(라운드 실패, 무한 hang 아님).
     let mut cmd = Command::new("timeout");
-    cmd.arg(req.timeout_secs.to_string())
-        .arg("claude")
-        .arg("-p")
-        .arg(&req.prompt)
-        .arg("--output-format")
-        .arg("stream-json")
-        .arg("--verbose")
-        .arg("--strict-mcp-config")
-        .arg("--allowedTools")
-        .arg(req.allowed_tools.join(" "))
-        .arg("--disallowedTools")
-        .arg("Task") // sub-agent 금지 — real Claude 가 async agent 띄우고 무한대기하는 hang 방지.
-        .arg("--model")
-        .arg(req.model)
-        .stdout(Stdio::piped()); // stderr 는 상속(claude 경고 그대로 보임, 파이프 deadlock 방지)
+    cmd.arg(req.timeout_secs.to_string()).arg("claude");
+    for a in claude_args(req) {
+        cmd.arg(a);
+    }
+    cmd.stdout(Stdio::piped()); // stderr 는 상속(claude 경고 그대로 보임, 파이프 deadlock 방지)
     // 부모 env 격리 후 인증 env 만 주입(누수 방지). PATH·HOME 유지.
     if let Ok(path) = std::env::var("PATH") {
         cmd.env("PATH", path);
@@ -74,7 +128,11 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
         match serde_json::from_str::<Value>(t) {
             Ok(ev) => {
                 print_event(&ev);
-                if ev.get("type").and_then(|x| x.as_str()) == Some("result") {
+                let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                if ty == "text" {
+                    let t = ev.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                    if t.contains("529") || t.contains("overloaded") { transient_529 = true; }
+                } else if ty == "result" {
                     if let Some(s) = ev.get("result").and_then(|r| r.as_str()) {
                         result_text = s.to_string();
                     }
@@ -85,6 +143,9 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
     }
     let status = child.wait().map_err(|e| format!("wait claude: {e}"))?;
     if !status.success() {
+        if transient_529 {
+            return Err("529 과부하 — claude 비정상 종료(일시적, backoff 대상)".into());
+        }
         return Err(format!("claude 비정상 종료: {status} (timeout 만료=124/137)"));
     }
     if result_text.is_empty() {
@@ -273,5 +334,39 @@ mod tests {
     fn missing_result_errors() {
         let events = json!([{"type":"system"}]);
         assert!(extract_result_text(&events).is_err());
+    }
+
+    /// system_prompt 가 Some 면 --append-system-prompt <내용> 이 args 에 추가된다(user prompt 와 분리).
+    #[test]
+    fn system_prompt_appends_flag_when_some() {
+        let req = AgentRequest {
+            prompt: "USER_PROMPT".into(),
+            model: "haiku",
+            allowed_tools: vec![],
+            timeout_secs: 10,
+            system_prompt: Some("SKILL_AST_SYSTEM".into()),
+            schema: None,
+            effort: "xhigh".into(),
+        };
+        let args = claude_args(&req);
+        assert!(args.contains(&"-p".into()) && args.contains(&"USER_PROMPT".into()), "user prompt(-p) 유지");
+        let i = args.iter().position(|a| a == "--append-system-prompt").expect("system flag 누락");
+        assert_eq!(args[i + 1], "SKILL_AST_SYSTEM", "system_prompt 내용이 flag 바로 뒤");
+    }
+
+    /// system_prompt None 이면 --append-system-prompt 가 아예 안 붙는다(종래 동작).
+    #[test]
+    fn system_prompt_omitted_when_none() {
+        let req = AgentRequest {
+            prompt: "p".into(),
+            model: "haiku",
+            allowed_tools: vec![],
+            timeout_secs: 10,
+            system_prompt: None,
+            schema: None,
+            effort: "xhigh".into(),
+        };
+        let args = claude_args(&req);
+        assert!(!args.iter().any(|a| a == "--append-system-prompt"), "None 이면 system flag 미부착");
     }
 }

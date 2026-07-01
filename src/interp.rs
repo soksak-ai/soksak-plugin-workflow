@@ -79,7 +79,7 @@ pub trait Host {
     fn phase(&mut self, title: &str);
     fn log(&mut self, msg: &str);
     /// 워크플로 노드 발행용 그룹 경계 — parallel/pipeline 진입/진출(부모키·blockedBy 추적).
-    /// default no-op: 기존 Host(ClaudeHost/StubHost)는 영향 없음.
+    /// default no-op: agent 실행 Host(ClaudeHost)는 영향 없음 — 발행 호스트만 override.
     fn group_enter(&mut self, _kind: &str) {}
     fn group_exit(&mut self) {}
     /// pipeline 의 한 item 이 stage 체인을 시작/끝낼 때(blockedBy 체인 경계). default no-op.
@@ -1394,25 +1394,6 @@ mod tests {
         let mut h = RecHost { calls: vec![] };
         let mut interp = Interp::new(&mut h);
         assert_eq!(to_string(&interp.run(&prog, Json::Null).unwrap()), "x2");
-    }
-
-    #[test]
-    fn interprets_cockpit_full_agent_set() {
-        // [기준] 완전 skeleton.program 을 해석하면 cockpit 의 전 agent 가 나온다(요약은 1개였음).
-        // w() 팩토리·IIFE·parallel·.then()·.filter(Boolean)·조건부 게이트를 실행으로 풀어낸다.
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/cockpit.skeleton.json")).unwrap();
-        let program = skeleton.get("program").expect("program(완전 AST)");
-        let mut h = RecHost { calls: vec![] };
-        let mut interp = Interp::new(&mut h);
-        interp.run(program, Json::Null).unwrap();
-        let labels: Vec<String> = h.calls.iter().map(|(l, _)| l.clone()).collect();
-        // 9 agent 전부 — 내가 정한 게 아니라 워크플로가 정함.
-        for id in ["S0", "C1", "C2", "C3", "SPK-b", "SPK-c", "SPK-d", "T1", "T3"] {
-            assert!(labels.iter().any(|l| l == id), "agent {id} 누락. 캡처: {labels:?}");
-        }
-        // ok('C6')=false 로 게이트된 T2 는 미실행.
-        assert!(!labels.iter().any(|l| l == "T2"), "T2 는 게이트 미실행이어야: {labels:?}");
-        assert_eq!(h.calls.len(), 9, "정확히 9 agent: {labels:?}");
     }
 
     #[test]

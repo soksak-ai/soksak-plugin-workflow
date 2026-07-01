@@ -1,24 +1,23 @@
-//! soksak-workflow — 워크플로 실행 CLI. 추출기 가 떠낸 완전 skeleton 의 program(중립 AST)을
-//! 인터프리터로 **해석**해 실행한다. agent 는 host(claude -p 인증 프로필). 런타임은 워크플로 로직을
-//! 모름 — program 을 해석할 뿐. agent 수는 워크플로가 정함(내가 아님).
+//! soksak-workflow — 워크플로 CLI. 추출기 가 떠낸 완전 skeleton 의 program(중립 AST)을 인터프리터로
+//! **해석**해 (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. agent 는
+//! host(claude -p 인증 프로필). 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을
+//! 모름 — program 을 해석할 뿐. agent 수는 워크플로가 정함(내가 아님). 직접-실행/dry-run 경로는 제거됨.
 //!
-//!   soksak-workflow <skeleton.json|-> --arg K=V ... [--dry-run] [--lang ko|en|…] [--allow-tools "T1 T2"]
-//!       # program 해석 실행(agent→claude -p)
-//!   soksak-workflow <skeleton.json|-> --emit [--lang ko]   # 발행만(노드 DAG 를 stdout JSON line 으로). LLM 미호출.
-//!   soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools "..."]
-//!       # stdin {prompt, schema?, model?} 한 노드 실행 → {oxf, result} stdout. (스케줄러가 ready 노드 실행에 사용)
-//!   soksak-workflow synth --idea "..."        # ③파생 도메인 지시어만
+//!   soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]    # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)
+//!   soksak-workflow exec-one  [--lang ko] [--model m] [--allow-tools "..."] # stdin {prompt, schema?} 한 노드 실행 → {oxf, result} (스케줄러가 ready 노드에)
+//!   soksak-workflow exec-stage [--lang ko] [--model m]                      # stdin {skeleton, stage, args} stage 실행 → 자식 {ev:add} + {ev:result}
+//!   soksak-workflow synth --idea "..."                                      # ③파생 도메인 지시어만
 //! 인증 env(ANTHROPIC_*)는 호출자가 export.
 
 use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
-use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost, StubHost};
+use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost};
 use soksak_plugin::interp::{val_to_json, Host, Interp, Val};
 use soksak_plugin::lang::Language;
 use soksak_plugin::provider::{run_agent, run_agent_text, AgentRequest};
-use soksak_plugin::workflow_host::{ClaudeEmitHost, NodeEvent, WorkflowHost};
+use soksak_plugin::emit_host::{ClaudeEmitHost, EmitHost, NodeEvent};
 use std::collections::{BTreeMap, HashSet};
 
 const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
@@ -30,15 +29,24 @@ fn main() {
     }
 }
 
-/// auth_env — claude -p 호출용 프로필 인증 env 수집 + 토큰 확인. 인증 프로필(ANTHROPIC_*) | oauth 프로필/oauth 프로필(OAUTH).
+/// auth_env — claude -p 호출용 인증 env 수집 + 토큰 확인. ANTHROPIC_AUTH_TOKEN 프로필을 OAuth 프로필보다 우선.
+/// 환경에 두 토큰이 공존할 때(래퍼가 ANTHROPIC_* 를 주입해도 zshrc 의 OAUTH 가 잔류) 토큰 프로필이 쓰이도록 —
+/// ANTHROPIC_AUTH_TOKEN 있으면 그 프로필 확정 + OAUTH 를 env 에서 제외(혼합 → claude 오판 회피). 없으면 OAuth.
 fn auth_env() -> Result<(Vec<(String, String)>, &'static str), String> {
-    let env: Vec<(String, String)> = std::env::vars()
+    let all: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| k.starts_with("ANTHROPIC_") || k == "CLAUDE_ACCOUNT_NAME" || k == "CLAUDE_CODE_OAUTH_TOKEN")
         .collect();
-    if !env.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN" || k == "CLAUDE_CODE_OAUTH_TOKEN") {
-        return Err("프로필 인증 토큰 미설정 — 인증 프로필(ANTHROPIC_AUTH_TOKEN) 또는 oauth 프로필(CLAUDE_CODE_OAUTH_TOKEN) export 후 실행하라".to_string());
+    let has_token = all.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN");
+    let has_oauth = all.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN");
+    if !has_token && !has_oauth {
+        return Err("프로필 인증 토큰 미설정 — ANTHROPIC_AUTH_TOKEN 또는 CLAUDE_CODE_OAUTH_TOKEN export 후 실행하라".to_string());
     }
-    let profile = if env.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN") { "oauth 프로필/oauth 프로필" } else { "인증 프로필" };
+    // 토큰 프로필 우선: ANTHROPIC_AUTH_TOKEN 있으면 그 env 만. OAUTH 가 잔류해도 제외(혼합 방지).
+    let (env, profile) = if has_token {
+        (all.into_iter().filter(|(k, _)| k.starts_with("ANTHROPIC_") || k == "CLAUDE_ACCOUNT_NAME").collect(), "token")
+    } else {
+        (all, "oauth")
+    };
     Ok((env, profile))
 }
 
@@ -46,8 +54,7 @@ fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
-        eprintln!("  soksak-workflow <skeleton.json|-> --arg K=V ... [--dry-run] [--lang ko|en|…] [--allow-tools \"T1 T2\"]  # program 해석 실행");
-        eprintln!("  soksak-workflow <skeleton.json|-> --emit [--lang ko]                                                  # 발행만(노드 DAG stdout, LLM 미호출)");
+        eprintln!("  soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]                                  # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)");
         eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
         eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
         eprintln!("  soksak-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
@@ -89,10 +96,8 @@ fn real_main() -> Result<(), String> {
     let path = &argv[0];
     let mut args: Map<String, Value> = Map::new();
     let mut args_override: Option<Value> = None; // --args-json: cc 계약대로 args 를 verbatim(임의 JSON)
-    let mut allow_tools: Vec<String> = vec![];
-    let mut dry_run = false;
     let mut lang: Option<Language> = None; // --lang: 출력 언어 계약
-    let mut emit = false; // --emit: 노드 발행만(WorkflowHost) + stdout JSON line. LLM 미호출.
+    let mut emit = false; // --emit: 노드 발행만(EmitHost) + stdout JSON line. LLM 미호출.
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -107,17 +112,11 @@ fn real_main() -> Result<(), String> {
                 let j = argv.get(i).ok_or("--args-json 값 누락")?;
                 args_override = Some(serde_json::from_str(j).map_err(|e| format!("--args-json 파싱: {e}"))?);
             }
-            "--allow-tools" => {
-                i += 1;
-                let t = argv.get(i).ok_or("--allow-tools 값 누락")?;
-                allow_tools = t.split_whitespace().map(|s| s.to_string()).collect();
-            }
             "--lang" => {
                 i += 1;
                 let v = argv.get(i).ok_or("--lang 값 누락")?;
                 lang = Some(Language::parse(v));
             }
-            "--dry-run" => dry_run = true,
             "--emit" => emit = true,
             other => return Err(format!("미지 인자 {other:?}")),
         }
@@ -156,11 +155,11 @@ fn real_main() -> Result<(), String> {
         eprintln!("[soksak] 출력 언어: {} ({})", l.name, l.code);
     }
 
-    // --emit: 발행만. WorkflowHost 가 program 을 해석하며 노드 DAG 를 stdout JSON line 으로 emit.
+    // --emit: 발행만. EmitHost 가 program 을 해석하며 노드 DAG 를 stdout JSON line 으로 emit.
     // 규칙 C — agent 는 트리거를 일으키지 않는다. LLM 미호출(토큰 불필요). 실행은 스케줄러+exec-one.
     if emit {
         eprintln!("[soksak] {name} — 발행 모드(노드 DAG stdout, LLM 미호출)");
-        let mut wh = WorkflowHost::new().with_emit(Box::new(|ev: &NodeEvent| {
+        let mut wh = EmitHost::new().with_emit(Box::new(|ev: &NodeEvent| {
             if let Ok(s) = serde_json::to_string(ev) {
                 println!("{s}");
             }
@@ -169,23 +168,9 @@ fn real_main() -> Result<(), String> {
         return Ok(());
     }
 
-    // dry-run: StubHost 로 program 해석(LLM 미호출). 실행이므로 전 agent 가 trace 에.
-    if dry_run {
-        let mut h = StubHost::new(DEFAULT_MODEL.into()).with_lang(lang.clone());
-        Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
-        let n = h.trace.iter().filter(|t| t.get("label").and_then(|l| l.as_str()).map_or(false, |s| !s.is_empty())).count();
-        eprintln!("[soksak] dry-run — agent {n}회 실행 예정(LLM 미호출)");
-        println!("{}", serde_json::to_string_pretty(&h.trace).map_err(|e| e.to_string())?);
-        return Ok(());
-    }
-
-    // 실행: ClaudeHost. agent → claude -p. 프로필 인증 변수만 통과.
-    let (env, profile) = auth_env()?;
-    eprintln!("[soksak] {name} — program 해석 실행(agent→claude -p, 프로필={profile})");
-    let mut h = ClaudeHost { env, allow_tools, default_model: DEFAULT_MODEL.into(), lang };
-    let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
-    println!("{}", serde_json::to_string_pretty(&val_to_json(&result)).map_err(|e| e.to_string())?);
-    Ok(())
+    // 직접-실행/dry-run 경로는 제거됨 — 실행은 코어 스케줄러(reconcile → exec-one/exec-stage).
+    // skeleton 경로는 발행(--emit) 전용. lang/args 는 발행 시 program 에 주입된다.
+    Err(format!("{name}: skeleton 직접 실행 경로 제거됨(실행=스케줄러). 발행은 --emit, 단위 실행은 exec-one/exec-stage"))
 }
 
 /// run_exec_one — exec-one 서브커맨드. stdin {prompt, schema?, model?} 한 노드 → claude → {oxf, result}.
@@ -220,13 +205,14 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
 
     let (env, profile) = auth_env()?;
     eprintln!("[soksak] exec-one (model={model}, 프로필={profile}) → claude -p");
-    let full = build_prompt_with_schema(&input.prompt, input.schema.as_ref(), lang.as_ref());
+    let full = build_prompt_with_schema(&input.prompt, None, lang.as_ref()); // schema 는 --json-schema 강제로(prompt X)
     // 7200s(2h): provider 캡 = claude 무한 방지용. lease=프로세스-생존이라 천장 통일 불필요 — 정상은 provider 가
     // claude 종료→onExit→reply(검색 fan-out 1h+ 수용). register timeout_ms(zombie_backstop 3h)는 그것도 실패한
     // 좀비 전용(provider 캡보다 길게). 중복은 lease(도는 중 재발화 X)로 0 — 천장 일치 안 해도 안전.
-    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200 };
+    let has_schema = input.schema.is_some();
+    let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200, system_prompt: None, schema: input.schema, effort: "xhigh".into() };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
-    let result = if input.schema.is_some() {
+    let result = if has_schema {
         run_agent(&req, &env)?
     } else {
         Value::String(run_agent_text(&req, &env)?)

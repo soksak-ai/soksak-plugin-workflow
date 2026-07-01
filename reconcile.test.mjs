@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -397,4 +397,85 @@ test("reconcileTick — kind=task exec-stage 실패면 ok:false·노드 미변�
   assert.equal(deps.calls.add.length, 0, "실패 시 발행 0");
   assert.equal(deps.calls.edit.length, 0, "status=done 안 함(재시도 대상 유지)");
   assert.equal(deps.calls.poke, 0);
+});
+
+// ── 프롬프트 정규화(콘텐츠 주소화) ──
+
+test("buildAddParams — 정규화 item(promptRole+vars)은 body={promptHash,vars,schema}(완성 프롬프트 안 박음)", () => {
+  const roleToHash = new Map([["verify", "abc123"]]);
+  const ev = { kind: "item", prompt_role: "verify", vars: { title: "T" }, schema: { type: "object" }, title: "요건", badge: "검수전" };
+  const p = buildAddParams(ev, "gid", [], undefined, roleToHash);
+  const body = JSON.parse(p.body);
+  assert.equal(body.promptHash, "abc123", "role→hash 치환");
+  assert.deepEqual(body.vars, { title: "T" });
+  assert.ok(body.schema, "schema 유지");
+  assert.equal(body.prompt, undefined, "완성 프롬프트 안 박음(참조만)");
+  assert.equal(p.badge, "검수전");
+});
+
+test("buildAddParams — promptRole 없으면 기존 {prompt}(하위호환)", () => {
+  const ev = { kind: "item", prompt: "완성 프롬프트", schema: { x: 1 } };
+  const p = buildAddParams(ev, "gid", [], undefined, new Map());
+  const body = JSON.parse(p.body);
+  assert.equal(body.prompt, "완성 프롬프트", "하위호환: prompt 그대로");
+  assert.equal(body.promptHash, undefined);
+});
+
+test("registerPromptTemplates — {role:text} → prompt.put → role→hash 맵", async () => {
+  const puts = [];
+  const putPrompt = async (text) => { puts.push(text); return { ok: true, hash: "h_" + text.length }; };
+  const reg = await registerPromptTemplates({ verify: "VVV", hunt: "HH" }, putPrompt);
+  assert.equal(reg.get("verify"), "h_3");
+  assert.equal(reg.get("hunt"), "h_2");
+  assert.equal(puts.length, 2, "각 템플릿 1회 등록");
+});
+
+test("reconcileTick — 정규화 item(promptHash) 은 prompt.resolve 로 조립 후 exec-one", async () => {
+  const resolved = [];
+  const deps = {
+    listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
+    getNode: async () => ({ node: { body: JSON.stringify({ promptHash: "H1", vars: { title: "슬롯" }, schema: { x: 1 } }) } }),
+    resolvePrompt: async (hash, vars) => { resolved.push([hash, vars]); return { ok: true, prompt: "완성:" + vars.title }; },
+    execOne: async (body) => { const b = JSON.parse(body); return { oxf: "o", result: "ok", _execPrompt: b.prompt }; },
+    editNode: async () => {},
+    poke: async () => {},
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.deepEqual(resolved[0], ["H1", { title: "슬롯" }], "promptHash+vars 로 resolve");
+  // exec-one 이 받은 body 는 조립된 완성 prompt(+schema)
+});
+
+test("reconcileTick — 하위호환: promptHash 없는 body 는 그대로 exec-one(resolve 안 함)", async () => {
+  let resolveCalled = false;
+  const deps = {
+    listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
+    getNode: async () => ({ node: { body: JSON.stringify({ prompt: "옛 완성", schema: { x: 1 } }) } }),
+    resolvePrompt: async () => { resolveCalled = true; return { ok: true, prompt: "X" }; },
+    execOne: async (body) => { assert.equal(JSON.parse(body).prompt, "옛 완성", "옛 body 그대로"); return { oxf: "o", result: "ok" }; },
+    editNode: async () => {},
+    poke: async () => {},
+  };
+  await reconcileTick(deps);
+  assert.equal(resolveCalled, false, "promptHash 없으면 resolve 안 함");
+});
+
+test("reconcileTick — 정규화 item 템플릿 미발견 시 안전 실패(ok:false, 노드 미변경)", async () => {
+  const edits = [];
+  const deps = {
+    listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
+    getNode: async () => ({ node: { body: JSON.stringify({ promptHash: "MISSING", vars: {} }) } }),
+    resolvePrompt: async () => ({ ok: false, prompt: null }), // 미발견
+    execOne: async (body) => {
+      // resolve 실패 → body 그대로({promptHash,...}) → exec-one 이 prompt 없어 throw(실제 exec_one.rs). fake 로 재현.
+      const b = JSON.parse(body);
+      if (!b.prompt) throw new Error("exec-one 입력에 prompt 필수");
+      return { oxf: "o" };
+    },
+    editNode: async (id, e) => edits.push(e),
+    poke: async () => {},
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false, "미발견 → 안전 실패(backoff 대상)");
+  assert.equal(edits.length, 0, "노드 미변경(멱등)");
 });
