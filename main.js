@@ -62,8 +62,9 @@ export function pickReady(nodes) {
   });
 }
 
-/** buildLedger — 덩어리(chunkId) 자손 항목(kind=item)을 ledger 엔트리로(hunt/audit exec-stage args.ledger).
- *  부모 사슬로 자손 판정. category = 항목의 그룹(부모) title. hunt 가 중복 회피·audit 가 완결성 인증에 씀. */
+/** buildLedger — 덩어리(chunkId) 자손 항목(kind=item)을 ledger 엔트리로(hunt/classify/audit exec-stage args.ledger).
+ *  부모 사슬로 자손 판정. **평탄** — 원장 항목에 id 포함(classify 가 id 로 배정). category = 항목 자신의 category 필드
+ *  (부모 그룹 title 아님 — 평탄이라 그룹 없음; classify 전엔 없어서 빈 값). hunt 중복 회피·classify 배정·audit 완결성 인증에 씀. */
 export function buildLedger(nodes, chunkId) {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map((n) => [n.id, n]));
@@ -78,7 +79,7 @@ export function buildLedger(nodes, chunkId) {
   };
   return list
     .filter((n) => n.kind === "item" && descends(n))
-    .map((n) => ({ title: n.title, badge: n.badge, category: (byId.get(n.parentId) || {}).title }));
+    .map((n) => ({ id: n.id, title: n.title, badge: n.badge, category: n.category }));
 }
 
 /** exec-one {oxf, result} → node.edit 필드. oxf 유효(o/x/f)면 badge 갱신. result 는 항상 기록.
@@ -110,13 +111,11 @@ export async function reconcileTick(deps) {
   }
   // 항목 검증 — exec-one(verifyPrompt) → 배지.
   // 정규화 item: body={promptHash,refs,schemaHash} → kanban prompt.resolve 로 완성 prompt 조립(소비 시점).
-  // vars 는 body 에 복붙하지 않고 **노드 필드(title/description) + 부모 카테고리(group.title)** 에서 조립 —
-  // 항목마다 title/description/category 중복 저장 제거(정규화). directive 는 refs(콘텐츠 주소).
-  const parent = node.parentId ? nodes.find((n) => n.id === node.parentId) : undefined;
+  // vars 는 body 에 복붙하지 않고 **노드 필드(title/description)** 에서 조립 — 항목마다 중복 저장 제거(정규화).
+  // **평탄** — VERIFY_TMPL 에 {{category}} 없음(검증 시점엔 미분류; 분류는 classify 가 나중에). directive 는 refs(콘텐츠 주소).
   const fieldVars = {};
   if (node.title != null) fieldVars.title = node.title;
   if (node.description != null) fieldVars.description = node.description;
-  if (parent && parent.title != null) fieldVars.category = parent.title;
   const execBody = await resolveBody(body, deps, fieldVars);
   let execOut;
   try {
@@ -193,31 +192,26 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
   return params;
 }
 
-/** validateDraftDoc — DraftDoc(id 기반 정규형) 인증(Rust draft_doc::validate 미러, 규칙 1~5,7).
+/** validateDraftDoc — DraftDoc(id 기반 정규형) 인증(Rust draft_doc::validate 미러, 규칙 1,2,3,4,5,7).
+ *  **평탄** — category 개념 제거(그룹 없음, requirement.category_id 없음). 분류는 classify stage 가 나중에 node.edit.
  *  relay 입력 검증 — 위반 배열 반환(빈 배열=통과). 위반 문서는 발행 거부(fail-loud). 규칙 6(sha)은 kanban 담당.
- *  ① id 유일(categories∪requirements∪tasks) ② FK(requirement.categoryId∈categories · task.blockedBy∈requirements∪tasks)
+ *  ① id 유일(requirements∪tasks) ② FK(task.blockedBy∈requirements∪tasks)
  *  ③ 완결(title·description 비지 않음 · origin∈{user,agent,search}) ④ 정규화 불변(요건 고유 필드만; 구조로 보장)
- *  ⑤ 트리(hunt.blockedBy=전 요건 · audit.blockedBy=전 요건∪{hunt}) ⑦ categories≥1 ∧ requirements≥1. */
+ *  ⑤ 트리(hunt.blockedBy=전 요건 · classify.blockedBy=전 요건∪{hunt} · audit.blockedBy=전 요건∪{hunt,classify}) ⑦ requirements≥1. */
 export function validateDraftDoc(doc) {
   const v = [];
   if (!doc || typeof doc !== "object") return ["[문서] DraftDoc 객체 아님"];
-  const categories = Array.isArray(doc.categories) ? doc.categories : [];
   const requirements = Array.isArray(doc.requirements) ? doc.requirements : [];
   const tasks = Array.isArray(doc.tasks) ? doc.tasks : [];
   // ⑦ 비어있지 않음.
-  if (categories.length === 0) v.push("[⑦] categories 비어있음(≥1 필요)");
   if (requirements.length === 0) v.push("[⑦] requirements 비어있음(≥1 필요)");
   // ① id 유일.
   const seen = new Set();
-  for (const id of [...categories.map((c) => c.id), ...requirements.map((r) => r.id), ...tasks.map((t) => t.id)]) {
+  for (const id of [...requirements.map((r) => r.id), ...tasks.map((t) => t.id)]) {
     if (seen.has(id)) v.push(`[①] id 중복: ${JSON.stringify(id)}`);
     seen.add(id);
   }
-  // ② FK.
-  const catIds = new Set(categories.map((c) => c.id));
-  for (const r of requirements) {
-    if (!catIds.has(r.category_id)) v.push(`[②] requirement ${JSON.stringify(r.id)} category_id ${JSON.stringify(r.category_id)} 미존재(FK)`);
-  }
+  // ② FK — task.blockedBy ∈ requirements ∪ tasks. (category FK 규칙 제거 — 평탄.)
   const refTargets = new Set([...requirements.map((r) => r.id), ...tasks.map((t) => t.id)]);
   for (const t of tasks) {
     for (const b of t.blocked_by || []) {
@@ -231,30 +225,39 @@ export function validateDraftDoc(doc) {
     if (!r.description || !String(r.description).trim()) v.push(`[③] requirement ${JSON.stringify(r.id)} description 비어있음`);
     if (!ORIGINS.has(r.origin)) v.push(`[③] requirement ${JSON.stringify(r.id)} origin ${JSON.stringify(r.origin)} ∉ {user,agent,search}`);
   }
-  // ⑤ 트리 — hunt/audit 존재 시.
+  // ⑤ 트리 — hunt/classify/audit 존재 시.
   const reqIds = new Set(requirements.map((r) => r.id));
   const setEq = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
   const hunt = tasks.find((t) => t.stage === "hunt");
+  const classify = tasks.find((t) => t.stage === "classify");
   if (hunt) {
     if (!setEq(new Set(hunt.blocked_by || []), reqIds)) v.push("[⑤] hunt.blocked_by ≠ 전 요건 id 집합");
+  }
+  if (classify) {
+    if (!hunt) v.push("[⑤] classify 존재하나 hunt task 부재(분류는 hunt 후행)");
+    else {
+      const expected = new Set([...reqIds, hunt.id]);
+      if (!setEq(new Set(classify.blocked_by || []), expected)) v.push("[⑤] classify.blocked_by ≠ 전 요건 ∪ {hunt}");
+    }
   }
   const audit = tasks.find((t) => t.stage === "audit");
   if (audit) {
     if (!hunt) v.push("[⑤] audit 존재하나 hunt task 부재(감사는 hunt 후행)");
     else {
       const expected = new Set([...reqIds, hunt.id]);
-      if (!setEq(new Set(audit.blocked_by || []), expected)) v.push("[⑤] audit.blocked_by ≠ 전 요건 ∪ {hunt}");
+      if (classify) expected.add(classify.id);
+      if (!setEq(new Set(audit.blocked_by || []), expected)) v.push("[⑤] audit.blocked_by ≠ 전 요건 ∪ {hunt,classify}");
     }
   }
   return v;
 }
 
 /** applyDraftDoc — DraftDoc(정규형) 을 칸반에 반영(relay). exec-stage 스트림 대신 배치 문서 경로.
+ *  **평탄** — generate 는 그룹을 안 낸다. requirements → item 노드는 CHUNK_REF 직속(parent=chunkKanbanId). 분류는 classify stage 가 나중에 node.edit.
  *  1) verify_contract 3값(template/directive/schema)을 kanban prompt.put → hT/hD/hS(콘텐츠 주소, 단일 sha 원천=kanban).
- *  2) categories → node.add(kind:group, parent=chunk_ref). id→칸반 id keyOf.
- *  3) requirements → node.add(kind:item, parent=category 칸반 id, title/description/origin/badge,
- *     body={promptHash:hT, refs:{directive:hD}, schemaHash:hS}). 소비 시점(reconcileTick)에 vars=노드 필드+부모로 조립.
- *  4) tasks → node.add(kind:task, stage, blockedBy=id→칸반 id 해석, taskCtx 로 skeleton 임베드).
+ *  2) requirements → node.add(kind:item, parent=chunkKanbanId, title/description/origin/badge,
+ *     body={promptHash:hT, refs:{directive:hD}, schemaHash:hS}). 소비 시점(reconcileTick)에 vars=노드 필드로 조립.
+ *  3) tasks → node.add(kind:task, stage, blockedBy=id→칸반 id 해석, taskCtx 로 skeleton 임베드).
  *  chunk_title 있으면 chunk_ref 노드 title 갱신. deps: putPrompt·addNode·editNode. 반환 = 발행 노드 수. */
 export async function applyDraftDoc(deps, doc, chunkKanbanId, taskCtx) {
   const vc = doc.verify_contract || {};
@@ -270,22 +273,7 @@ export async function applyDraftDoc(deps, doc, chunkKanbanId, taskCtx) {
   const keyOf = new Map(); // DraftDoc id → 칸반 id (chunk_ref 는 이미 칸반 id).
   keyOf.set(doc.chunk_ref, chunkKanbanId);
   let published = 0;
-  // categories → group 노드.
-  for (const c of doc.categories || []) {
-    const params = {
-      title: c.name,
-      parentId: chunkKanbanId,
-      body: "",
-      blockedBy: [],
-      locked: true,
-      type: "task",
-      kind: "group",
-    };
-    const id = await deps.addNode(params);
-    if (id) keyOf.set(c.id, id);
-    published += 1;
-  }
-  // requirements → item 노드(정규화 body = 해시 3개뿐; vars 는 소비 시점 노드 필드+부모에서).
+  // requirements → item 노드(평탄: CHUNK_REF 직속). 정규화 body = 해시 3개뿐; vars 는 소비 시점 노드 필드에서.
   const initialBadge = vc.initial_badge || "검수전";
   for (const r of doc.requirements || []) {
     const base = { promptHash: hT };
@@ -293,7 +281,7 @@ export async function applyDraftDoc(deps, doc, chunkKanbanId, taskCtx) {
     if (hS) base.schemaHash = hS;
     const params = {
       title: r.title,
-      parentId: keyOf.get(r.category_id) || r.category_id,
+      parentId: chunkKanbanId, // 평탄: 항목은 덩어리 직속(그룹 없음)
       body: JSON.stringify(base),
       blockedBy: [],
       locked: true,
@@ -392,7 +380,9 @@ async function reconcileStage(deps, target, body, nodes) {
       return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
     }
   }
-  if ((stageName === "hunt" || stageName === "audit") && deps.materializeLedger && target.parentId) {
+  // hunt/classify/audit 는 ledger(덩어리 자손 항목+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
+  // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
+  if ((stageName === "hunt" || stageName === "classify" || stageName === "audit") && deps.materializeLedger && target.parentId) {
     try {
       const ledger = await deps.materializeLedger(target.parentId);
       const inp = JSON.parse(body);
@@ -447,17 +437,30 @@ async function reconcileStage(deps, target, body, nodes) {
     const nodeId = await deps.addNode(buildAddParams(ev, parentId, blockedBy, childCtx, roleToHash));
     if (nodeId) keyOf.set(ev.id, nodeId);
   }
-  // 덩어리 갱신: generate→title, audit→verdict(result). 덩어리 = stage 노드의 parent.
+  // 덩어리 갱신: generate→title, audit→verdict(result), classify→dimension. 덩어리 = stage 노드의 parent.
   const res = staged && staged.result;
+  // classify: result.assignments([{id,category}]) → 각 항목 node.edit(category). reparent 금지(워크플로 노드 이동 불가) —
+  // 기존 항목에 category 메타만 부여. dimension 은 덩어리(chunk) result 에 기록.
+  let assigned = 0;
+  if (stageName === "classify" && res && typeof res === "object" && Array.isArray(res.assignments)) {
+    for (const a of res.assignments) {
+      if (a && typeof a.id === "string" && typeof a.category === "string" && a.category) {
+        await deps.editNode(a.id, { category: a.category });
+        assigned += 1;
+      }
+    }
+  }
   if (res && typeof res === "object" && target.parentId) {
     const chunkEdit = {};
     if (typeof res.chunkTitle === "string" && res.chunkTitle) chunkEdit.title = res.chunkTitle;
     if (typeof res.verdict === "string" && res.verdict) chunkEdit.result = res.verdict;
+    // classify: dimension 을 덩어리 result 에 기록(분류 차원 = 원장 종합 산출).
+    if (stageName === "classify" && typeof res.dimension === "string" && res.dimension) chunkEdit.result = res.dimension;
     if (Object.keys(chunkEdit).length) await deps.editNode(target.parentId, chunkEdit);
   }
   await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
   await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
-  return { ok: true, processed: 1, id: target.id, stage: true, published: children.length };
+  return { ok: true, processed: 1, id: target.id, stage: true, published: children.length, assigned };
 }
 
 // ── app 연결(런타임) ──

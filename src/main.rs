@@ -318,7 +318,7 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
             }
             return Err(format!("generate DraftDoc 검증 실패({}건) — 발행 거부", violations.len()));
         }
-        // DraftDoc 1문서 — main.js relay 가 파싱(verify_contract prompt.put + categories/requirements/tasks node.add).
+        // DraftDoc 1문서 — main.js relay 가 파싱(verify_contract prompt.put + requirements/tasks node.add; 평탄 — 그룹 없음).
         println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
     } else {
         // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).

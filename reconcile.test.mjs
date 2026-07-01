@@ -145,19 +145,18 @@ test("buildAddParams — kind=task taskCtx 없으면 body 는 stage 만(skeleton
   assert.equal(body.skeleton, undefined, "taskCtx 없으면 skeleton 미임베드");
 });
 
-test("buildLedger — 덩어리 자손 항목(kind=item)만, category=그룹 title", () => {
+test("buildLedger — 덩어리 자손 항목(kind=item)만, id 포함 + category=항목 자신 필드(평탄, classify 전엔 빈 값)", () => {
   const nodes = [
     { id: "chunk", kind: "chunk", parentId: null },
-    { id: "g0", kind: "group", parentId: "chunk", title: "재고 관리" },
-    { id: "i1", kind: "item", parentId: "g0", title: "재고 차감", badge: "o" },
-    { id: "i2", kind: "item", parentId: "g0", title: "창고 연결", badge: "검수전" },
+    { id: "i1", kind: "item", parentId: "chunk", title: "재고 차감", badge: "o", category: "재고 관리" }, // classify 후(category 부여됨)
+    { id: "i2", kind: "item", parentId: "chunk", title: "창고 연결", badge: "검수전" }, // classify 전(category 없음)
     { id: "other", kind: "item", parentId: "other-chunk", title: "남의 항목", badge: "o" }, // 다른 덩어리 — 제외
     { id: "gen", kind: "task", parentId: "chunk" }, // task — 제외
   ];
   const ledger = buildLedger(nodes, "chunk");
   assert.equal(ledger.length, 2, "이 덩어리 항목만");
-  assert.deepEqual(ledger[0], { title: "재고 차감", badge: "o", category: "재고 관리" });
-  assert.equal(ledger[1].badge, "검수전");
+  assert.deepEqual(ledger[0], { id: "i1", title: "재고 차감", badge: "o", category: "재고 관리" }, "id 포함 + category=항목 자신 필드");
+  assert.deepEqual(ledger[1], { id: "i2", title: "창고 연결", badge: "검수전", category: undefined }, "classify 전엔 category 빈 값");
 });
 
 test("reconcileTick — hunt task 는 ledger materialize 해 exec-stage args 주입", async () => {
@@ -171,6 +170,55 @@ test("reconcileTick — hunt task 는 ledger materialize 해 exec-stage args 주
   const sent = JSON.parse(deps.calls.stage[0]);
   assert.deepEqual(sent.args.ledger, [{ title: "재고 차감", badge: "o" }], "exec-stage args.ledger 주입됨");
   assert.equal(sent.stage, "hunt");
+});
+
+test("reconcileTick — classify task 도 ledger materialize 해 exec-stage args 주입(완성 원장 분류)", async () => {
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify","args":{"directive":"약국"}}' }];
+  const deps = fakeDeps(nodes, null, { children: [], result: { dimension: "", assignments: [] } });
+  deps.materializeLedger = async (chunkId) => {
+    assert.equal(chunkId, "chunk", "덩어리 id 로 ledger 요청");
+    return [{ id: "i0", title: "재고 차감", badge: "o" }];
+  };
+  await reconcileTick(deps);
+  const sent = JSON.parse(deps.calls.stage[0]);
+  assert.deepEqual(sent.args.ledger, [{ id: "i0", title: "재고 차감", badge: "o" }], "exec-stage args.ledger 주입됨(id 포함)");
+  assert.equal(sent.stage, "classify");
+});
+
+test("reconcileTick — classify 결과 {dimension,assignments} → 각 항목 node.edit(category) + dimension→덩어리 result", async () => {
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' }];
+  const staged = { children: [], result: { dimension: "기능 영역", assignments: [{ id: "i0", category: "재고" }, { id: "i1", category: "발주" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "차감", badge: "o" }, { id: "i1", title: "발주", badge: "o" }];
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.stage, true);
+  assert.equal(r.assigned, 2, "assignment 2개 → node.edit(category) 2회");
+  const e0 = deps.calls.edit.find((e) => e.id === "i0");
+  assert.deepEqual(e0.fields, { category: "재고" }, "항목 i0 에 category 부여(reparent 아님 — 메타만)");
+  const e1 = deps.calls.edit.find((e) => e.id === "i1");
+  assert.deepEqual(e1.fields, { category: "발주" });
+  const chunkEdit = deps.calls.edit.find((e) => e.id === "chunk");
+  assert.equal(chunkEdit.fields.result, "기능 영역", "dimension → 덩어리 result");
+  const done = deps.calls.edit.find((e) => e.id === "classify");
+  assert.equal(done.fields.status, "done", "classify task done(멱등)");
+  assert.equal(deps.calls.poke, 1);
+  assert.equal(deps.calls.add.length, 0, "classify 는 노드 발행 0(기존 항목에 메타만)");
+});
+
+test("reconcileTick — classify 는 재실행 가드 없음(멱등키 부재; 항목 발행 0이라 중복 없음) — 정상 실행", async () => {
+  // classify 는 노드를 발행하지 않고 기존 항목에 category 메타만 부여 → 재실행해도 같은 category 재기록(무해).
+  // generate/hunt 처럼 발행-완료 마커가 필요 없다(중복 발행 위험 0). 항상 execStage 실행.
+  const nodes = [
+    { id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' },
+    { id: "i0", kind: "item", status: "todo", parentId: "chunk", badge: "o", category: "재고" }, // 이미 분류된 항목(재진입)
+  ];
+  const staged = { children: [], result: { dimension: "기능 영역", assignments: [{ id: "i0", category: "재고" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "차감", badge: "o", category: "재고" }];
+  const r = await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 1, "classify 는 항상 execStage 실행(발행 마커 가드 없음)");
+  assert.equal(r.assigned, 1, "재배정(같은 category 재기록 — 무해)");
 });
 
 test("execResultToEdit — oxf o/x/f 면 badge+result", () => {
@@ -506,14 +554,14 @@ test("reconcileTick — item schemaHash 를 getPrompt 로 deref+parse → exec-o
   assert.equal(execd[0].prompt, "완성 프롬프트");
 });
 
-test("reconcileTick — 정규화 item vars 를 노드 필드(title/description)+부모 카테고리에서 조립(body 복붙 0)", async () => {
+test("reconcileTick — 평탄 정규화 item vars 를 노드 필드(title/description)에서 조립(category 없음 — 부모 그룹 없음)", async () => {
   const resolved = [];
   const deps = {
     listNodes: async () => ({ nodes: [
-      { id: "g0", kind: "group", title: "재고·위치" },
-      { id: "i1", kind: "item", badge: "검수전", parentId: "g0" },
+      { id: "chunk", kind: "chunk", title: "덩어리" },
+      { id: "i1", kind: "item", badge: "검수전", parentId: "chunk" }, // 평탄: 덩어리 직속(그룹 없음)
     ] }),
-    getNode: async () => ({ node: { title: "슬롯≠재고", description: "슬롯은 위치", parentId: "g0", body: JSON.stringify({ promptHash: "H1", refs: { directive: "hD" } }) } }),
+    getNode: async () => ({ node: { title: "슬롯≠재고", description: "슬롯은 위치", parentId: "chunk", body: JSON.stringify({ promptHash: "H1", refs: { directive: "hD" } }) } }),
     resolvePrompt: async (hash, vars, refs) => { resolved.push([hash, vars, refs]); return { ok: true, prompt: "완성" }; },
     execOne: async () => ({ oxf: "o", result: "ok" }),
     editNode: async () => {},
@@ -523,8 +571,8 @@ test("reconcileTick — 정규화 item vars 를 노드 필드(title/description)
   assert.equal(r.ok, true);
   assert.deepEqual(
     resolved[0],
-    ["H1", { title: "슬롯≠재고", description: "슬롯은 위치", category: "재고·위치" }, { directive: "hD" }],
-    "vars(title/description←노드 필드, category←부모 group.title) 소비 시점 조립, refs 유지",
+    ["H1", { title: "슬롯≠재고", description: "슬롯은 위치" }, { directive: "hD" }],
+    "vars(title/description←노드 필드) 소비 시점 조립 — category 없음(검증 시점 미분류; VERIFY_TMPL 에 {{category}} 없음), refs 유지",
   );
 });
 
@@ -578,7 +626,7 @@ test("genSkeletonArgs — idea 없으면 throw(발행 오입력 차단)", () => 
 
 // ── DraftDoc(id 기반 정규형) relay: validateDraftDoc(JS 미러) + applyDraftDoc(prompt.put+node.add) ──
 
-/** 정상 DraftDoc — Rust draft_doc build 산출 미러(snake_case wire). validate 통과 형태. */
+/** 정상 DraftDoc — Rust draft_doc build 산출 미러(snake_case wire). **평탄**(category 없음, task 3개 hunt→classify→audit). validate 통과 형태. */
 function goodDraftDoc() {
   return {
     kind: "draft-chunk",
@@ -589,14 +637,14 @@ function goodDraftDoc() {
       schema: { type: "object", required: ["oxf", "origin"], properties: { oxf: { type: "string" } } },
       initial_badge: "검수전",
     },
-    categories: [{ id: "g0", name: "재고" }],
     requirements: [
-      { id: "g0i0", category_id: "g0", title: "재고 차감", description: "판매 시 차감", origin: "user", badge: "검수전" },
-      { id: "g0i1", category_id: "g0", title: "유통기한 경고", description: "만료 임박", origin: "agent", badge: "검수전" },
+      { id: "i0", title: "재고 차감", description: "판매 시 차감", origin: "user", badge: "검수전" },
+      { id: "i1", title: "유통기한 경고", description: "만료 임박", origin: "agent", badge: "검수전" },
     ],
     tasks: [
-      { id: "hunt", stage: "hunt", blocked_by: ["g0i0", "g0i1"] },
-      { id: "audit", stage: "audit", blocked_by: ["g0i0", "g0i1", "hunt"] },
+      { id: "hunt", stage: "hunt", blocked_by: ["i0", "i1"] },
+      { id: "classify", stage: "classify", blocked_by: ["i0", "i1", "hunt"] },
+      { id: "audit", stage: "audit", blocked_by: ["i0", "i1", "hunt", "classify"] },
     ],
   };
 }
@@ -607,16 +655,16 @@ test("validateDraftDoc — 정상 문서는 위반 0(통과)", () => {
 
 test("validateDraftDoc — ① id 중복 검출", () => {
   const d = goodDraftDoc();
-  d.requirements[1].id = "g0i0";
+  d.requirements[1].id = "i0"; // 중복
   const v = validateDraftDoc(d);
   assert.ok(v.some((x) => x.includes("[①]")), v.join(","));
 });
 
-test("validateDraftDoc — ② category FK 위반 검출", () => {
+test("validateDraftDoc — 평탄: category_id 없음(요건에 분류 슬롯 X — category FK 규칙 제거)", () => {
   const d = goodDraftDoc();
+  // 평탄 요건은 category_id 를 안 가진다(분류는 classify 가 나중에 node.edit). 임의 category_id 를 얹어도 검증 대상 아님(통과).
   d.requirements[0].category_id = "gX";
-  const v = validateDraftDoc(d);
-  assert.ok(v.some((x) => x.includes("[②]") && x.includes("category_id")), v.join(","));
+  assert.deepEqual(validateDraftDoc(d), [], "평탄엔 category FK 규칙 없음 — 임의 category_id 무시(통과)");
 });
 
 test("validateDraftDoc — ② blocked_by FK 위반 검출", () => {
@@ -637,18 +685,30 @@ test("validateDraftDoc — ③ 빈 title/description·잘못된 origin 검출", 
 
 test("validateDraftDoc — ⑤ hunt/audit 트리 위반 검출", () => {
   const d = goodDraftDoc();
-  d.tasks[0].blocked_by = ["g0i0"]; // hunt 이 전 요건 아님
+  d.tasks[0].blocked_by = ["i0"]; // hunt 이 전 요건 아님
   const v = validateDraftDoc(d);
   assert.ok(v.some((x) => x.includes("[⑤]") && x.includes("hunt")), v.join(","));
 });
 
-test("validateDraftDoc — ⑦ 빈 categories/requirements 검출", () => {
+test("validateDraftDoc — ⑤ classify 트리 위반 검출(hunt 후행)", () => {
   const d = goodDraftDoc();
-  d.categories = [];
+  d.tasks.find((t) => t.stage === "classify").blocked_by = ["i0", "i1"]; // hunt 빠짐
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑤]") && x.includes("classify")), v.join(","));
+});
+
+test("validateDraftDoc — ⑤ audit 트리 위반 검출(hunt∪classify 후행)", () => {
+  const d = goodDraftDoc();
+  d.tasks.find((t) => t.stage === "audit").blocked_by = ["i0", "i1", "hunt"]; // classify 빠짐
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑤]") && x.includes("audit")), v.join(","));
+});
+
+test("validateDraftDoc — ⑦ 빈 requirements 검출(평탄: categories 규칙 없음)", () => {
+  const d = goodDraftDoc();
   d.requirements = [];
   d.tasks = [];
   const v = validateDraftDoc(d);
-  assert.ok(v.some((x) => x.includes("[⑦]") && x.includes("categories")), v.join(","));
   assert.ok(v.some((x) => x.includes("[⑦]") && x.includes("requirements")), v.join(","));
 });
 
@@ -683,9 +743,10 @@ test("applyDraftDoc — verify_contract 3값 prompt.put → 요건 body={promptH
   const published = await applyDraftDoc(deps, doc, "k-chunk", undefined);
   // put 3회(template/directive/schema).
   assert.equal(deps.calls.put.length, 3, "verify_contract 3값 put");
-  // 발행: group1 + item2 + task2 = 5.
+  // 발행(평탄): 그룹 0 + item2 + task3(hunt/classify/audit) = 5.
   assert.equal(published, 5);
   assert.equal(deps.calls.add.length, 5);
+  assert.equal(deps.calls.add.filter((p) => p.kind === "group").length, 0, "평탄: 그룹 발행 0");
   const item = deps.calls.add.find((p) => p.kind === "item");
   const body = JSON.parse(item.body);
   assert.ok(body.promptHash, "item body 에 promptHash(=template hash)");
@@ -695,28 +756,29 @@ test("applyDraftDoc — verify_contract 3값 prompt.put → 요건 body={promptH
   assert.equal(body.schema, undefined, "인라인 schema 없음(정규화)");
 });
 
-test("applyDraftDoc — 요건 노드 필드(title/description/origin/badge)+부모=category 칸반 id", async () => {
+test("applyDraftDoc — 요건 노드 필드(title/description/origin/badge)+평탄 부모=덩어리 칸반 id(그룹 없음)", async () => {
   const deps = draftDeps();
   await applyDraftDoc(deps, goodDraftDoc(), "k-chunk", undefined);
-  const group = deps.calls.add.find((p) => p.kind === "group");
-  assert.equal(group.parentId, "k-chunk", "group parent = 덩어리 칸반 id");
-  assert.equal(group.title, "재고");
+  assert.equal(deps.calls.add.filter((p) => p.kind === "group").length, 0, "평탄: 그룹 노드 없음");
   const item0 = deps.calls.add.filter((p) => p.kind === "item")[0];
   assert.equal(item0.title, "재고 차감");
   assert.equal(item0.description, "판매 시 차감");
   assert.equal(item0.origin, "user");
   assert.equal(item0.badge, "검수전");
-  assert.equal(item0.parentId, "k-1", "item parent = group 의 칸반 id(배치 keyOf)");
+  assert.equal(item0.category, undefined, "평탄: generate 항목엔 category 없음(classify 가 나중에 부여)");
+  assert.equal(item0.parentId, "k-chunk", "item parent = 덩어리 칸반 id 직속(그룹 없음)");
 });
 
-test("applyDraftDoc — hunt/audit blockedBy 를 DraftDoc id→칸반 id 해석(트리 순서)", async () => {
+test("applyDraftDoc — hunt/classify/audit blockedBy 를 DraftDoc id→칸반 id 해석(트리 순서)", async () => {
   const deps = draftDeps();
   await applyDraftDoc(deps, goodDraftDoc(), "k-chunk", undefined);
-  // group=k-1, item g0i0=k-2, g0i1=k-3, hunt=k-4, audit=k-5.
+  // 평탄: item i0=k-1, i1=k-2, hunt=k-3, classify=k-4, audit=k-5.
   const hunt = deps.calls.add.find((p) => p.kind === "task" && p.title === "hunt");
-  assert.deepEqual(hunt.blockedBy, ["k-2", "k-3"], "hunt blockedBy = 항목 칸반 id");
+  assert.deepEqual(hunt.blockedBy, ["k-1", "k-2"], "hunt blockedBy = 항목 칸반 id");
+  const classify = deps.calls.add.find((p) => p.kind === "task" && p.title === "classify");
+  assert.deepEqual(classify.blockedBy, ["k-1", "k-2", "k-3"], "classify blockedBy = 항목 + hunt 칸반 id");
   const audit = deps.calls.add.find((p) => p.kind === "task" && p.title === "audit");
-  assert.deepEqual(audit.blockedBy, ["k-2", "k-3", "k-4"], "audit blockedBy = 항목 + hunt 칸반 id");
+  assert.deepEqual(audit.blockedBy, ["k-1", "k-2", "k-3", "k-4"], "audit blockedBy = 항목 + hunt + classify 칸반 id");
 });
 
 test("applyDraftDoc — taskCtx 있으면 hunt/audit body 에 skeleton 임베드(exec-stage 입력)", async () => {
@@ -754,7 +816,7 @@ test("reconcileTick — generate DraftDoc: validate 통과 → applyDraftDoc 발
   const r = await reconcileTick(deps);
   assert.equal(r.ok, true);
   assert.equal(r.stage, true);
-  assert.equal(r.published, 5, "group1+item2+task2 발행");
+  assert.equal(r.published, 5, "평탄: item2+task3(hunt/classify/audit) 발행");
   assert.equal(deps.calls.add.length, 5, "DraftDoc 순회 node.add");
   const doneEdit = deps.calls.edit.find((e) => e.id === "gen");
   assert.equal(doneEdit.fields.status, "done", "generate task done(멱등)");
@@ -766,7 +828,7 @@ test("reconcileTick — generate DraftDoc: validate 통과 → applyDraftDoc 발
 test("reconcileTick — generate DraftDoc 검증 실패면 발행 거부(ok:false·노드 미변경·backoff)", async () => {
   const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: '{"stage":"generate"}' }];
   const deps = fakeDeps(nodes, null, null);
-  deps.execStage = async () => ({ draftDoc: { ...goodDraftDoc(), categories: [] } }); // ⑦·② 위반
+  deps.execStage = async () => ({ draftDoc: { ...goodDraftDoc(), requirements: [] } }); // ⑦(requirements≥1)·⑤(hunt.blockedBy≠전 요건) 위반
   deps.putPrompt = async () => ({ ok: true, hash: "h1" });
   const r = await reconcileTick(deps);
   assert.equal(r.ok, false, "위반 문서 발행 거부");

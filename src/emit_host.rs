@@ -769,7 +769,7 @@ mod tests {
         // 은 Undefined 라 구 `if (args && args.split)` 분기는 영영 falsy → string 지시어 폐기 → SAMPLE 폴백 버그.
         // 수정(typeof args === 'string') 후엔 emit 된 덩어리(chunk) description = 넘긴 문자열.
         // fixtures/gen.pharmacy.skeleton.json = generate-skeleton(glm-5.2, 약국 SaaS) 실측 산출(gen.js→parse). 실행 워크플로=gen.js.
-        // (재생성: make -C authoring e2e && make -C authoring commit-fixture. draft.js 는 backup 비교물, 여기 미참여.)
+        // (재생성: make -C e2e e2e && make -C e2e commit-fixture. draft.js 는 backup 비교물, 여기 미참여.)
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
         let mut wh = EmitHost::new();
@@ -815,13 +815,19 @@ mod tests {
     }
 
     /// [Phase5 e2e — AST→Rust 런타임] gen.pharmacy.skeleton.json program(generate stage) 을 ClaudeEmitHost(stub runner)
-    /// 로 돌려 genPrompt→가짜 트리(1그룹 2항목) 가 그룹/항목(badge=검수전, body=verifyPrompt) + Hunt/Audit task(blockedBy) emit 하는지.
-    /// claude·앱·소켓 없이 Rust Interp 만으로 전체 발행 흐름·순서 검증.
+    /// 로 돌려 genPrompt→평탄 requirements(2항목, CHUNK_REF 직속, category 없음) + Hunt→Classify→Audit task(blockedBy 사슬) emit.
+    ///
+    /// **#[ignore] — regen 대기(호출자가 gen.js 를 평탄 계약으로 재생성 예정).**
+    /// fixtures/gen.pharmacy.skeleton.json 의 program 은 *구버전(그룹)* AST 다 — GEN_SCHEMA.groups, classify stage 부재.
+    /// 아래는 **평탄 재작성 후 목표 계약**(flat item + classify task)이다. 구 program 은 groups 를 요구하고
+    /// classify task 를 안 내므로 그대로 돌리면 이 검증이 깨진다. fixture 는 지우지 않고 #[ignore] 로 남긴다 —
+    /// gen.js 평탄 regen 후 이 테스트를 활성화한다(그때 stub 은 requirements[] 를 반환하고 program 은 flat item + classify 발행).
     #[test]
-    fn draft_generate_stage_emits_groups_items_hunt_audit() {
+    #[ignore = "fixtures/gen.pharmacy.skeleton.json 은 구버전(그룹) program — gen.js 평탄 regen 후 활성화"]
+    fn draft_generate_stage_emits_flat_items_hunt_classify_audit() {
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
-        let item = |t: &str, d: &str, o: &str| {
+        let req = |t: &str, d: &str, o: &str| {
             val_obj(vec![
                 ("title", Val::Str(t.into())),
                 ("description", Val::Str(d.into())),
@@ -830,14 +836,11 @@ mod tests {
         };
         let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
             if p.contains("GENERATOR") {
-                let grp = val_obj(vec![
-                    ("category", Val::Str("재고".into())),
-                    ("items", val_arr_vals(vec![item("항목1", "설명1", "user"), item("항목2", "설명2", "agent")])),
-                ]);
+                // 평탄 계약: groups 없이 requirements[] 만 발굴.
                 Ok(val_obj(vec![
                     ("title", Val::Str("테스트 덩어리".into())),
                     ("titleOrigin", Val::Str("agent".into())),
-                    ("groups", val_arr_vals(vec![grp])),
+                    ("requirements", val_arr_vals(vec![req("항목1", "설명1", "user"), req("항목2", "설명2", "agent")])),
                 ]))
             } else {
                 Ok(Val::Str(String::new()))
@@ -847,38 +850,43 @@ mod tests {
         Interp::new(&mut h).run(program, args).expect("generate interp 해석");
 
         let ev = &h.wh.events;
+        // 평탄: 그룹 0, 항목 2(CHUNK_REF 직속).
         let groups = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "group")).count();
         let items = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, .. } if kind == "item")).count();
-        assert_eq!(groups, 1, "generate → 그룹 1개 emit");
-        assert_eq!(items, 2, "generate → 항목 2개 emit");
-
-        // 항목 badge=검수전 + body=verifyPrompt(exec-one 입력)
-        let pend = ev.iter().filter(|e| matches!(e, NodeEvent::Add { kind, badge, .. } if kind == "item" && badge.as_deref() == Some("검수전"))).count();
-        assert_eq!(pend, 2, "항목 badge=검수전");
-        let i0 = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id == "g0i0"));
-        // 정규화(콘텐츠 주소화): 항목은 완성 프롬프트를 body 에 안 박고 promptRole='verify' + vars 로 참조 —
-        // 소비 시점(main.js relay)에 sha256 템플릿+vars 로 조립. 따라서 emit 의 prompt 는 빈 문자열이 정상.
-        // 3수준 정규화: prompt '' + vars(작은 per-item 값) + var_refs(directive 콘텐츠 주소 참조, 항목마다 복붙 X).
+        assert_eq!(groups, 0, "generate → 그룹 emit 0(평탄)");
+        assert_eq!(items, 2, "generate → 평탄 항목 2개 emit");
+        // 항목은 CHUNK_REF 직속 + badge=검수전 + category 없음.
+        let i0 = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "item" && id == "i0"));
+        assert!(
+            matches!(i0, Some(NodeEvent::Add { parent, badge, category, .. })
+                if parent.as_deref() == Some("chunk") && badge.as_deref() == Some("검수전") && category.is_none()),
+            "평탄 항목: parent=CHUNK_REF 직속, badge=검수전, category 없음"
+        );
+        // 정규화(콘텐츠 주소화): prompt '' + promptRole=verify + vars(작은값) + var_refs(directive 콘텐츠 주소).
         assert!(
             matches!(i0, Some(NodeEvent::Add { prompt, prompt_role, vars, var_refs, .. })
                 if prompt.is_empty() && prompt_role.as_deref() == Some("verify") && vars.is_some() && var_refs.is_some()),
             "항목 정규화: prompt '' + promptRole=verify + vars(작은값) + var_refs(directive 콘텐츠 주소 참조)"
         );
-        // vars 에 directive 텍스트가 박히면 안 됨(청크당 1행으로 dedup — var_refs 로만 참조).
         if let Some(NodeEvent::Add { vars: Some(v), .. }) = i0 {
             assert!(v.get("directive").is_none(), "directive 는 vars 에 없어야(복붙 방지) — var_refs 로 참조");
         }
 
-        // Hunt task blockedBy=[g0i0,g0i1] / Audit task blockedBy=[g0i0,g0i1,hunt] (①a 순서)
+        // task 사슬: Hunt[i0,i1] → Classify[i0,i1,hunt] → Audit[i0,i1,hunt,classify].
         let hunt = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "hunt"));
         assert!(
-            matches!(hunt, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["g0i0".to_string(), "g0i1".to_string()]),
-            "hunt blockedBy=[g0i0,g0i1] (항목 검증 후 실행)"
+            matches!(hunt, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["i0".to_string(), "i1".to_string()]),
+            "hunt blockedBy=[i0,i1] (항목 검증 후 실행)"
+        );
+        let classify = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "classify"));
+        assert!(
+            matches!(classify, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["i0".to_string(), "i1".to_string(), "hunt".to_string()]),
+            "classify blockedBy=[i0,i1,hunt] (hunt 후 = 완성 집합)"
         );
         let audit = ev.iter().find(|e| matches!(e, NodeEvent::Add { kind, id, .. } if kind == "task" && id == "audit"));
         assert!(
-            matches!(audit, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["g0i0".to_string(), "g0i1".to_string(), "hunt".to_string()]),
-            "audit blockedBy=[g0i0,g0i1,hunt] (항목+Hunt 후 실행)"
+            matches!(audit, Some(NodeEvent::Add { blocked_by, .. }) if blocked_by == &vec!["i0".to_string(), "i1".to_string(), "hunt".to_string(), "classify".to_string()]),
+            "audit blockedBy=[i0,i1,hunt,classify] (분류 후 실행)"
         );
     }
 
@@ -898,19 +906,24 @@ mod tests {
         assert!(gen.is_some(), "Generate task(kind:task) emit");
     }
 
-    /// [Phase5 e2e] hunt stage — huntPrompt(ledger)→additions → 추가항목(badge=검수전) emit (CHUNK_REF 직속).
+    /// [Phase5 e2e] hunt stage — huntPrompt(ledger)→additions → 추가항목(badge=검수전, 평탄 CHUNK_REF 직속, category 없음) emit.
+    ///
+    /// **#[ignore] — regen 대기.** 구 program 은 HUNT_SCHEMA 에 category required 라 평탄 additions(category 없음)를
+    /// 스키마 통과 못 시킬 수 있고 ledgerView 도 id 없는 구형이다. 평탄 재작성 후 목표 계약(category 없는 additions)을
+    /// 인코딩해 둔다 — gen.js regen(HUNT_SCHEMA 에서 category 제거) 후 활성화. fixture 는 지우지 않는다.
     #[test]
-    fn draft_hunt_stage_emits_additions() {
+    #[ignore = "fixtures/gen.pharmacy.skeleton.json 은 구버전(그룹) program — gen.js 평탄 regen 후 활성화"]
+    fn draft_hunt_stage_emits_flat_additions() {
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
         let mut h = ClaudeEmitHost::new(|p: &str, _o: &BTreeMap<String, Val>| {
             if p.contains("AUDITOR") {
                 Ok(Val::Str(String::new()))
             } else if p.contains("GOAL-REACH") {
+                // 평탄 계약: additions 에 category 없음(분류는 classify 몫).
                 let add = val_obj(vec![
                     ("title", Val::Str("추가항목".into())),
                     ("description", Val::Str("누락 make-or-break".into())),
-                    ("category", Val::Str("재고".into())),
                     ("origin", Val::Str("agent".into())),
                 ]);
                 Ok(val_obj(vec![("additions", val_arr_vals(vec![add]))]))
@@ -918,7 +931,7 @@ mod tests {
                 Ok(Val::Str(String::new()))
             }
         });
-        let args = json!({ "stage": "hunt", "ledger": [{ "title": "기존", "badge": "o", "category": "재고" }] });
+        let args = json!({ "stage": "hunt", "ledger": [{ "id": "i0", "title": "기존", "badge": "o" }] });
         Interp::new(&mut h).run(program, args).expect("hunt interp");
         let ev = &h.wh.events;
         let adds: Vec<&NodeEvent> = ev
@@ -927,8 +940,9 @@ mod tests {
             .collect();
         assert_eq!(adds.len(), 1, "hunt → 추가항목 1개 emit");
         assert!(
-            matches!(adds[0], NodeEvent::Add { kind, badge, parent, .. } if kind == "item" && badge.as_deref() == Some("검수전") && parent.as_deref() == Some("chunk")),
-            "추가항목 badge=검수전, parent=CHUNK_REF(덩어리 직속)"
+            matches!(adds[0], NodeEvent::Add { kind, badge, parent, category, .. }
+                if kind == "item" && badge.as_deref() == Some("검수전") && parent.as_deref() == Some("chunk") && category.is_none()),
+            "추가항목 badge=검수전, parent=CHUNK_REF(덩어리 직속), category 없음(평탄)"
         );
     }
 
