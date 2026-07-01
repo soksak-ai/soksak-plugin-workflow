@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -574,4 +574,202 @@ test("genSkeletonArgs — model/refs/gen-out 추가 + lang 오버라이드", () 
 
 test("genSkeletonArgs — idea 없으면 throw(발행 오입력 차단)", () => {
   assert.throws(() => genSkeletonArgs({ model: "x" }), /idea 필수/);
+});
+
+// ── DraftDoc(id 기반 정규형) relay: validateDraftDoc(JS 미러) + applyDraftDoc(prompt.put+node.add) ──
+
+/** 정상 DraftDoc — Rust draft_doc build 산출 미러(snake_case wire). validate 통과 형태. */
+function goodDraftDoc() {
+  return {
+    kind: "draft-chunk",
+    chunk_ref: "chunk",
+    verify_contract: {
+      template: "VERIFY_TMPL {{title}} {{directive}}",
+      directive: "약국 SaaS 지시어",
+      schema: { type: "object", required: ["oxf", "origin"], properties: { oxf: { type: "string" } } },
+      initial_badge: "검수전",
+    },
+    categories: [{ id: "g0", name: "재고" }],
+    requirements: [
+      { id: "g0i0", category_id: "g0", title: "재고 차감", description: "판매 시 차감", origin: "user", badge: "검수전" },
+      { id: "g0i1", category_id: "g0", title: "유통기한 경고", description: "만료 임박", origin: "agent", badge: "검수전" },
+    ],
+    tasks: [
+      { id: "hunt", stage: "hunt", blocked_by: ["g0i0", "g0i1"] },
+      { id: "audit", stage: "audit", blocked_by: ["g0i0", "g0i1", "hunt"] },
+    ],
+  };
+}
+
+test("validateDraftDoc — 정상 문서는 위반 0(통과)", () => {
+  assert.deepEqual(validateDraftDoc(goodDraftDoc()), []);
+});
+
+test("validateDraftDoc — ① id 중복 검출", () => {
+  const d = goodDraftDoc();
+  d.requirements[1].id = "g0i0";
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[①]")), v.join(","));
+});
+
+test("validateDraftDoc — ② category FK 위반 검출", () => {
+  const d = goodDraftDoc();
+  d.requirements[0].category_id = "gX";
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[②]") && x.includes("category_id")), v.join(","));
+});
+
+test("validateDraftDoc — ② blocked_by FK 위반 검출", () => {
+  const d = goodDraftDoc();
+  d.tasks[0].blocked_by = ["nope"];
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[②]") && x.includes("blocked_by")), v.join(","));
+});
+
+test("validateDraftDoc — ③ 빈 title/description·잘못된 origin 검출", () => {
+  const d = goodDraftDoc();
+  d.requirements[0].title = "";
+  d.requirements[1].origin = "made-up";
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[③]") && x.includes("title")), v.join(","));
+  assert.ok(v.some((x) => x.includes("[③]") && x.includes("origin")), v.join(","));
+});
+
+test("validateDraftDoc — ⑤ hunt/audit 트리 위반 검출", () => {
+  const d = goodDraftDoc();
+  d.tasks[0].blocked_by = ["g0i0"]; // hunt 이 전 요건 아님
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑤]") && x.includes("hunt")), v.join(","));
+});
+
+test("validateDraftDoc — ⑦ 빈 categories/requirements 검출", () => {
+  const d = goodDraftDoc();
+  d.categories = [];
+  d.requirements = [];
+  d.tasks = [];
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑦]") && x.includes("categories")), v.join(","));
+  assert.ok(v.some((x) => x.includes("[⑦]") && x.includes("requirements")), v.join(","));
+});
+
+/** applyDraftDoc 테스트용 deps — putPrompt(값→고정 hash 매핑), addNode(순번 칸반 id), editNode 기록. */
+function draftDeps() {
+  const calls = { put: [], add: [], edit: [] };
+  const hashOf = new Map();
+  let hn = 0;
+  return {
+    calls,
+    putPrompt: async (value) => {
+      const key = typeof value === "string" ? value : JSON.stringify(value);
+      if (!hashOf.has(key)) hashOf.set(key, "h" + ++hn);
+      calls.put.push(value);
+      return { ok: true, hash: hashOf.get(key) };
+    },
+    addNode: async (params) => {
+      calls.add.push(params);
+      return "k-" + calls.add.length;
+    },
+    editNode: async (id, fields) => {
+      calls.edit.push({ id, fields });
+      return { ok: true };
+    },
+    poke: async () => {},
+  };
+}
+
+test("applyDraftDoc — verify_contract 3값 prompt.put → 요건 body={promptHash,refs.directive,schemaHash}", async () => {
+  const deps = draftDeps();
+  const doc = goodDraftDoc();
+  const published = await applyDraftDoc(deps, doc, "k-chunk", undefined);
+  // put 3회(template/directive/schema).
+  assert.equal(deps.calls.put.length, 3, "verify_contract 3값 put");
+  // 발행: group1 + item2 + task2 = 5.
+  assert.equal(published, 5);
+  assert.equal(deps.calls.add.length, 5);
+  const item = deps.calls.add.find((p) => p.kind === "item");
+  const body = JSON.parse(item.body);
+  assert.ok(body.promptHash, "item body 에 promptHash(=template hash)");
+  assert.ok(body.refs && body.refs.directive, "item body refs.directive(콘텐츠 주소)");
+  assert.ok(body.schemaHash, "item body schemaHash(콘텐츠 주소)");
+  assert.equal(body.vars, undefined, "vars 는 소비 시점 노드 필드로 조립 — body 에 안 박음");
+  assert.equal(body.schema, undefined, "인라인 schema 없음(정규화)");
+});
+
+test("applyDraftDoc — 요건 노드 필드(title/description/origin/badge)+부모=category 칸반 id", async () => {
+  const deps = draftDeps();
+  await applyDraftDoc(deps, goodDraftDoc(), "k-chunk", undefined);
+  const group = deps.calls.add.find((p) => p.kind === "group");
+  assert.equal(group.parentId, "k-chunk", "group parent = 덩어리 칸반 id");
+  assert.equal(group.title, "재고");
+  const item0 = deps.calls.add.filter((p) => p.kind === "item")[0];
+  assert.equal(item0.title, "재고 차감");
+  assert.equal(item0.description, "판매 시 차감");
+  assert.equal(item0.origin, "user");
+  assert.equal(item0.badge, "검수전");
+  assert.equal(item0.parentId, "k-1", "item parent = group 의 칸반 id(배치 keyOf)");
+});
+
+test("applyDraftDoc — hunt/audit blockedBy 를 DraftDoc id→칸반 id 해석(트리 순서)", async () => {
+  const deps = draftDeps();
+  await applyDraftDoc(deps, goodDraftDoc(), "k-chunk", undefined);
+  // group=k-1, item g0i0=k-2, g0i1=k-3, hunt=k-4, audit=k-5.
+  const hunt = deps.calls.add.find((p) => p.kind === "task" && p.title === "hunt");
+  assert.deepEqual(hunt.blockedBy, ["k-2", "k-3"], "hunt blockedBy = 항목 칸반 id");
+  const audit = deps.calls.add.find((p) => p.kind === "task" && p.title === "audit");
+  assert.deepEqual(audit.blockedBy, ["k-2", "k-3", "k-4"], "audit blockedBy = 항목 + hunt 칸반 id");
+});
+
+test("applyDraftDoc — taskCtx 있으면 hunt/audit body 에 skeleton 임베드(exec-stage 입력)", async () => {
+  const deps = draftDeps();
+  const ctx = { skeleton: { program: { type: "Program" } }, directive: "약국 SaaS" };
+  await applyDraftDoc(deps, goodDraftDoc(), "k-chunk", ctx);
+  const hunt = deps.calls.add.find((p) => p.kind === "task" && p.title === "hunt");
+  const body = JSON.parse(hunt.body);
+  assert.ok(body.skeleton, "task body 에 skeleton 임베드");
+  assert.equal(body.stage, "hunt");
+  assert.equal(body.args.chunkRef, "k-chunk");
+  assert.equal(body.args.directive, "약국 SaaS");
+});
+
+test("applyDraftDoc — chunk_title 있으면 덩어리 title 갱신", async () => {
+  const deps = draftDeps();
+  const doc = goodDraftDoc();
+  doc.chunk_title = "약국 재고 SaaS";
+  await applyDraftDoc(deps, doc, "k-chunk", undefined);
+  const chunkEdit = deps.calls.edit.find((e) => e.id === "k-chunk");
+  assert.equal(chunkEdit.fields.title, "약국 재고 SaaS");
+});
+
+test("reconcileTick — generate DraftDoc: validate 통과 → applyDraftDoc 발행 + status=done + poke", async () => {
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: '{"stage":"generate"}' }];
+  const deps = fakeDeps(nodes, null, null);
+  // execStage 가 DraftDoc(단일 문서) 반환.
+  deps.execStage = async (body) => {
+    deps.calls.stage.push(body);
+    return { draftDoc: { ...goodDraftDoc(), chunk_ref: "chunk-7", chunk_title: "약국 SaaS" } };
+  };
+  // applyDraftDoc 용 putPrompt.
+  let hn = 0;
+  deps.putPrompt = async () => ({ ok: true, hash: "h" + ++hn });
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, true);
+  assert.equal(r.stage, true);
+  assert.equal(r.published, 5, "group1+item2+task2 발행");
+  assert.equal(deps.calls.add.length, 5, "DraftDoc 순회 node.add");
+  const doneEdit = deps.calls.edit.find((e) => e.id === "gen");
+  assert.equal(doneEdit.fields.status, "done", "generate task done(멱등)");
+  const chunkEdit = deps.calls.edit.find((e) => e.id === "chunk-7");
+  assert.equal(chunkEdit.fields.title, "약국 SaaS", "덩어리 title=chunk_title");
+  assert.equal(deps.calls.poke, 1);
+});
+
+test("reconcileTick — generate DraftDoc 검증 실패면 발행 거부(ok:false·노드 미변경·backoff)", async () => {
+  const nodes = [{ id: "gen", kind: "task", status: "todo", blockedBy: [], parentId: "chunk-7", body: '{"stage":"generate"}' }];
+  const deps = fakeDeps(nodes, null, null);
+  deps.execStage = async () => ({ draftDoc: { ...goodDraftDoc(), categories: [] } }); // ⑦·② 위반
+  deps.putPrompt = async () => ({ ok: true, hash: "h1" });
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false, "위반 문서 발행 거부");
+  assert.equal(deps.calls.add.length, 0, "발행 0(거부)");
+  assert.equal(deps.calls.edit.length, 0, "노드 미변경(status todo 유지 → backoff)");
 });

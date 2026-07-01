@@ -193,6 +193,140 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
   return params;
 }
 
+/** validateDraftDoc — DraftDoc(id 기반 정규형) 인증(Rust draft_doc::validate 미러, 규칙 1~5,7).
+ *  relay 입력 검증 — 위반 배열 반환(빈 배열=통과). 위반 문서는 발행 거부(fail-loud). 규칙 6(sha)은 kanban 담당.
+ *  ① id 유일(categories∪requirements∪tasks) ② FK(requirement.categoryId∈categories · task.blockedBy∈requirements∪tasks)
+ *  ③ 완결(title·description 비지 않음 · origin∈{user,agent,search}) ④ 정규화 불변(요건 고유 필드만; 구조로 보장)
+ *  ⑤ 트리(hunt.blockedBy=전 요건 · audit.blockedBy=전 요건∪{hunt}) ⑦ categories≥1 ∧ requirements≥1. */
+export function validateDraftDoc(doc) {
+  const v = [];
+  if (!doc || typeof doc !== "object") return ["[문서] DraftDoc 객체 아님"];
+  const categories = Array.isArray(doc.categories) ? doc.categories : [];
+  const requirements = Array.isArray(doc.requirements) ? doc.requirements : [];
+  const tasks = Array.isArray(doc.tasks) ? doc.tasks : [];
+  // ⑦ 비어있지 않음.
+  if (categories.length === 0) v.push("[⑦] categories 비어있음(≥1 필요)");
+  if (requirements.length === 0) v.push("[⑦] requirements 비어있음(≥1 필요)");
+  // ① id 유일.
+  const seen = new Set();
+  for (const id of [...categories.map((c) => c.id), ...requirements.map((r) => r.id), ...tasks.map((t) => t.id)]) {
+    if (seen.has(id)) v.push(`[①] id 중복: ${JSON.stringify(id)}`);
+    seen.add(id);
+  }
+  // ② FK.
+  const catIds = new Set(categories.map((c) => c.id));
+  for (const r of requirements) {
+    if (!catIds.has(r.category_id)) v.push(`[②] requirement ${JSON.stringify(r.id)} category_id ${JSON.stringify(r.category_id)} 미존재(FK)`);
+  }
+  const refTargets = new Set([...requirements.map((r) => r.id), ...tasks.map((t) => t.id)]);
+  for (const t of tasks) {
+    for (const b of t.blocked_by || []) {
+      if (!refTargets.has(b)) v.push(`[②] task ${JSON.stringify(t.id)} blocked_by ${JSON.stringify(b)} 미존재(FK)`);
+    }
+  }
+  // ③ 완결.
+  const ORIGINS = new Set(["user", "agent", "search"]);
+  for (const r of requirements) {
+    if (!r.title || !String(r.title).trim()) v.push(`[③] requirement ${JSON.stringify(r.id)} title 비어있음`);
+    if (!r.description || !String(r.description).trim()) v.push(`[③] requirement ${JSON.stringify(r.id)} description 비어있음`);
+    if (!ORIGINS.has(r.origin)) v.push(`[③] requirement ${JSON.stringify(r.id)} origin ${JSON.stringify(r.origin)} ∉ {user,agent,search}`);
+  }
+  // ⑤ 트리 — hunt/audit 존재 시.
+  const reqIds = new Set(requirements.map((r) => r.id));
+  const setEq = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+  const hunt = tasks.find((t) => t.stage === "hunt");
+  if (hunt) {
+    if (!setEq(new Set(hunt.blocked_by || []), reqIds)) v.push("[⑤] hunt.blocked_by ≠ 전 요건 id 집합");
+  }
+  const audit = tasks.find((t) => t.stage === "audit");
+  if (audit) {
+    if (!hunt) v.push("[⑤] audit 존재하나 hunt task 부재(감사는 hunt 후행)");
+    else {
+      const expected = new Set([...reqIds, hunt.id]);
+      if (!setEq(new Set(audit.blocked_by || []), expected)) v.push("[⑤] audit.blocked_by ≠ 전 요건 ∪ {hunt}");
+    }
+  }
+  return v;
+}
+
+/** applyDraftDoc — DraftDoc(정규형) 을 칸반에 반영(relay). exec-stage 스트림 대신 배치 문서 경로.
+ *  1) verify_contract 3값(template/directive/schema)을 kanban prompt.put → hT/hD/hS(콘텐츠 주소, 단일 sha 원천=kanban).
+ *  2) categories → node.add(kind:group, parent=chunk_ref). id→칸반 id keyOf.
+ *  3) requirements → node.add(kind:item, parent=category 칸반 id, title/description/origin/badge,
+ *     body={promptHash:hT, refs:{directive:hD}, schemaHash:hS}). 소비 시점(reconcileTick)에 vars=노드 필드+부모로 조립.
+ *  4) tasks → node.add(kind:task, stage, blockedBy=id→칸반 id 해석, taskCtx 로 skeleton 임베드).
+ *  chunk_title 있으면 chunk_ref 노드 title 갱신. deps: putPrompt·addNode·editNode. 반환 = 발행 노드 수. */
+export async function applyDraftDoc(deps, doc, chunkKanbanId, taskCtx) {
+  const vc = doc.verify_contract || {};
+  const putPrompt = deps.putPrompt;
+  const put = async (value) => {
+    if (value === undefined || value === null || value === "") return undefined;
+    const r = await putPrompt(value);
+    return r && r.hash;
+  };
+  const hT = await put(vc.template);
+  const hD = await put(vc.directive);
+  const hS = await put(vc.schema);
+  const keyOf = new Map(); // DraftDoc id → 칸반 id (chunk_ref 는 이미 칸반 id).
+  keyOf.set(doc.chunk_ref, chunkKanbanId);
+  let published = 0;
+  // categories → group 노드.
+  for (const c of doc.categories || []) {
+    const params = {
+      title: c.name,
+      parentId: chunkKanbanId,
+      body: "",
+      blockedBy: [],
+      locked: true,
+      type: "task",
+      kind: "group",
+    };
+    const id = await deps.addNode(params);
+    if (id) keyOf.set(c.id, id);
+    published += 1;
+  }
+  // requirements → item 노드(정규화 body = 해시 3개뿐; vars 는 소비 시점 노드 필드+부모에서).
+  const initialBadge = vc.initial_badge || "검수전";
+  for (const r of doc.requirements || []) {
+    const base = { promptHash: hT };
+    if (hD) base.refs = { directive: hD };
+    if (hS) base.schemaHash = hS;
+    const params = {
+      title: r.title,
+      parentId: keyOf.get(r.category_id) || r.category_id,
+      body: JSON.stringify(base),
+      blockedBy: [],
+      locked: true,
+      type: "task",
+      kind: "item",
+      badge: r.badge || initialBadge,
+    };
+    if (r.description) params.description = r.description;
+    if (r.origin) params.origin = r.origin;
+    const id = await deps.addNode(params);
+    if (id) keyOf.set(r.id, id);
+    published += 1;
+  }
+  // tasks → task 노드(hunt/audit). blockedBy=DraftDoc id→칸반 id 해석. body=exec-stage 입력(skeleton 임베드).
+  for (const t of doc.tasks || []) {
+    const blockedBy = (t.blocked_by || []).map((id) => keyOf.get(id) || id).filter(Boolean);
+    const body = JSON.stringify(
+      taskCtx && taskCtx.skeleton
+        ? { skeleton: taskCtx.skeleton, stage: t.stage, args: { directive: taskCtx.directive, chunkRef: chunkKanbanId } }
+        : { stage: t.stage }
+    );
+    const params = { title: t.stage, parentId: chunkKanbanId, body, blockedBy, locked: true, type: "task", kind: "task" };
+    const id = await deps.addNode(params);
+    if (id) keyOf.set(t.id, id);
+    published += 1;
+  }
+  // chunk_title → 덩어리 title 갱신.
+  if (typeof doc.chunk_title === "string" && doc.chunk_title && deps.editNode) {
+    await deps.editNode(chunkKanbanId, { title: doc.chunk_title });
+  }
+  return published;
+}
+
 /** registerPromptTemplates — registerPrompts({role:text}) 를 kanban prompt.put 으로 등록(sha256 dedup).
  *  role→hash 맵 반환(buildAddParams 가 item promptRole→promptHash 치환에 씀). putPrompt(text)→{hash}. */
 export async function registerPromptTemplates(registerPrompts, putPrompt) {
@@ -281,6 +415,24 @@ async function reconcileStage(deps, target, body, nodes) {
     if (inp && inp.skeleton) childCtx = { skeleton: inp.skeleton, directive: inp.args && inp.args.directive };
   } catch {
     /* body 가 exec-stage 입력이 아니면 전파 없음(자식에 task 없을 때) */
+  }
+  // generate stage = DraftDoc(id 기반 정규형 1문서). validate(relay 입력 검증, 실패=거부) → applyDraftDoc 배치 발행.
+  // 스트림 경로(children)와 감지 분기(하위호환): draftDoc 있으면 그 경로, 없으면 기존 줄단위 relay.
+  if (staged && staged.draftDoc) {
+    const violations = validateDraftDoc(staged.draftDoc);
+    if (violations.length) {
+      // 위반 문서 발행 거부 — 노드 미변경(status todo 유지) → 코어 backoff 재시도(안전 실패).
+      return { ok: false, processed: 0, id: target.id, error: `DraftDoc 검증 실패(${violations.length}건): ${violations[0]}` };
+    }
+    let published;
+    try {
+      published = await applyDraftDoc(deps, staged.draftDoc, target.parentId, childCtx);
+    } catch (e) {
+      return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+    }
+    await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
+    await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
+    return { ok: true, processed: 1, id: target.id, stage: true, published };
   }
   const children = (staged && staged.children) || [];
   const keyOf = new Map();
@@ -386,6 +538,16 @@ function execStage(app, exe, env, body) {
         });
         app.process.onExit(handle, (code) => {
           if (code !== 0) return reject(new Error(`exec-stage exit ${code}`));
+          // generate stage = DraftDoc(단일 JSON 문서, kind:"draft-chunk"). 그 외 = 줄단위 스트림({ev:add}+{ev:result}).
+          const whole = out.trim();
+          if (whole.startsWith("{")) {
+            try {
+              const one = JSON.parse(whole);
+              if (one && one.kind === "draft-chunk") return resolve({ draftDoc: one });
+            } catch {
+              /* 단일 JSON 아님 → 스트림 파싱으로 폴백 */
+            }
+          }
           const children = [];
           let result = null;
           for (const line of out.split("\n")) {

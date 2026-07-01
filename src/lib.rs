@@ -4,6 +4,7 @@
 
 pub mod derive_directive;
 pub mod directive_loop;
+pub mod draft_doc;
 pub mod domain_lib;
 pub mod exec;
 pub mod exec_one;

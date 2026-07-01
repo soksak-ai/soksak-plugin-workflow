@@ -286,15 +286,45 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     // claude 러너 = ClaudeHost(비-publish agent 만 탄다). publish agent 는 ClaudeEmitHost.wh 가 발행.
     let mut ch = ClaudeHost { env, allow_tools, default_model: model, lang };
     let run = move |p: &str, o: &BTreeMap<String, Val>| ch.agent(p, o);
-    let mut h = ClaudeEmitHost::new(run).with_emit(Box::new(|ev: &NodeEvent| {
-        if let Ok(s) = serde_json::to_string(ev) {
-            println!("{s}");
-        }
-    }));
+    // generate stage 는 산출을 **id 기반 정규형 DraftDoc 1문서**로 배치 출력(스트림 대신) — build+validate 로 인증.
+    // hunt/audit·비-draft·기타 stage 는 **기존 줄단위 스트림 유지**(자식 {ev:add} + {ev:result}) — 하위호환.
+    let is_generate = stage == "generate";
+    let mut h = if is_generate {
+        // 스트림 콜백 미설치 — 이벤트를 wh.events 버퍼에만 수집(끝에 DraftDoc 로 접어 배치 출력).
+        ClaudeEmitHost::new(run)
+    } else {
+        ClaudeEmitHost::new(run).with_emit(Box::new(|ev: &NodeEvent| {
+            if let Ok(s) = serde_json::to_string(ev) {
+                println!("{s}");
+            }
+        }))
+    };
     let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("exec-stage interpret: {e}"))?;
-    // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).
-    let out = json!({ "ev": "result", "value": val_to_json(&result) });
-    println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    if is_generate {
+        // 수집 이벤트 → DraftDoc(정규형) → validate(위반 시 stderr+exit). 통과 시 DraftDoc JSON 1문서 stdout.
+        let mut doc = soksak_plugin::draft_doc::build(&h.wh.events)?;
+        // 워크플로 return {chunkTitle} → 덩어리 title 갱신(relay 가 chunk_ref 노드에 적용). 스트림 result 대체.
+        if let Value::Object(m) = val_to_json(&result) {
+            if let Some(Value::String(t)) = m.get("chunkTitle") {
+                if !t.is_empty() {
+                    doc.chunk_title = Some(t.clone());
+                }
+            }
+        }
+        if let Err(violations) = soksak_plugin::draft_doc::validate(&doc) {
+            eprintln!("[soksak] generate DraftDoc 검증 실패(발행 거부):");
+            for x in &violations {
+                eprintln!("  - {x}");
+            }
+            return Err(format!("generate DraftDoc 검증 실패({}건) — 발행 거부", violations.len()));
+        }
+        // DraftDoc 1문서 — main.js relay 가 파싱(verify_contract prompt.put + categories/requirements/tasks node.add).
+        println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
+    } else {
+        // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).
+        let out = json!({ "ev": "result", "value": val_to_json(&result) });
+        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    }
     Ok(())
 }
 
