@@ -512,14 +512,9 @@ mod tests {
     /// [통합] 실측 fixture program(generate stage)을 ClaudeEmitHost(stub runner)로 돌린 이벤트 →
     /// build → validate 가 정규형 인증까지 통과하는지. LLM·앱 없이 Rust Interp 만으로.
     ///
-    /// **#[ignore] — regen 대기(호출자가 gen.js 를 평탄 계약으로 재생성 예정).**
-    /// fixtures/gen.pharmacy.skeleton.json 의 program 은 *구버전(그룹)* AST 다 — GEN_SCHEMA.groups,
-    /// HUNT_SCHEMA.category, classify stage 부재, ledgerView 에 id 없음, **register_prompts 를 첫 group 에 얹음**.
-    /// 평탄 build 는 register_prompts 를 *첫 item* 에서만 읽으므로(그룹 이벤트는 무시) 구 program 에선
-    /// verify_contract.template/directive 가 빈 문자열이 되어 이 검증이 깨진다. fixture 를 지우지 않고
-    /// #[ignore] 로 남긴다 — gen.js 평탄 regen(첫 item 에 registerPrompts) 후 이 테스트를 활성화·재작성한다.
+    /// fixtures/gen.pharmacy.skeleton.json 의 program 은 **평탄 계약**(classify-late, glm-5.2 실측): generate 는
+    /// tree.requirements(평탄)를 CHUNK_REF 직속 item 으로 발행 + hunt/classify/audit 3 task, register_prompts 는 첫 item 에.
     #[test]
-    #[ignore = "fixtures/gen.pharmacy.skeleton.json 은 구버전(그룹) program — gen.js 평탄 regen 후 활성화"]
     fn build_and_validate_from_fixture_generate_events() {
         use crate::emit_host::ClaudeEmitHost;
         use crate::interp::{Interp, Val};
@@ -547,14 +542,11 @@ mod tests {
         };
         let mut h = ClaudeEmitHost::new(move |p: &str, _o: &BTreeMap<String, Val>| {
             if p.contains("GENERATOR") {
-                let grp = val_obj(vec![
-                    ("category", Val::Str("재고".into())),
-                    ("items", val_arr(vec![item("항목1", "설명1", "user"), item("항목2", "설명2", "agent")])),
-                ]);
+                // 평탄: groups 아님 — requirements[] 직접 반환(신 GEN_SCHEMA).
                 Ok(val_obj(vec![
                     ("title", Val::Str("테스트 덩어리".into())),
                     ("titleOrigin", Val::Str("agent".into())),
-                    ("groups", val_arr(vec![grp])),
+                    ("requirements", val_arr(vec![item("항목1", "설명1", "user"), item("항목2", "설명2", "agent")])),
                 ]))
             } else {
                 Ok(Val::Str(String::new()))
@@ -564,14 +556,14 @@ mod tests {
         Interp::new(&mut h).run(program, args).expect("generate interp 해석");
 
         let doc = build(&h.wh.events).expect("build");
-        // 구 program: item 2개(그룹 밑), hunt+audit 2 task. 평탄 build 가 group 무시하고 item 접음.
-        assert_eq!(doc.requirements.len(), 2, "항목 2개(그룹 이벤트는 평탄 build 가 무시)");
-        assert_eq!(doc.tasks.len(), 2, "구 program: hunt+audit (regen 후 classify 추가 → 3)");
-        // verify_contract: 구 program 은 register_prompts.schema 없음 → item inline schema 폴백이 채움.
-        assert!(doc.verify_contract.schema.is_object(), "schema 폴백(item inline)으로 채워짐");
-        assert!(!doc.verify_contract.template.is_empty(), "verify 템플릿 등록됨");
-        assert!(!doc.verify_contract.directive.is_empty(), "directive 등록됨");
-        // validate 통과 — 평탄 인증(구 program 이 낸 hunt/audit blockedBy=전 요건 집합이라 트리 규칙 통과).
-        assert_eq!(validate(&doc), Ok(()), "구 program generate 산출도 평탄 검증 통과");
+        // 평탄 program: item 2개(CHUNK_REF 직속, category 없음), hunt+classify+audit 3 task.
+        assert_eq!(doc.requirements.len(), 2, "평탄 요건 2개(그룹 없이 CHUNK_REF 직속)");
+        assert_eq!(doc.tasks.len(), 3, "hunt+classify+audit");
+        // verify_contract: register_prompts 를 첫 item 에 얹음 → template/directive 채워짐. schema 는 register 또는 item inline 폴백.
+        assert!(doc.verify_contract.schema.is_object(), "schema 채워짐(register 또는 item inline)");
+        assert!(!doc.verify_contract.template.is_empty(), "verify 템플릿 등록됨(첫 item)");
+        assert!(!doc.verify_contract.directive.is_empty(), "directive 등록됨(첫 item)");
+        // validate 통과 — 평탄 인증(hunt=전 요건, classify=전 요건∪{hunt}, audit=전 요건∪{hunt,classify} 트리).
+        assert_eq!(validate(&doc), Ok(()), "평탄 generate 산출 검증 통과");
     }
 }

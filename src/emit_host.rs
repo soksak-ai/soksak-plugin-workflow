@@ -816,14 +816,9 @@ mod tests {
 
     /// [Phase5 e2e — AST→Rust 런타임] gen.pharmacy.skeleton.json program(generate stage) 을 ClaudeEmitHost(stub runner)
     /// 로 돌려 genPrompt→평탄 requirements(2항목, CHUNK_REF 직속, category 없음) + Hunt→Classify→Audit task(blockedBy 사슬) emit.
-    ///
-    /// **#[ignore] — regen 대기(호출자가 gen.js 를 평탄 계약으로 재생성 예정).**
-    /// fixtures/gen.pharmacy.skeleton.json 의 program 은 *구버전(그룹)* AST 다 — GEN_SCHEMA.groups, classify stage 부재.
-    /// 아래는 **평탄 재작성 후 목표 계약**(flat item + classify task)이다. 구 program 은 groups 를 요구하고
-    /// classify task 를 안 내므로 그대로 돌리면 이 검증이 깨진다. fixture 는 지우지 않고 #[ignore] 로 남긴다 —
-    /// gen.js 평탄 regen 후 이 테스트를 활성화한다(그때 stub 은 requirements[] 를 반환하고 program 은 flat item + classify 발행).
+    /// fixtures/gen.pharmacy.skeleton.json 은 glm-5.2 실측 **평탄 program**(classify-late): stub 이 requirements[] 를
+    /// 반환하면 program 이 flat item(CHUNK_REF 직속, category 없음) + hunt/classify/audit task(blockedBy 사슬)를 발행한다.
     #[test]
-    #[ignore = "fixtures/gen.pharmacy.skeleton.json 은 구버전(그룹) program — gen.js 평탄 regen 후 활성화"]
     fn draft_generate_stage_emits_flat_items_hunt_classify_audit() {
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program(완전 AST)");
@@ -907,12 +902,8 @@ mod tests {
     }
 
     /// [Phase5 e2e] hunt stage — huntPrompt(ledger)→additions → 추가항목(badge=검수전, 평탄 CHUNK_REF 직속, category 없음) emit.
-    ///
-    /// **#[ignore] — regen 대기.** 구 program 은 HUNT_SCHEMA 에 category required 라 평탄 additions(category 없음)를
-    /// 스키마 통과 못 시킬 수 있고 ledgerView 도 id 없는 구형이다. 평탄 재작성 후 목표 계약(category 없는 additions)을
-    /// 인코딩해 둔다 — gen.js regen(HUNT_SCHEMA 에서 category 제거) 후 활성화. fixture 는 지우지 않는다.
+    /// glm-5.2 실측 평탄 program: HUNT_SCHEMA 에 category 없음 → additions 는 category 없는 평탄 요건(CHUNK_REF 직속).
     #[test]
-    #[ignore = "fixtures/gen.pharmacy.skeleton.json 은 구버전(그룹) program — gen.js 평탄 regen 후 활성화"]
     fn draft_hunt_stage_emits_flat_additions() {
         let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
         let program = skeleton.get("program").expect("program");
