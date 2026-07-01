@@ -495,7 +495,7 @@ test("reconcileTick — item schemaHash 를 getPrompt 로 deref+parse → exec-o
     listNodes: async () => ({ nodes: [{ id: "i1", kind: "item", badge: "검수전" }] }),
     getNode: async () => ({ node: { body: JSON.stringify({ promptHash: "H1", vars: {}, schemaHash: "hS" }) } }),
     resolvePrompt: async () => ({ ok: true, prompt: "완성 프롬프트" }),
-    getPrompt: async (hash) => ({ ok: true, text: hash === "hS" ? JSON.stringify({ type: "object", required: ["oxf"] }) : null }),
+    getPrompt: async (hash) => (hash === "hS" ? { ok: true, value: { type: "object", required: ["oxf"] } } : { ok: true, value: null }),
     execOne: async (body) => { execd.push(JSON.parse(body)); return { oxf: "o", result: "ok" }; },
     editNode: async () => {},
     poke: async () => {},

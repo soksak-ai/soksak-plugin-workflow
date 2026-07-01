@@ -192,9 +192,8 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
 export async function registerPromptTemplates(registerPrompts, putPrompt) {
   const roleToHash = new Map();
   for (const [role, text] of Object.entries(registerPrompts || {})) {
-    // 문자열(템플릿)은 그대로, 객체(schema 등)는 JSON 직렬화(clone VM 은 JSON.stringify 회피 — 여기서 처리).
-    const payload = typeof text === "string" ? text : JSON.stringify(text);
-    const r = await putPrompt(payload); // kanban prompt.put → {ok,hash}
+    // 값 그대로 전달 — 문자열(템플릿/directive)·객체(schema) 모두 kanban 이 sha256·네이티브 저장.
+    const r = await putPrompt(text); // kanban prompt.put(value) → {ok,hash}
     if (r && r.hash) roleToHash.set(role, r.hash);
   }
   return roleToHash;
@@ -212,13 +211,13 @@ async function resolveBody(body, deps) {
   if (!p || !p.promptHash) return body; // 하위호환: 기존 {prompt,schema} 그대로
   const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, p.vars || {}, p.refs || {}) : null;
   if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
-  // schema: schemaHash(콘텐츠 주소) deref → 파싱. 없으면 인라인 p.schema(하위호환).
+  // schema: schemaHash(콘텐츠 주소) deref → 네이티브 객체(stringify/parse 왕복 없음). 없으면 인라인 p.schema(하위호환).
   let schema = p.schema;
   if (p.schemaHash) {
     const sr = deps.getPrompt ? await deps.getPrompt(p.schemaHash) : null;
-    const text = sr && (sr.text != null ? sr.text : sr);
-    if (typeof text !== "string") return body; // schema 미발견 → 안전 실패(backoff)
-    try { schema = JSON.parse(text); } catch { return body; }
+    const value = sr && sr.value !== undefined ? sr.value : sr;
+    if (value == null || typeof value !== "object") return body; // schema 미발견/비객체 → 안전 실패(backoff)
+    schema = value;
   }
   return JSON.stringify(schema ? { prompt: res.prompt, schema } : { prompt: res.prompt });
 }
@@ -447,7 +446,7 @@ export default {
               if (ev.ev === "add") {
                 // 정규화: chunk/stage 의 registerPrompts({role:text}) → kanban prompt.put(sha256 dedup) → roleToHash.
                 if (ev.register_prompts || ev.registerPrompts) {
-                  const putPrompt = (text) => app.commands.execute(KANBAN + ".prompt.put", { text });
+                  const putPrompt = (value) => app.commands.execute(KANBAN + ".prompt.put", { value });
                   const reg = await registerPromptTemplates(ev.register_prompts || ev.registerPrompts, putPrompt);
                   for (const [role, hash] of reg) roleToHash.set(role, hash);
                 }
@@ -527,7 +526,7 @@ export default {
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
-            putPrompt: (text) => app.commands.execute(KANBAN + ".prompt.put", { text }),
+            putPrompt: (value) => app.commands.execute(KANBAN + ".prompt.put", { value }),
             resolvePrompt: (hash, vars, refs) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars, refs }),
             getPrompt: (hash) => app.commands.execute(KANBAN + ".prompt.get", { hash }),
           };
