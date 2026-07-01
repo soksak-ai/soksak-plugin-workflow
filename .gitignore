@@ -9,5 +9,5 @@ adv/
 adv_novel/
 review/
 
-# e2e 산출 스크래치(재생성: make -C authoring e2e). 커밋 기준은 fixtures/gen.<slug>.*
-authoring/out/
+# e2e 산출 스크래치(재생성: make -C e2e e2e). 커밋 기준은 fixtures/gen.<slug>.*
+e2e/out/
