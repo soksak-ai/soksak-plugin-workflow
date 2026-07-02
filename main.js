@@ -1,10 +1,11 @@
 // soksak-plugin-workflow — 워크플로 런타임(rust soksak-workflow)을 spawn 해 칸반에 노드 DAG 를 발행하고,
-// 코어 스케줄러(reconcile)로 ready 노드를 exec-one 실행한다. 발행(--emit)과 실행(exec-one)은 분리(규칙 C).
+// 코어 스케줄러(reconcile)로 ready 노드를 실행한다. 발행(--emit)과 실행(exec-one/exec-stage)은 분리(규칙 C).
 //
 // 발행: soksak-workflow --emit → stdout JSON line(노드 이벤트) → 칸반 node.add(locked, 드래프트 마커).
-// 실행: app.scheduler.register({trigger: reconcile}) → 'workflow.reconcile' 가 칸반 ready 노드 1개를
-//       exec-one(prompt/schema) 으로 검증 → node.edit(badge=oxf, result) → poke 로 다음 깨움.
-//       트리거(폴링 0): ①발행 완료 poke ②완료 poke(handler 가 진척 시 self-poke) ③register 시 부팅 1회 스캔.
+// 실행: app.scheduler.register({trigger: reconcile}) → 'workflow.reconcile' 가 칸반 ready 노드 1개를 처리 —
+//       item → exec-one(prompt/schema) 검증 → node.edit(badge=oxf, result) / task → exec-stage(stage 실행·자식 발행).
+//       트리거(폴링 0): ①발행 완료 poke ②완료 poke(handler 가 진척 시 self-poke) ③activate 가 register 직후
+//       poke 1회(부팅 스캔 — Reconcile 등록만으론 발화하지 않는다) ④kanban:changed(외부 변화).
 //       concurrency·lease·backoff(529)는 코어가 처리 — handler 는 ready 1개만 처리하고 poke.
 
 const KANBAN = "plugin.soksak-plugin-kanban";
@@ -92,22 +93,55 @@ export function execResultToEdit(execOut) {
   return valid ? { badge: oxf, result } : { result };
 }
 
+/** makeReconcileState — reconcile 인메모리 상태(activate 가 1개 들고 매 틱 주입).
+ *  재시작 시 리셋되는 건 허용 — 카운터 상한이 다시 적용될 뿐이고, 영속하려면 노드 result 를 매 후보마다
+ *  재조회해야(칸반 node.list compact 가 result 미노출) 비용이 과하다.
+ *  noVerdict: 항목별 무판정 연속 횟수(상한 도달 시 badge=f 확정 — 무한 LLM 재실행 루프 차단).
+ *  fails: 노드별 연속 실패 횟수(ready 선택에서 실패 최소 노드 우선 — head-of-line 기아 방지). */
+export function makeReconcileState() {
+  return { noVerdict: new Map(), fails: new Map() };
+}
+
+/** 무판정(oxf 없음) 연속 상한 — 도달 시 badge=f 확정(fail-loud).
+ *  무판정 항목의 result 기록이 kanban:changed 를 발화 → poke → 같은 항목 재선택 → exec-one(LLM) 재실행이
+ *  무한 반복될 수 있다(backoff 대상 아님 — exec 자체는 성공). 상한으로 유한화하고 원인(스키마 부재/모델 이탈)을
+ *  result 로 표면화한다. f 는 항목 done(①) → 체인이 풀리고, 감사(audit)가 f 를 완결성 판정에 반영한다. */
+const NO_VERDICT_MAX = 3;
+
 /** reconcile 한 틱 — ready 1개를 처리(타임아웃 안전, 프로세스-생존). 진척 시 poke 로 다음 깨움.
  *  분기(모델 B): kind=task(Generate/Hunt/Audit) → exec-stage(claude+자식 노드 발행) / 그 외(항목) → exec-one(검증→배지).
  *  deps(의존 주입 — 테스트 가능): listNodes() · getNode(id) · editNode(id,fields) · execOne(body) · execStage(body) ·
- *  addNode(ev) · poke(). 반환 ok — 코어 재시도 판정(ok!=true → backoff). exec 실패는 throw 말고 ok:false(노드 미변경=멱등). */
-export async function reconcileTick(deps) {
+ *  addNode(ev) · poke(). state=makeReconcileState()(생략 시 틱-로컬 — 상한/기아 방지는 지속 상태를 넘겨야 동작).
+ *  반환 ok — 코어 재시도 판정(ok!=true → backoff). exec 실패는 throw 말고 ok:false(노드 미변경=멱등). */
+export async function reconcileTick(deps, state) {
+  const st = state || makeReconcileState();
   const listed = await deps.listNodes();
   const nodes = (listed && listed.nodes) || [];
   const ready = pickReady(nodes);
   if (ready.length === 0) return { ok: true, processed: 0 };
-  const target = ready[0]; // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
+  // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
+  // 기아 방지: 연속 실패가 가장 적은 ready 선택 — 영구 실패 노드 1개가 ready[0] 을 점유해 나머지를 무기한
+  // 막는 head-of-line blocking 차단(실패 노드 자체는 코어 backoff + 무판정 상한이 수렴시킴).
+  let target = ready[0];
+  if (st.fails.size) {
+    let best = Infinity;
+    for (const n of ready) {
+      const f = st.fails.get(n.id) || 0;
+      if (f < best) {
+        best = f;
+        target = n;
+      }
+    }
+  }
   const full = await deps.getNode(target.id);
   const node = (full && full.node) || {};
   const body = node.body || "";
-  // kind=task → exec-stage 로 stage 실행 후 자식 노드 동적 발행(generate→그룹/항목, hunt→추가항목).
+  // kind=task → exec-stage 로 stage 실행 후 자식 노드 동적 발행(generate→항목, hunt→추가항목).
   if (target.kind === "task") {
-    return reconcileStage(deps, target, body, nodes);
+    const res = await reconcileStage(deps, target, body, nodes);
+    if (res && res.ok) st.fails.delete(target.id);
+    else st.fails.set(target.id, (st.fails.get(target.id) || 0) + 1);
+    return res;
   }
   // 항목 검증 — exec-one(verifyPrompt) → 배지.
   // 정규화 item: body={promptHash,refs,schemaHash} → kanban prompt.resolve 로 완성 prompt 조립(소비 시점).
@@ -122,9 +156,24 @@ export async function reconcileTick(deps) {
     execOut = await deps.execOne(execBody);
   } catch (e) {
     // 529 과부하·timeout 등 일시 실패 → ok:false. 노드 미변경(badge=검수전 유지) → 코어 backoff 재시도가 자연 복구.
+    st.fails.set(target.id, (st.fails.get(target.id) || 0) + 1);
     return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
   }
+  st.fails.delete(target.id);
   const edit = execResultToEdit(execOut);
+  // 무판정 상한(NO_VERDICT_MAX) — 연속 무판정이면 f 확정. 미만이면 result 만 기록(badge 미변경).
+  if (!edit.badge) {
+    const n = (st.noVerdict.get(target.id) || 0) + 1;
+    if (n >= NO_VERDICT_MAX) {
+      edit.badge = "f";
+      edit.result = `무판정 ${n}회 소진(출력에 oxf 없음 — 스키마 부재/모델 이탈) → 자동 f. 마지막 출력: ${edit.result || ""}`;
+      st.noVerdict.delete(target.id);
+    } else {
+      st.noVerdict.set(target.id, n);
+    }
+  } else {
+    st.noVerdict.delete(target.id);
+  }
   await deps.editNode(target.id, edit);
   // 진척(배지 확정)했을 때만 다음 틱 깨움 — 무판정으로 self-poke 하면 tight loop. 외부/부팅이 재시도.
   if (edit.badge) await deps.poke();
@@ -192,12 +241,14 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
   return params;
 }
 
-/** validateDraftDoc — DraftDoc(id 기반 정규형) 인증(Rust draft_doc::validate 미러, 규칙 1,2,3,4,5,7).
+/** validateDraftDoc — DraftDoc(id 기반 정규형) 인증(Rust draft_doc::validate 미러, 규칙 1,2,3,4,5,7 + ⑧⑨).
  *  **평탄** — category 개념 제거(그룹 없음, requirement.category_id 없음). 분류는 classify stage 가 나중에 node.edit.
  *  relay 입력 검증 — 위반 배열 반환(빈 배열=통과). 위반 문서는 발행 거부(fail-loud). 규칙 6(sha)은 kanban 담당.
  *  ① id 유일(requirements∪tasks) ② FK(task.blockedBy∈requirements∪tasks)
  *  ③ 완결(title·description 비지 않음 · origin∈{user,agent,search}) ④ 정규화 불변(요건 고유 필드만; 구조로 보장)
- *  ⑤ 트리(hunt.blockedBy=전 요건 · classify.blockedBy=전 요건∪{hunt} · audit.blockedBy=전 요건∪{hunt,classify}) ⑦ requirements≥1. */
+ *  ⑤ 트리(hunt.blockedBy=전 요건 · classify.blockedBy=전 요건∪{hunt} · audit.blockedBy=전 요건∪{hunt,classify}) ⑦ requirements≥1
+ *  ⑧ 배지 enum(빈 값=initial_badge 폴백 허용 — 비enum 은 칸반 드랍→영구 not-done 무음 정지라 발행 전 거부)
+ *  ⑨ verify_contract 완결(template·directive·schema — 빈 계약은 exec-one 'prompt 필수' 무한 backoff 로 전락). */
 export function validateDraftDoc(doc) {
   const v = [];
   if (!doc || typeof doc !== "object") return ["[문서] DraftDoc 객체 아님"];
@@ -249,6 +300,22 @@ export function validateDraftDoc(doc) {
       if (!setEq(new Set(audit.blocked_by || []), expected)) v.push("[⑤] audit.blocked_by ≠ 전 요건 ∪ {hunt,classify}");
     }
   }
+  // ⑧ 배지 enum — 비enum(예: "pending")은 칸반 node.add 가 undefined 로 드랍 → 검수전 필터에도 done 판정에도
+  // 안 걸리는 영구 not-done 무음 정지. origin 은 ③이 검사하는데 badge 만 공백이던 비대칭 해소.
+  const BADGES = new Set(["검수전", "o", "x", "f"]);
+  for (const r of requirements) {
+    if (r.badge != null && r.badge !== "" && !BADGES.has(r.badge)) {
+      v.push(`[⑧] requirement ${JSON.stringify(r.id)} badge ${JSON.stringify(r.badge)} ∉ {검수전,o,x,f}`);
+    }
+  }
+  const vc = doc.verify_contract || {};
+  if (vc.initial_badge != null && !BADGES.has(vc.initial_badge)) {
+    v.push(`[⑧] verify_contract.initial_badge ${JSON.stringify(vc.initial_badge)} ∉ {검수전,o,x,f}`);
+  }
+  // ⑨ verify_contract 완결 — 빈 계약이면 item body 가 해시 없이 발행돼 exec-one 'prompt 필수' 무한 backoff(지연 실패).
+  if (!vc.template || !String(vc.template).trim()) v.push("[⑨] verify_contract.template 비어있음(registerPrompts.verify 누락)");
+  if (!vc.directive || !String(vc.directive).trim()) v.push("[⑨] verify_contract.directive 비어있음(registerPrompts.directive 누락)");
+  if (vc.schema == null || typeof vc.schema !== "object") v.push("[⑨] verify_contract.schema 객체 아님(registerPrompts.schema 부재)");
   return v;
 }
 
@@ -363,16 +430,20 @@ async function reconcileStage(deps, target, body, nodes) {
   // ② 멱등 가드 — 재진입(발행 완료 후 status=done commit 실패/크래시 → 재pick)에서 execStage 재실행·중복 발행 차단.
   // stage 별 "발행 완료 마커"(이미 발행됐음을 보이는 덩어리 자손)를 찾으면 execStage 안 돌리고 status=done 만 멱등 재확정.
   //  - generate: 발행 끝에 Hunt/Audit task 를 덩어리 자식으로 낸다 → 덩어리에 (이 노드 말고) 다른 task 자식이 마커.
-  //  - hunt: 추가항목을 덩어리 *직속* item 으로 낸다(generate 항목은 그룹 밑이라 덩어리 직속 아님) → 덩어리 직속 item 자식이 마커.
+  //  - hunt: 추가항목을 덩어리 직속 item 으로 낸다. 평탄(28febc9)에선 generate 항목도 덩어리 직속이므로
+  //    "직속 item 존재"만으론 항상 참(오발 — hunt 가 영영 안 돎). hunt.blockedBy(=generate 항목 칸반 id 동결 집합)
+  //    **차집합**이 마커다: blockedBy 밖의 직속 item = hunt 가 발행한 추가항목.
+  //    (잔여 경계: 추가항목 0개로 끝난 hunt 가 status=done 전 크래시하면 재실행 — LLM 1회 재호출일 뿐 발행 중복 없음.)
   //  - audit: 노드 0개 발행(verdict 만 덩어리 result 로) → 재실행해도 중복 노드 0 → 가드 불필요.
   // 자식 멱등키는 둘 수 없다(kanban node.add 가 매번 새 id; 비결정 generate 는 콘텐츠 dedup 불가) — 발행-완료 마커로
   // 전량 재발행만 막는 설계. (남는 경계: 마커 발행 *전* 중간 크래시의 부분-발행 원자성 — kanban node.add 멱등키 필요. 후속.)
   if (Array.isArray(nodes) && target.parentId) {
+    const huntBlocked = new Set(target.blockedBy || []);
     const published =
       stageName === "generate"
         ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id)
         : stageName === "hunt"
-          ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item")
+          ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item" && !huntBlocked.has(n.id))
           : false;
     if (published) {
       await deps.editNode(target.id, { status: "done" });
@@ -382,14 +453,15 @@ async function reconcileStage(deps, target, body, nodes) {
   }
   // hunt/classify/audit 는 ledger(덩어리 자손 항목+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
   // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
+  let ledger;
   if ((stageName === "hunt" || stageName === "classify" || stageName === "audit") && deps.materializeLedger && target.parentId) {
     try {
-      const ledger = await deps.materializeLedger(target.parentId);
+      ledger = await deps.materializeLedger(target.parentId);
       const inp = JSON.parse(body);
       inp.args = { ...(inp.args || {}), ledger };
       stageBody = JSON.stringify(inp);
     } catch {
-      /* materialize 실패 시 ledger 없이 진행(exec-stage 가 빈 ledger 다룸) */
+      /* hunt/audit: materialize 실패 시 ledger 없이 진행(프롬프트 입력용). classify 는 아래서 ledger 필수(배정 검증). */
     }
   }
   let staged;
@@ -441,13 +513,40 @@ async function reconcileStage(deps, target, body, nodes) {
   const res = staged && staged.result;
   // classify: result.assignments([{id,category}]) → 각 항목 node.edit(category). reparent 금지(워크플로 노드 이동 불가) —
   // 기존 항목에 category 메타만 부여. dimension 은 덩어리(chunk) result 에 기록.
+  // 적용은 원장 대조 **전수 검증 통과 후에만**(부분 적용 0 — tools/verify-classify.mjs 와 동일 계약: unknown/중복/미배정=FAIL).
+  // LLM 환각 id 를 그대로 edit 하면 칸반 resolve 가 key(대소문자 무시)까지 매칭해 무관 노드를 오염시킬 수 있다.
   let assigned = 0;
-  if (stageName === "classify" && res && typeof res === "object" && Array.isArray(res.assignments)) {
-    for (const a of res.assignments) {
-      if (a && typeof a.id === "string" && typeof a.category === "string" && a.category) {
-        await deps.editNode(a.id, { category: a.category });
-        assigned += 1;
+  if (stageName === "classify") {
+    const assignments = res && typeof res === "object" && Array.isArray(res.assignments) ? res.assignments : null;
+    if (!assignments) {
+      return { ok: false, processed: 0, id: target.id, error: "classify 결과에 assignments 배열 없음" };
+    }
+    if (!Array.isArray(ledger)) {
+      return { ok: false, processed: 0, id: target.id, error: "classify 원장 materialize 실패 — 배정 검증 불가" };
+    }
+    const ledgerIds = new Set(ledger.map((e) => e && e.id).filter(Boolean));
+    const seen = new Set();
+    const errs = [];
+    for (const a of assignments) {
+      if (!a || typeof a.id !== "string" || typeof a.category !== "string" || !a.category) {
+        errs.push(`형식 위반: ${JSON.stringify(a)}`);
+        continue;
       }
+      if (!ledgerIds.has(a.id)) errs.push(`원장 밖 id: ${a.id}`);
+      else if (seen.has(a.id)) errs.push(`중복 배정: ${a.id}`);
+      seen.add(a.id);
+    }
+    for (const id of ledgerIds) if (!seen.has(id)) errs.push(`미배정: ${id}`);
+    if (errs.length) {
+      // 거부 → 노드 미변경(status todo 유지) → 코어 backoff 가 classify 재실행(LLM 재시도).
+      return { ok: false, processed: 0, id: target.id, error: `classify 배정 검증 실패(${errs.length}건): ${errs[0]}` };
+    }
+    for (const a of assignments) {
+      const er = await deps.editNode(a.id, { category: a.category });
+      if (er && er.ok === false) {
+        return { ok: false, processed: 0, id: target.id, error: `category 기록 실패(${a.id}): ${er.error || ""}` };
+      }
+      assigned += 1;
     }
   }
   if (res && typeof res === "object" && target.parentId) {
@@ -476,14 +575,52 @@ export function genSkeletonArgs({ idea, model, refs, genOut, lang } = {}) {
   return args;
 }
 
+/** buildSecretEnvMap — secrets.keys() 목록에서 "env:" prefix 키를 spawn secretEnv(envVar→secretKey) 매핑으로.
+ *  평문은 JS 를 거치지 않는다 — 키 이름만 넘기면 코어 Rust 경계가 볼트에서 해소해 자식 env 에 주입(api secretEnv).
+ *  재시작 후에도 볼트에 남아 있어 reconcile exec 이 인증을 되찾는다(인메모리 캡처 env 의 휘발 해소). */
+export function buildSecretEnvMap(keys) {
+  const m = {};
+  for (const k of Array.isArray(keys) ? keys : []) {
+    if (typeof k === "string" && k.startsWith("env:") && k.length > 4) m[k.slice(4)] = k;
+  }
+  return m;
+}
+
+/** buildSpawnCmd — soksak-workflow spawn 명령 조립. bin 명시(workflow.run 파라미터)면 직접 spawn,
+ *  없으면 로그인셸 랩: 플러그인은 Blob 로 로드돼 자기 경로를 모른다 → 단일 폴더 플러그인 컨벤션 경로
+ *  ($HOME/.soksak/plugins/…) 기본 + SOKSAK_WORKFLOW_BIN env 오버라이드. sh -l 이 GUI(Finder) 실행의
+ *  PATH 미상속도 함께 해소한다(로그인셸이 rc 를 로드 — acp-core 선례). */
+export function buildSpawnCmd(bin, args) {
+  if (bin) return { cmd: bin, args };
+  const script =
+    'exec "${SOKSAK_WORKFLOW_BIN:-$HOME/.soksak/plugins/soksak-plugin-workflow/target/release/soksak-workflow}" "$@"';
+  return { cmd: "/bin/sh", args: ["-lc", script, "soksak-workflow", ...args] };
+}
+
+/** execOpts — spawn 3종(generate-skeleton/exec-one/exec-stage)의 env 주입 옵션.
+ *  볼트 시크릿(env:* — 재시작 생존) 우선 → secretEnv 로 코어가 주입. 볼트가 비었거나 잠겼으면
+ *  workflow.run 이 캡처한 세션 env 폴백(하위호환 — 재시작 전까지만 유효). */
+async function execOpts(app, runtime) {
+  if (app.secrets) {
+    try {
+      const keys = await app.secrets.keys();
+      const secretEnv = buildSecretEnvMap(keys);
+      if (Object.keys(secretEnv).length) return { secretEnv };
+    } catch {
+      /* vault 잠김 등 — 세션 env 폴백 */
+    }
+  }
+  return runtime.env && typeof runtime.env === "object" ? { env: runtime.env } : {};
+}
+
 /** generate-skeleton spawn — 아이디어 → gen.js(LLM 저작) → skeleton JSON(stdout 문자열 resolve).
- *  claude 호출 → env(인증 프로필) 필요(발행 spawn 과 다름). lease=프로세스-생존(onExit 까지 대기). idea 는 argv(stdin 아님). */
-function genSkeleton(app, exe, env, spec) {
+ *  claude 호출 → 인증 env 필요(발행 spawn 과 다름 — opts 는 execOpts 산출). lease=프로세스-생존(onExit 까지 대기). */
+function genSkeleton(app, bin, opts, spec) {
   return new Promise((resolve, reject) => {
     let out = "";
     const dec = new TextDecoder();
-    const opts = env && typeof env === "object" ? { env } : {};
-    Promise.resolve(app.process.spawn(exe, genSkeletonArgs(spec), opts))
+    const { cmd, args } = buildSpawnCmd(bin, genSkeletonArgs(spec));
+    Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then((handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
@@ -502,12 +639,12 @@ function genSkeleton(app, exe, env, spec) {
 /** exec-one spawn — stdin 에 {prompt, schema?} 쓰고 stdout {oxf, result} 파싱.
  *  lease=프로세스-생존: spawn → **onExit await → 그제야 resolve/reject**. 도는 중(검색 1시간이든)엔 reply 금지 —
  *  스케줄러가 lease 로 기다린다. heartbeat 발신 없음(폐기). 정상 exit+결과=resolve, 비정상/무결과=reject(→ok:false). */
-function execOne(app, exe, env, body) {
+function execOne(app, bin, opts, body) {
   return new Promise((resolve, reject) => {
     let out = "";
     const dec = new TextDecoder();
-    const opts = env && typeof env === "object" ? { env } : {};
-    Promise.resolve(app.process.spawn(exe, ["exec-one", "--lang", "ko"], opts))
+    const { cmd, args } = buildSpawnCmd(bin, ["exec-one", "--lang", "ko"]);
+    Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
@@ -529,12 +666,12 @@ function execOne(app, exe, env, body) {
 
 /** exec-stage spawn — stdin {skeleton, stage, args} 쓰고 stdout(자식 {ev:add} JSON line + 최종 {ev:result})
  *  파싱 → { children:[add…], result }. lease=프로세스-생존: onExit 까지 대기. env=인증(claude 실행하므로 필요). */
-function execStage(app, exe, env, body) {
+function execStage(app, bin, opts, body) {
   return new Promise((resolve, reject) => {
     let out = "";
     const dec = new TextDecoder();
-    const opts = env && typeof env === "object" ? { env } : {};
-    Promise.resolve(app.process.spawn(exe, ["exec-stage", "--lang", "ko"], opts))
+    const { cmd, args } = buildSpawnCmd(bin, ["exec-stage", "--lang", "ko"]);
+    Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
@@ -574,7 +711,10 @@ export default {
   async activate(ctx) {
     const app = ctx.app;
     // 실행 런타임(workflow.run 이 갱신). reconcile 핸들러가 exec-one/exec-stage spawn 에, relay 가 task body 임베드에 쓴다.
-    const runtime = { bin: "soksak-workflow", env: undefined, skeleton: undefined, directive: undefined };
+    // bin=null → buildSpawnCmd 로그인셸 랩 기본(재시작 후에도 결정 가능). env 는 세션 캡처 — 영속은 secrets(env:*).
+    const runtime = { bin: null, env: undefined, skeleton: undefined, directive: undefined };
+    // reconcile 인메모리 상태(무판정 상한·기아 방지 카운터) — activate 수명, 재시작 시 리셋 허용.
+    const reconcileState = makeReconcileState();
 
     ctx.subscriptions.push(
       app.commands.register("workflow.run", {
@@ -589,26 +729,36 @@ export default {
           env: { type: "json", description: "generate-skeleton·exec-one(claude -p) 에 주입할 인증 env(ANTHROPIC_*). 순수 발행(--emit)은 토큰 불필요." },
           directive: { type: "string", description: "입력 지시어 — stage 작업 노드 body 에 임베드(exec-stage args.directive). 없으면 idea 로 승격." },
         },
-        returns: "{ ok }",
+        returns: "{ ok, published?, error? }",
         handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive }) => {
-          const exe = bin || "soksak-workflow";
-          runtime.bin = exe;
-          runtime.env = env; // reconcile exec-one/exec-stage 가 쓸 인증 env 캡처
+          runtime.bin = bin || null; // null → buildSpawnCmd 로그인셸 랩 기본
+          runtime.env = env; // 세션 캡처(폴백) — 영속은 아래 secrets
+          // env 를 볼트에 봉인(env:* 키) — 재시작 후 reconcile exec 이 secretEnv 로 되찾는다(인메모리 휘발 해소).
+          if (env && typeof env === "object" && app.secrets) {
+            try {
+              for (const [k, v] of Object.entries(env)) await app.secrets.set("env:" + k, String(v));
+            } catch (e) {
+              app.bus?.emit?.("workflow.error", { message: `secrets.set: ${String(e)}` });
+            }
+          }
           runtime.directive = directive || idea; // stage 작업 노드 directive: 명시 directive 우선, 없으면 idea
           // idea 만 주어지면(skeleton/skeletonPath 없음) → generate-skeleton 으로 gen.js→skeleton 저작해 발행에 흘림.
           if (idea && !skeleton && !skeletonPath) {
-            skeleton = await genSkeleton(app, exe, env, { idea, model, refs });
+            skeleton = await genSkeleton(app, runtime.bin, await execOpts(app, runtime), { idea, model, refs });
           }
           // skeleton 캡처(인라인 문자열) — stage 작업 노드 body 에 임베드해 reconcile 이 exec-stage 로 재실행.
           try { runtime.skeleton = skeleton ? JSON.parse(skeleton) : undefined; } catch { runtime.skeleton = undefined; }
           const input = skeletonPath || "-";
-          const args = [input, "--emit", "--lang", "ko"];
-          const handle = await app.process.spawn(exe, args, {}); // 발행은 LLM 미호출 → env 불필요
+          const emitCmd = buildSpawnCmd(runtime.bin, [input, "--emit", "--lang", "ko"]);
+          const handle = await app.process.spawn(emitCmd.cmd, emitCmd.args, {}); // 발행은 LLM 미호출 → env 불필요
 
           const keyOf = new Map(); // 워크플로 노드 id → 칸반 노드 id
           let buf = "";
+          let errBuf = ""; // --emit stderr(러스트 error: 진단) — 실패 시 사용자 표면으로.
           const queue = [];
           let processing = false;
+          let relayErrors = 0; // node.add/prompt.put relay 실패 집계 — 침묵 삼킴 금지(fail-loud).
+          let firstRelayError = "";
 
           const roleToHash = new Map(); // 프롬프트 정규화: registerPrompts 등록 결과(role→sha256). item 발행이 참조.
           const handleEv = async (line) => {
@@ -631,8 +781,11 @@ export default {
                 const params = buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash); // 발행 relay·exec-stage relay 공유
                 const r = await app.commands.execute(KANBAN + ".node.add", params);
                 if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
+                else throw new Error(`node.add 거부: ${(r && r.error) || JSON.stringify(r)}`);
               }
             } catch (e) {
+              relayErrors += 1;
+              if (!firstRelayError) firstRelayError = String((e && e.message) || e);
               app.bus?.emit?.("workflow.error", { message: String(e) });
             }
           };
@@ -654,13 +807,14 @@ export default {
             }
             void drain();
           });
-          app.process.onExit(handle, () => {
-            if (buf.trim()) queue.push(buf.trim());
-            void drain().then(() => {
-              app.bus?.emit?.("workflow.done", {});
-              // 발행 완료 → reconcile 깨워 새 ready(검수전) 노드 처리.
-              app.scheduler?.poke?.(RECONCILE_ID);
+          if (app.process.onStderr) {
+            const errDec = new TextDecoder();
+            app.process.onStderr(handle, (bytes) => {
+              errBuf += errDec.decode(bytes, { stream: true });
             });
+          }
+          const exited = new Promise((resolve) => {
+            app.process.onExit(handle, (code) => resolve(code));
           });
 
           if (!skeletonPath && skeleton) {
@@ -668,33 +822,52 @@ export default {
             if (app.process.closeStdin) await app.process.closeStdin(handle);
           }
 
-          return { ok: true };
+          // 발행 완결까지 대기 — exit code·relay 실패를 검사해 fail-loud 로 반환(선반환 {ok:true} 금지).
+          const code = await exited;
+          if (buf.trim()) queue.push(buf.trim());
+          await drain();
+          if (code !== 0) {
+            const tail = errBuf.trim().slice(-500);
+            const error = `--emit exit ${code}${tail ? `: ${tail}` : ""}`;
+            app.bus?.emit?.("workflow.error", { message: error });
+            return { ok: false, error, published: keyOf.size };
+          }
+          if (relayErrors > 0) {
+            return { ok: false, error: `발행 relay 실패 ${relayErrors}건(첫: ${firstRelayError})`, published: keyOf.size };
+          }
+          app.bus?.emit?.("workflow.done", {});
+          // 발행 완료 → reconcile 깨워 새 ready(검수전) 노드 처리.
+          app.scheduler?.poke?.(RECONCILE_ID);
+          return { ok: true, published: keyOf.size };
         },
       }),
     );
 
-    // reconcile 명령 — 칸반 ready 노드 1개를 exec-one 으로 실행. 스케줄러가 발화(부팅 스캔·poke).
+    // reconcile 명령 — 칸반 ready 노드 1개를 실행. 스케줄러가 발화(activate poke·완료 poke·kanban:changed).
     ctx.subscriptions.push(
       app.commands.register("workflow.reconcile", {
-        description: "칸반 ready 노드(검수전·의존충족·leaf) 1개를 exec-one 으로 검증 → 배지/결과 기록 → 다음 깨움.",
+        description:
+          "칸반 ready 노드 1개를 실행 — item 은 exec-one 검증(badge o/x/f 기록), task 는 exec-stage(stage 실행·자식 노드 발행·classify category 기록·덩어리 result 갱신) → 다음 깨움.",
         params: {},
         returns: "{ ok, processed, id?, badge? }",
         handler: async () => {
           const deps = {
-            listNodes: () => app.commands.execute(KANBAN + ".node.list", {}),
+            // limit 명시 — 칸반 node.list 기본 200 절단이 pickReady/멱등 마커/#6 게이트/ledger 를 부분 데이터로
+            // 오판시킨다(무음). 칸반 store 는 인메모리 배열이라 전량 조회 비용 무시 가능.
+            listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
             getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
             editNode: (id, fields) => app.commands.execute(KANBAN + ".node.edit", { node: id, ...fields }),
             // lease=프로세스-생존: exec-one/exec-stage 가 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 backstop 으로만 관리.
-            execOne: (body) => execOne(app, runtime.bin, runtime.env, body),
-            execStage: (body) => execStage(app, runtime.bin, runtime.env, body),
+            execOne: async (body) => execOne(app, runtime.bin, await execOpts(app, runtime), body),
+            execStage: async (body) => execStage(app, runtime.bin, await execOpts(app, runtime), body),
             // exec-stage 자식 노드 발행 → 칸반 node.add, 칸반 id 반환(reconcileStage 가 배치 keyOf 로 부모 잇게).
             addNode: async (params) => {
               const r = await app.commands.execute(KANBAN + ".node.add", params);
               return r && r.nodeId;
             },
-            // hunt/audit 용 ledger — 덩어리 자손 항목+배지(node.list 로).
+            // hunt/classify/audit 용 ledger — 덩어리 자손 항목+배지(node.list 로, limit 명시).
             materializeLedger: async (chunkId) => {
-              const listed = await app.commands.execute(KANBAN + ".node.list", {});
+              const listed = await app.commands.execute(KANBAN + ".node.list", { limit: 100000 });
               return buildLedger((listed && listed.nodes) || [], chunkId);
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
@@ -704,12 +877,12 @@ export default {
             getPrompt: (hash) => app.commands.execute(KANBAN + ".prompt.get", { hash }),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
-          return await reconcileTick(deps);
+          return await reconcileTick(deps, reconcileState);
         },
       }),
     );
 
-    // 코어 스케줄러에 reconcile 등록(멱등) — 등록 시 1회 부팅 스캔 + poke 시 발화. crash 후에도 칸반 상태로 재개.
+    // 코어 스케줄러에 reconcile 등록(멱등) — poke 시 발화. crash 후 재개는 아래 부팅 poke 가 담당.
     if (app.scheduler) {
       try {
         await app.scheduler.register({
@@ -726,6 +899,10 @@ export default {
           // exec-one/exec-stage 가 검색 1h+ 돌아도 안 잘리고, 도는 중 재발화 0(lease).
           process_lease: true,
         });
+        // 부팅 1회 스캔 — Reconcile 트리거는 등록만으론 발화하지 않는다(코어 first_fire=None; 코어 테스트가
+        // '등록만으론 미발화'를 고정). 재시작 후 미완 노드(검수전 항목·미완 task)가 남아 있으면 이 poke 가
+        // 재개하고, 없으면 ready 0 no-op(멱등)이다.
+        await app.scheduler.poke?.(RECONCILE_ID);
       } catch (e) {
         app.bus?.emit?.("workflow.error", { message: `scheduler.register: ${String(e)}` });
       }

@@ -127,14 +127,13 @@ impl Host for ClaudeHost {
         } else {
             run_agent_text(&req, &self.env).map(Val::Str)
         };
-        match res {
-            Ok(v) => Ok(v),
-            // agent 실패 → null(engine 계약: agent 는 실패 시 null).
-            Err(e) => {
-                eprintln!("[soksak] agent {label:?} 실패 → null: {e}");
-                Ok(Val::Null)
-            }
-        }
+        // agent 실패는 **전파** — Ok(Null) 로 흡수하면 stage 워크플로가 `(r && r.x) || 기본값` 으로 접어
+        // '빈 산출 성공'이 되고, hunt/classify/audit 가 아무 일도 못 한 채 status=done 으로 침묵 완결된다.
+        // Err → interp 중단 → exec-one/exec-stage exit≠0 → reconcile ok:false → 코어 backoff 재시도(fail-loud).
+        res.map_err(|e| {
+            eprintln!("[soksak] agent {label:?} 실패: {e}");
+            format!("agent {label:?} 실패: {e}")
+        })
     }
     fn phase(&mut self, title: &str) {
         eprintln!("[soksak] ── phase: {title} ──");

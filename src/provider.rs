@@ -102,11 +102,10 @@ fn is_529(err: &str) -> bool {
 }
 
 /// run_agent_text_once — claude -p 단일 실행(재시도 없음). 529 감지(stream text) 시 Err 를 529 로.
+/// timeout 하드캡(req.timeout_secs)은 **네이티브**(wait-timeout crate) — 외부 GNU `timeout` 바이너리에
+/// 의존하지 않는다(macOS 기본 미탑재; 부재 시 모든 호출이 "spawn claude" 오진 라벨로 죽던 결함 해소).
 fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
-    let mut transient_529 = false; // stream 중 [text] API Error 529/overloaded 감지.
-    // timeout 하드캡(req.timeout_secs) — hung claude 호출(WebSearch 폭주 등)이 루프를 영원히 막지 못하게.
-    let mut cmd = Command::new("timeout");
-    cmd.arg(req.timeout_secs.to_string()).arg("claude");
+    let mut cmd = Command::new("claude");
     for a in claude_args(req) {
         cmd.arg(a);
     }
@@ -123,40 +122,62 @@ fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<S
     }
     let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
     let stdout = child.stdout.take().ok_or("claude stdout 없음")?;
-    // stream-json: 한 줄 = 한 이벤트. 모두 stderr 로 흘려 관측(system·think·tool·subagent·task·…),
-    // 최종 type=result 의 result 텍스트만 반환값으로 모은다.
-    let mut result_text = String::new();
-    for line in BufReader::new(stdout).lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<Value>(t) {
-            Ok(ev) => {
-                print_event(&ev);
-                let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
-                if ty == "text" {
-                    let t = ev.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                    if t.contains("529") || t.contains("overloaded") { transient_529 = true; }
-                } else if ty == "result" {
-                    if let Some(s) = ev.get("result").and_then(|r| r.as_str()) {
-                        result_text = s.to_string();
+    // stream-json 소비는 리더 스레드에서 — 메인 스레드는 wait_timeout 으로 하드캡을 건다.
+    // (종전 GNU timeout 이 하던 hung 방지: 캡 도달 시 kill → stdout EOF → 리더 종료.)
+    let reader = std::thread::spawn(move || {
+        let mut transient_529 = false; // stream 중 [text] API Error 529/overloaded 감지.
+        // stream-json: 한 줄 = 한 이벤트. 모두 stderr 로 흘려 관측(system·think·tool·subagent·task·…),
+        // 최종 type=result 의 result 텍스트만 반환값으로 모은다.
+        let mut result_text = String::new();
+        for line in BufReader::new(stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Value>(t) {
+                Ok(ev) => {
+                    print_event(&ev);
+                    let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                    if ty == "text" {
+                        let t = ev.get("text").and_then(|x| x.as_str()).unwrap_or("");
+                        if t.contains("529") || t.contains("overloaded") {
+                            transient_529 = true;
+                        }
+                    } else if ty == "result" {
+                        if let Some(s) = ev.get("result").and_then(|r| r.as_str()) {
+                            result_text = s.to_string();
+                        }
                     }
                 }
+                Err(_) => eprintln!("  [stream:raw] {}", t.chars().take(200).collect::<String>()),
             }
-            Err(_) => eprintln!("  [stream:raw] {}", t.chars().take(200).collect::<String>()),
         }
-    }
-    let status = child.wait().map_err(|e| format!("wait claude: {e}"))?;
+        (result_text, transient_529)
+    });
+    use wait_timeout::ChildExt;
+    let status = match child
+        .wait_timeout(std::time::Duration::from_secs(req.timeout_secs))
+        .map_err(|e| format!("wait claude: {e}"))?
+    {
+        Some(st) => st,
+        None => {
+            // 하드캡 도달 — kill 후 reap. 리더는 stdout EOF 로 자연 종료.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(format!("claude 타임아웃({}s) — 강제 종료(hung 방지 하드캡)", req.timeout_secs));
+        }
+    };
+    let (result_text, transient_529) = reader.join().map_err(|_| "claude stream 리더 스레드 panic".to_string())?;
     if !status.success() {
         if transient_529 {
             return Err("529 과부하 — claude 비정상 종료(일시적, backoff 대상)".into());
         }
-        return Err(format!("claude 비정상 종료: {status} (timeout 만료=124/137)"));
+        return Err(format!("claude 비정상 종료: {status}"));
     }
     if result_text.is_empty() {
         return Err("claude 스트림에 type=result 텍스트 없음".into());

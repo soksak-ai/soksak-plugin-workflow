@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -834,4 +834,188 @@ test("reconcileTick — generate DraftDoc 검증 실패면 발행 거부(ok:fals
   assert.equal(r.ok, false, "위반 문서 발행 거부");
   assert.equal(deps.calls.add.length, 0, "발행 0(거부)");
   assert.equal(deps.calls.edit.length, 0, "노드 미변경(status todo 유지 → backoff)");
+});
+
+// ── M1 결함 수정 — hunt 멱등 마커(평탄), 무판정 상한, 기아 방지, classify 배정 검증, spawn/secretEnv 조립 ──
+
+test("reconcileTick — 평탄: hunt 첫 진입은 execStage 실행(blockedBy 항목=generate 발행분은 마커 아님 — 오발 수정)", async () => {
+  // 평탄화(28febc9) 후 generate 항목도 덩어리 직속 item — "직속 item 존재"를 마커로 쓰면 hunt 첫 진입부터
+  // 항상 참이 되어 hunt 가 영영 실행되지 않는다(침묵). hunt.blockedBy(=generate 항목 칸반 id 동결 집합)에
+  // 속한 항목은 마커에서 제외 — blockedBy 밖 직속 item 만 hunt 발행분이다.
+  const nodes = [
+    { id: "hunt", kind: "task", status: "todo", parentId: "chunk", blockedBy: ["i1", "i2"], body: '{"stage":"hunt"}' },
+    { id: "i1", kind: "item", status: "todo", parentId: "chunk", badge: "o", blockedBy: [] },
+    { id: "i2", kind: "item", status: "todo", parentId: "chunk", badge: "x", blockedBy: [] },
+  ];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [
+    { id: "i1", title: "a", badge: "o" },
+    { id: "i2", title: "b", badge: "x" },
+  ];
+  await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 1, "직속 item 이 전부 blockedBy(generate 발행분)면 hunt 는 미발행 — 실행돼야 함");
+});
+
+test("reconcileTick — 평탄: hunt 재진입(blockedBy 밖 직속 item=추가항목 존재)은 execStage 없이 done 멱등", async () => {
+  const nodes = [
+    { id: "hunt", kind: "task", status: "todo", parentId: "chunk", blockedBy: ["i1"], body: '{"stage":"hunt"}' },
+    { id: "i1", kind: "item", status: "todo", parentId: "chunk", badge: "o", blockedBy: [] },
+    { id: "add0", kind: "item", status: "todo", parentId: "chunk", badge: "검수전", blockedBy: [] }, // hunt 발행 추가항목
+  ];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [];
+  const r = await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 0, "추가항목(blockedBy 밖) 존재 = 발행 완료 마커 → 재실행 안 함");
+  const done = deps.calls.edit.find((e) => e.id === "hunt");
+  assert.equal(done.fields.status, "done", "status=done 멱등 재확정");
+  assert.equal(r.ok, true);
+});
+
+test("reconcileTick — 무판정 연속 3회면 badge=f 확정(무한 LLM 재실행 루프 유한화, fail-loud)", async () => {
+  // 무판정 result 기록이 kanban:changed → poke → 같은 항목 재선택 → LLM 재실행 무한 루프가 될 수 있다.
+  // 상한(3회) 도달 시 f 확정 — 원인(스키마 부재/모델 이탈)을 result 로 표면화, 체인은 f(done)로 풀린다.
+  const nodes = [{ id: "n1", badge: "검수전", blockedBy: [], parentId: null, status: "todo", body: '{"prompt":"x"}' }];
+  const st = makeReconcileState();
+  const mk = () => fakeDeps(nodes, { oxf: null, result: "무판정 출력" });
+  const d1 = mk();
+  const r1 = await reconcileTick(d1, st);
+  assert.equal(r1.badge, null);
+  assert.equal(d1.calls.edit[0].fields.badge, undefined, "1회: badge 미변경(result 만)");
+  assert.equal(d1.calls.poke, 0, "1회: self-poke 억제 유지");
+  const d2 = mk();
+  await reconcileTick(d2, st);
+  assert.equal(d2.calls.edit[0].fields.badge, undefined, "2회: badge 미변경");
+  const d3 = mk();
+  const r3 = await reconcileTick(d3, st);
+  assert.equal(d3.calls.edit[0].fields.badge, "f", "3회: 자동 f 확정");
+  assert.match(d3.calls.edit[0].fields.result, /무판정 3회/, "원인 표면화(result)");
+  assert.equal(d3.calls.poke, 1, "f 확정=진척 → poke");
+  assert.equal(r3.badge, "f");
+});
+
+test("reconcileTick — 무판정 카운터는 판정 성공 시 리셋(간헐 무판정이 f 로 오확정되지 않음)", async () => {
+  const nodes = [{ id: "n1", badge: "검수전", blockedBy: [], parentId: null, status: "todo", body: '{"prompt":"x"}' }];
+  const st = makeReconcileState();
+  await reconcileTick(fakeDeps(nodes, { oxf: null, result: "무판정" }), st); // 1회 무판정
+  await reconcileTick(fakeDeps(nodes, { oxf: null, result: "무판정" }), st); // 2회 무판정
+  const dOk = fakeDeps(nodes, { oxf: "o", result: "판정" });
+  await reconcileTick(dOk, st); // 판정 성공 → 카운터 리셋
+  assert.equal(dOk.calls.edit[0].fields.badge, "o");
+  // 다시 무판정 2회 — 리셋됐으므로 f 확정(3회 도달) 아님.
+  const d4 = fakeDeps(nodes, { oxf: null, result: "무판정" });
+  await reconcileTick(d4, st);
+  assert.equal(d4.calls.edit[0].fields.badge, undefined, "리셋 후 1회째 — f 아님");
+});
+
+test("reconcileTick — 연속 실패 노드는 뒤로: ready 중 실패 최소 노드 선택(head-of-line 기아 방지)", async () => {
+  const nodes = [
+    { id: "n1", badge: "검수전", blockedBy: [], parentId: null, status: "todo", body: '{"prompt":"a"}' },
+    { id: "n2", badge: "검수전", blockedBy: [], parentId: null, status: "todo", body: '{"prompt":"b"}' },
+  ];
+  const st = makeReconcileState();
+  const deps1 = fakeDeps(nodes, null);
+  deps1.execOne = async () => {
+    throw new Error("영구 실패(promptHash 미발견 등)");
+  };
+  const r1 = await reconcileTick(deps1, st);
+  assert.equal(r1.ok, false);
+  assert.equal(r1.id, "n1", "첫 틱은 ready[0]=n1");
+  const deps2 = fakeDeps(nodes, { oxf: "o", result: "ok" });
+  const r2 = await reconcileTick(deps2, st);
+  assert.equal(r2.id, "n2", "n1 실패 기록 → 다음 틱은 n2(실패 0) 선택 — n1 이 큐를 못 막음");
+  assert.equal(r2.badge, "o");
+});
+
+test("reconcileTick — classify 원장 밖 id(환각)는 전량 거부: category edit 0 + ok:false(backoff 재시도)", async () => {
+  // LLM 환각 id 를 그대로 node.edit 하면 칸반 resolve 가 key(대소문자 무시)까지 매칭해 무관 노드를 오염시킬 수 있다.
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' }];
+  const staged = { children: [], result: { dimension: "d", assignments: [{ id: "i0", category: "재고" }, { id: "ghost", category: "유령" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "차감", badge: "o" }];
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /원장 밖 id: ghost/);
+  assert.equal(deps.calls.edit.length, 0, "부분 적용 0 — category edit·status done 없음");
+});
+
+test("reconcileTick — classify 중복 배정 거부", async () => {
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' }];
+  const staged = { children: [], result: { dimension: "d", assignments: [{ id: "i0", category: "재고" }, { id: "i0", category: "발주" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "차감", badge: "o" }];
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /중복 배정: i0/);
+  assert.equal(deps.calls.edit.length, 0);
+});
+
+test("reconcileTick — classify 미배정(원장 커버 미달) 거부 — 전 요건 정확히 1회 배정 계약", async () => {
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' }];
+  const staged = { children: [], result: { dimension: "d", assignments: [{ id: "i0", category: "재고" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [
+    { id: "i0", title: "차감", badge: "o" },
+    { id: "i1", title: "발주", badge: "o" },
+  ];
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /미배정: i1/);
+  assert.equal(deps.calls.edit.length, 0);
+});
+
+test("reconcileTick — classify category 기록 실패(editNode ok:false)는 성공 위장 없이 ok:false", async () => {
+  const nodes = [{ id: "classify", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"classify"}' }];
+  const staged = { children: [], result: { dimension: "d", assignments: [{ id: "i0", category: "재고" }] } };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "차감", badge: "o" }];
+  const base = deps.editNode;
+  deps.editNode = async (id, fields) => {
+    await base(id, fields);
+    return fields.category ? { ok: false, error: "거부" } : { ok: true };
+  };
+  const r = await reconcileTick(deps);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /category 기록 실패\(i0\)/);
+});
+
+test("buildSecretEnvMap — env:* 키만 envVar→secretKey 매핑(그 외·빈 키 무시, 비배열 안전)", () => {
+  assert.deepEqual(buildSecretEnvMap(["env:ANTHROPIC_BASE_URL", "env:ANTHROPIC_AUTH_TOKEN", "other", "env:"]), {
+    ANTHROPIC_BASE_URL: "env:ANTHROPIC_BASE_URL",
+    ANTHROPIC_AUTH_TOKEN: "env:ANTHROPIC_AUTH_TOKEN",
+  });
+  assert.deepEqual(buildSecretEnvMap(null), {});
+  assert.deepEqual(buildSecretEnvMap([]), {});
+});
+
+test("buildSpawnCmd — bin 명시면 직접 spawn, 없으면 로그인셸 랩(단일 폴더 컨벤션 + SOKSAK_WORKFLOW_BIN 오버라이드)", () => {
+  // 플러그인은 Blob 로드라 자기 경로 불명 + GUI(Finder) 실행은 셸 PATH 미상속 → sh -l 랩이 둘 다 해소.
+  assert.deepEqual(buildSpawnCmd("/x/bin/wf", ["exec-one"]), { cmd: "/x/bin/wf", args: ["exec-one"] });
+  const wrapped = buildSpawnCmd(null, ["exec-one", "--lang", "ko"]);
+  assert.equal(wrapped.cmd, "/bin/sh");
+  assert.equal(wrapped.args[0], "-lc");
+  assert.match(wrapped.args[1], /SOKSAK_WORKFLOW_BIN/, "env 오버라이드 지원");
+  assert.match(wrapped.args[1], /\.soksak\/plugins\/soksak-plugin-workflow/, "단일 폴더 플러그인 컨벤션 기본 경로");
+  assert.deepEqual(wrapped.args.slice(3), ["exec-one", "--lang", "ko"], '실제 인자는 "$@" 로 전달($0 자리 다음)');
+});
+
+test("validateDraftDoc — ⑧ 비enum badge 거부(칸반 드랍→영구 not-done 무음 정지 차단)", () => {
+  const d = goodDraftDoc();
+  d.requirements[0].badge = "pending";
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑧]") && x.includes("pending")), v.join(","));
+  const d2 = goodDraftDoc();
+  d2.verify_contract.initial_badge = "todo";
+  assert.ok(validateDraftDoc(d2).some((x) => x.includes("[⑧]") && x.includes("initial_badge")));
+  const d3 = goodDraftDoc();
+  d3.requirements[0].badge = ""; // 빈 badge = initial_badge 폴백 — 허용
+  assert.deepEqual(validateDraftDoc(d3), []);
+});
+
+test("validateDraftDoc — ⑨ 빈 verify_contract 거부(빈 계약=소비 시점 무한 backoff 로 전락 — 발행 시점 fail-loud)", () => {
+  const d = goodDraftDoc();
+  d.verify_contract = { template: "", directive: "", schema: null, initial_badge: "검수전" };
+  const v = validateDraftDoc(d);
+  assert.ok(v.some((x) => x.includes("[⑨]") && x.includes("template")), v.join(","));
+  assert.ok(v.some((x) => x.includes("[⑨]") && x.includes("directive")), v.join(","));
+  assert.ok(v.some((x) => x.includes("[⑨]") && x.includes("schema")), v.join(","));
 });

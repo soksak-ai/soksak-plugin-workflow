@@ -3,12 +3,13 @@
   "id": "soksak-plugin-workflow",
   "name": "Workflow",
   "version": "0.0.1",
-  "description": "워크플로 AST(추출기 추출)를 칸반 노드 DAG 로 실행·추적. agent=단일/parallel=동시/pipeline=체인, blockedBy 의존·스케줄러 동시 실행.",
+  "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 칸반 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
   "entry": "main.js",
   "permissions": [
     "process",
     "commands",
-    "schedule"
+    "schedule",
+    "secrets"
   ],
   "dependencies": {
     "soksak-plugin-kanban": "^0.1.0"
@@ -21,7 +22,7 @@
       },
       {
         "name": "workflow.reconcile",
-        "title": "Reconcile — ready 노드 exec-one 실행(스케줄러 발화)"
+        "title": "Reconcile — ready 노드 실행(item=exec-one 검증, task=exec-stage 발행/기록)"
       }
     ]
   }

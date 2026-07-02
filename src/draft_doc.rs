@@ -169,7 +169,7 @@ pub fn build(events: &[NodeEvent]) -> Result<DraftDoc, String> {
     })
 }
 
-/// validate — DraftDoc 인증(플랜 규칙 1,2,3,4,5,7 — 규칙 6 sha 정합은 kanban 담당). 위반 목록 반환.
+/// validate — DraftDoc 인증(플랜 규칙 1,2,3,4,5,7 + ⑧⑨ — 규칙 6 sha 정합은 kanban 담당). 위반 목록 반환.
 /// **평탄** — category 개념 제거(그룹 없음, requirement.category_id 없음). 분류는 classify stage 가 나중에 node.edit.
 /// 통과(빈 위반) 못하면 발행 거부(fail-loud). 규칙:
 ///   ① id 유일 — requirements ∪ tasks 전 id 유일.
@@ -178,6 +178,10 @@ pub fn build(events: &[NodeEvent]) -> Result<DraftDoc, String> {
 ///   ④ 정규화 불변 — 요건에 schema/directive/template/category 이름 인라인 0(고유 필드만; 구조로 보장).
 ///   ⑤ 트리 — hunt.blocked_by = 전 요건 · classify.blocked_by = 전 요건 ∪ {hunt} · audit.blocked_by = 전 요건 ∪ {hunt,classify}.
 ///   ⑦ 비어있지 않음 — requirements ≥ 1. (categories≥1 규칙 제거 — 평탄.)
+///   ⑧ 배지 enum — requirement.badge ∈ {검수전,o,x,f}(빈 값은 initial_badge 폴백 — 허용) · initial_badge ∈ enum.
+///     비enum 배지는 칸반이 드랍해 "검수전 필터에도 done 판정에도 안 걸리는" 영구 not-done 무음 정지가 된다.
+///   ⑨ verify_contract 완결 — template·directive 비지 않음 · schema 객체. 빈 계약(registerPrompts 누락)은
+///     item body 가 해시 없이 발행돼 exec-one 'prompt 필수' 무한 backoff(지연 실패) — 발행 시점 거부가 fail-loud.
 pub fn validate(doc: &DraftDoc) -> Result<(), Vec<String>> {
     let mut v: Vec<String> = vec![];
 
@@ -267,6 +271,31 @@ pub fn validate(doc: &DraftDoc) -> Result<(), Vec<String>> {
         } else if ab != expected {
             v.push("[⑤] audit.blocked_by ≠ 전 요건 ∪ {hunt,classify}".to_string());
         }
+    }
+
+    // ⑧ 배지 enum — LLM 저작 리터럴이라 이탈 가능(origin 은 ③이 검사하는데 badge 만 공백이면 비대칭).
+    const BADGES: [&str; 4] = ["검수전", "o", "x", "f"];
+    for r in &doc.requirements {
+        if !r.badge.is_empty() && !BADGES.contains(&r.badge.as_str()) {
+            v.push(format!("[⑧] requirement {:?} badge {:?} ∉ {{검수전,o,x,f}}", r.id, r.badge));
+        }
+    }
+    if !BADGES.contains(&doc.verify_contract.initial_badge.as_str()) {
+        v.push(format!(
+            "[⑧] verify_contract.initial_badge {:?} ∉ {{검수전,o,x,f}}",
+            doc.verify_contract.initial_badge
+        ));
+    }
+
+    // ⑨ verify_contract 완결 — build 는 부재를 빈 값으로 접지만(total), 발행은 여기서 거부한다.
+    if doc.verify_contract.template.trim().is_empty() {
+        v.push("[⑨] verify_contract.template 비어있음(registerPrompts.verify 누락)".to_string());
+    }
+    if doc.verify_contract.directive.trim().is_empty() {
+        v.push("[⑨] verify_contract.directive 비어있음(registerPrompts.directive 누락)".to_string());
+    }
+    if !doc.verify_contract.schema.is_object() {
+        v.push("[⑨] verify_contract.schema 객체 아님(registerPrompts.schema/item inline 부재)".to_string());
     }
 
     // 규칙 ④(정규화 불변)는 Requirement 구조 자체가 고유 필드만 갖게 강제 — 인라인 슬롯이 없다.
@@ -381,8 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn build_defensive_no_register_prompts() {
-        // register_prompts 전무(방어적) — 견고하게 접되 template/directive 는 빈 문자열.
+    fn build_defensive_no_register_prompts_then_validate_rejects() {
+        // register_prompts 전무 — build 는 견고하게 접지만(total function), 빈 계약을 **발행하면 안 된다**:
+        // item body 가 해시 없이 나가 exec-one 'prompt 필수' 무한 backoff(지연 실패)가 되므로 ⑨가 발행 시점에 거부.
         let events = vec![
             item_ev("i0", "chunk", "요건", "설명", "user", "검수전", None, None),
         ];
@@ -392,6 +422,35 @@ mod tests {
         assert_eq!(doc.verify_contract.schema, Json::Null);
         assert_eq!(doc.chunk_ref, "chunk", "chunk_ref = 첫 item 의 parent");
         assert_eq!(doc.requirements.len(), 1);
+        let errs = validate(&doc).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("[⑨]") && e.contains("template")), "빈 template 거부: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("[⑨]") && e.contains("directive")), "빈 directive 거부: {errs:?}");
+        assert!(errs.iter().any(|e| e.contains("[⑨]") && e.contains("schema")), "schema Null 거부: {errs:?}");
+    }
+
+    #[test]
+    fn validate_rule8_rejects_non_enum_badge() {
+        // LLM 이 badge:"pending" 을 내면 종전엔 통과 → 칸반이 드랍 → 영구 not-done 무음 정지. ⑧이 발행 시점 거부.
+        let mut doc = build(&good_events()).unwrap();
+        doc.requirements[0].badge = "pending".to_string();
+        let errs = validate(&doc).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("[⑧]") && e.contains("pending")), "비enum badge 거부: {errs:?}");
+    }
+
+    #[test]
+    fn validate_rule8_allows_empty_badge_falls_back_to_initial() {
+        // 빈 badge 는 applyDraftDoc 이 initial_badge 로 폴백 — 위반 아님.
+        let mut doc = build(&good_events()).unwrap();
+        doc.requirements[0].badge = String::new();
+        assert_eq!(validate(&doc), Ok(()), "빈 badge 는 initial_badge 폴백(허용)");
+    }
+
+    #[test]
+    fn validate_rule8_rejects_non_enum_initial_badge() {
+        let mut doc = build(&good_events()).unwrap();
+        doc.verify_contract.initial_badge = "todo".to_string();
+        let errs = validate(&doc).unwrap_err();
+        assert!(errs.iter().any(|e| e.contains("[⑧]") && e.contains("initial_badge")), "비enum initial_badge 거부: {errs:?}");
     }
 
     #[test]
