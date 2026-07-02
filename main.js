@@ -761,15 +761,22 @@ async function execOpts(app, runtime) {
 function genSkeleton(app, bin, opts, spec) {
   return new Promise((resolve, reject) => {
     let out = "";
+    let err = ""; // stderr — 실패 원인 표면화(fail-loud §2: 원인 없는 exit N 금지)
     const dec = new TextDecoder();
+    const errDec = new TextDecoder();
     const { cmd, args } = buildSpawnCmd(bin, genSkeletonArgs(spec));
     Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then((handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
         });
+        if (app.process.onStderr) {
+          app.process.onStderr(handle, (b) => {
+            err += errDec.decode(b, { stream: true });
+          });
+        }
         app.process.onExit(handle, (code) => {
-          if (code !== 0) return reject(new Error(`generate-skeleton exit ${code}`));
+          if (code !== 0) return reject(new Error(`generate-skeleton exit ${code}: ${err.trim().slice(-500)}`));
           const t = out.trim();
           if (!t.startsWith("{")) return reject(new Error(`generate-skeleton 출력이 skeleton JSON 아님: ${t.slice(0, 200)}`));
           resolve(t);
@@ -785,15 +792,22 @@ function genSkeleton(app, bin, opts, spec) {
 function execOne(app, bin, opts, body) {
   return new Promise((resolve, reject) => {
     let out = "";
+    let err = "";
     const dec = new TextDecoder();
+    const errDec = new TextDecoder();
     const { cmd, args } = buildSpawnCmd(bin, ["exec-one", "--lang", "ko"]);
     Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
         });
+        if (app.process.onStderr) {
+          app.process.onStderr(handle, (b) => {
+            err += errDec.decode(b, { stream: true });
+          });
+        }
         app.process.onExit(handle, (code) => {
-          if (code !== 0) return reject(new Error(`exec-one exit ${code}`));
+          if (code !== 0) return reject(new Error(`exec-one exit ${code}: ${err.trim().slice(-500)}`));
           try {
             resolve(JSON.parse(out.trim()));
           } catch {
@@ -812,15 +826,22 @@ function execOne(app, bin, opts, body) {
 function execStage(app, bin, opts, body) {
   return new Promise((resolve, reject) => {
     let out = "";
+    let err = "";
     const dec = new TextDecoder();
+    const errDec = new TextDecoder();
     const { cmd, args } = buildSpawnCmd(bin, ["exec-stage", "--lang", "ko"]);
     Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
         });
+        if (app.process.onStderr) {
+          app.process.onStderr(handle, (b) => {
+            err += errDec.decode(b, { stream: true });
+          });
+        }
         app.process.onExit(handle, (code) => {
-          if (code !== 0) return reject(new Error(`exec-stage exit ${code}`));
+          if (code !== 0) return reject(new Error(`exec-stage exit ${code}: ${err.trim().slice(-500)}`));
           // generate stage = DraftDoc(단일 JSON 문서, kind:"draft-chunk"). 그 외 = 줄단위 스트림({ev:add}+{ev:result}).
           const whole = out.trim();
           if (whole.startsWith("{")) {
