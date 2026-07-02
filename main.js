@@ -962,11 +962,11 @@ export default {
 
     ctx.subscriptions.push(
       app.commands.register("workflow.run", {
-        description: "아이디어(idea) 또는 워크플로 문서(workflow-doc@0.0.1)/skeleton(레거시 AST) 을 받아 칸반에 노드 DAG 로 발행하고, reconcile 로 실행을 건다. idea 면 내부에서 generate-skeleton(LLM 저작→doc) 을 먼저 돈다.",
+        description: "아이디어(idea) 또는 워크플로 문서(workflow-doc@0.0.1) 를 받아 칸반에 노드 DAG 로 발행하고, reconcile 로 실행을 건다. idea 면 내부에서 generate-skeleton(LLM 저작→doc) 을 먼저 돈다.",
         params: {
           idea: { type: "string", description: "사용자 아이디어 — 내부 generate-skeleton(LLM 저작→workflow-doc)으로 발행. skeleton/skeletonPath 없을 때." },
-          skeleton: { type: "string", description: "workflow-doc@0.0.1 또는 skeleton JSON 문자열(stdin). idea 대신 직접 공급." },
-          skeletonPath: { type: "string", description: "skeleton JSON 파일 경로(인자)" },
+          skeleton: { type: "string", description: "workflow-doc@0.0.1 JSON 문자열(stdin). idea 대신 직접 공급." },
+          skeletonPath: { type: "string", description: "workflow-doc@0.0.1 JSON 파일 경로(인자)" },
           bin: { type: "string", description: "soksak-workflow 바이너리 경로(기본 PATH)" },
           model: { type: "string", description: "generate-skeleton 저작 모델(기본 프로필 기본값)." },
           refs: { type: "string", description: "references override 경로(기본=플러그인 번들 self-contained)." },

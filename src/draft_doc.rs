@@ -568,60 +568,31 @@ mod tests {
         assert_eq!(back.chunk_title.as_deref(), Some("약국 재고 SaaS"));
     }
 
-    /// [통합] 실측 fixture program(generate stage)을 ClaudeEmitHost(stub runner)로 돌린 이벤트 →
-    /// build → validate 가 정규형 인증까지 통과하는지. LLM·앱 없이 Rust Interp 만으로.
+    /// [통합] 실측 fixture doc(gen.pharmacy.doc.json)의 generate stage 를 doc_exec(stub agent)로 돌린
+    /// 이벤트 → build → validate 가 정규형 인증까지 통과하는지. LLM·앱 없이 결정적으로.
     ///
-    /// fixtures/gen.pharmacy.skeleton.json 의 program 은 **평탄 계약**(classify-late, glm-5.2 실측): generate 는
-    /// tree.requirements(평탄)를 CHUNK_REF 직속 item 으로 발행 + hunt/classify/audit 3 task, register_prompts 는 첫 item 에.
+    /// fixture 는 **평탄 계약**(classify-late): generate 는 tree.requirements(평탄)를 CHUNK_REF 직속 item 으로
+    /// 발행 + hunt/classify/audit 3 task, register_prompts 는 첫 item 에.
     #[test]
     fn build_and_validate_from_fixture_generate_events() {
-        use crate::emit_host::ClaudeEmitHost;
-        use crate::interp::{Interp, Val};
-        use std::cell::RefCell;
-        use std::collections::BTreeMap;
-        use std::rc::Rc;
-        let skeleton: Json =
-            serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
-        let program = skeleton.get("program").expect("program(완전 AST)");
-        // stub runner: GENERATOR 프롬프트 → 1그룹 2항목 트리 반환(구 program 계약 — groups). 다른 프롬프트는 빈 문자열.
-        let val_obj = |pairs: Vec<(&str, Val)>| -> Val {
-            let mut m = BTreeMap::new();
-            for (k, v) in pairs {
-                m.insert(k.to_string(), v);
-            }
-            Val::Obj(Rc::new(RefCell::new(m)))
+        let wdoc: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.doc.json")).unwrap();
+        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> {
+            Ok(json!({ "title": "테스트 덩어리", "titleOrigin": "agent", "requirements": [
+                { "title": "항목1", "description": "설명1", "origin": "user" },
+                { "title": "항목2", "description": "설명2", "origin": "agent" }
+            ] }))
         };
-        let val_arr = |vs: Vec<Val>| -> Val { Val::Arr(Rc::new(RefCell::new(vs))) };
-        let item = |t: &str, d: &str, o: &str| {
-            val_obj(vec![
-                ("title", Val::Str(t.into())),
-                ("description", Val::Str(d.into())),
-                ("origin", Val::Str(o.into())),
-            ])
-        };
-        let mut h = ClaudeEmitHost::new(move |p: &str, _o: &BTreeMap<String, Val>| {
-            if p.contains("GENERATOR") {
-                // 평탄: groups 아님 — requirements[] 직접 반환(신 GEN_SCHEMA).
-                Ok(val_obj(vec![
-                    ("title", Val::Str("테스트 덩어리".into())),
-                    ("titleOrigin", Val::Str("agent".into())),
-                    ("requirements", val_arr(vec![item("항목1", "설명1", "user"), item("항목2", "설명2", "agent")])),
-                ]))
-            } else {
-                Ok(Val::Str(String::new()))
-            }
-        });
         let args = json!({ "stage": "generate", "directive": "테스트 지시", "chunkRef": "chunk" });
-        Interp::new(&mut h).run(program, args).expect("generate interp 해석");
+        let (events, _result) = crate::doc_exec::run(&wdoc, "generate", &args, &mut agent).expect("doc generate");
 
-        let doc = build(&h.wh.events).expect("build");
-        // 평탄 program: item 2개(CHUNK_REF 직속, category 없음), hunt+classify+audit 3 task.
+        let doc = build(&events).expect("build");
+        // 평탄: item 2개(CHUNK_REF 직속, category 없음), hunt+classify+audit 3 task.
         assert_eq!(doc.requirements.len(), 2, "평탄 요건 2개(그룹 없이 CHUNK_REF 직속)");
         assert_eq!(doc.tasks.len(), 3, "hunt+classify+audit");
         // verify_contract: register_prompts 를 첫 item 에 얹음 → template/directive 채워짐. schema 는 register 또는 item inline 폴백.
         assert!(doc.verify_contract.schema.is_object(), "schema 채워짐(register 또는 item inline)");
         assert!(!doc.verify_contract.template.is_empty(), "verify 템플릿 등록됨(첫 item)");
-        assert!(!doc.verify_contract.directive.is_empty(), "directive 등록됨(첫 item)");
+        assert_eq!(doc.verify_contract.directive, "테스트 지시", "directive 등록됨(첫 item)");
         // validate 통과 — 평탄 인증(hunt=전 요건, classify=전 요건∪{hunt}, audit=전 요건∪{hunt,classify} 트리).
         assert_eq!(validate(&doc), Ok(()), "평탄 generate 산출 검증 통과");
     }

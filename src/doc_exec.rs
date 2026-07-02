@@ -770,59 +770,73 @@ mod tests {
         assert!(err.contains("stage") && err.contains("classify"), "{err}");
     }
 
-    /// [등가 증명] 같은 stub agent 산출에 대해 doc 경로(gen.pharmacy.doc.json)와 interp(AST) 경로
-    /// (gen.pharmacy.skeleton.json)가 **동일한 NodeEvent 시퀀스**와 **byte 동일한 gen 프롬프트**를 만든다 —
-    /// 표현 수단 교체(JS→doc)가 런타임 계약을 바꾸지 않음을 고정.
+    /// [계약 스냅샷] gen.pharmacy.doc.json — draft fixture 의 wire 계약 고정.
+    /// (M5e 이전엔 interp(AST) 경로와의 등가 증명이 이 계약을 잠갔다 — 레거시 제거 후에는 doc 경로 산출
+    /// 자체를 스냅샷으로 고정한다. 여기 단언이 깨지는 변경 = relay/kanban 과의 wire 계약 변경이다.)
     #[test]
-    fn fixture_doc_matches_interp_path_generate_and_skeleton() {
-        use crate::emit_host::ClaudeEmitHost;
-        use crate::interp::{Interp, Val};
-        use std::cell::RefCell;
-        use std::collections::BTreeMap;
-        use std::rc::Rc;
-
-        let skeleton: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.skeleton.json")).unwrap();
-        let program = skeleton.get("program").expect("program");
+    fn fixture_doc_wire_contract_snapshot() {
         let doc: Json = serde_json::from_str(include_str!("../fixtures/gen.pharmacy.doc.json")).unwrap();
         assert_eq!(validate(&doc), Ok(()), "fixture doc 은 스키마 검증 통과");
+        let values = resolved_values(&doc).unwrap();
 
+        // ── skeleton stage("") — chunk + generate task, 정확한 직렬화 라인(wire) 고정.
+        let mut no_agent = |_p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> { Err("no agent".into()) };
+        let em_args = json!({ "directive": "테스트 지시" });
+        let (skel, _) = run(&doc, "", &em_args, &mut no_agent).expect("doc skeleton");
+        let lines: Vec<String> = skel.iter().map(|e| serde_json::to_string(e).unwrap()).collect();
+        assert_eq!(
+            lines[0],
+            r#"{"ev":"add","id":"chunk","parent":null,"kind":"chunk","title":"구체화 덩어리","description":"테스트 지시","is_draft":true}"#,
+            "chunk wire"
+        );
+        assert_eq!(
+            lines[1],
+            r#"{"ev":"add","id":"gen","parent":"chunk","kind":"task","title":"요건 도출","description":"","stage":"generate"}"#,
+            "generate task wire"
+        );
+
+        // ── generate stage — stub 산출로 항목/task 발행 계약 고정.
         let stub_json = json!({ "title": "테스트 덩어리", "titleOrigin": "agent", "requirements": [
             { "title": "항목1", "description": "설명1", "origin": "user" },
             { "title": "항목2", "description": "설명2", "origin": "agent" }
         ] });
-
-        // ── interp(AST) 경로 — generate. 프롬프트 캡처 + 이벤트 수집.
-        let interp_prompt: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        let cap = interp_prompt.clone();
-        let stub_for_interp = stub_json.clone();
-        let mut h = ClaudeEmitHost::new(move |p: &str, _o: &BTreeMap<String, Val>| {
-            *cap.borrow_mut() = p.to_string();
-            Ok(crate::interp::json_to_val(&stub_for_interp))
-        });
-        let args = json!({ "stage": "generate", "directive": "테스트 지시", "chunkRef": "chunk" });
-        let interp_result = Interp::new(&mut h).run(program, args.clone()).expect("interp generate");
-        let interp_events = h.wh.events.clone();
-
-        // ── doc 경로 — 같은 stage/args/stub.
-        let doc_prompt: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
-        let cap2 = doc_prompt.clone();
-        let mut agent = move |p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> {
-            *cap2.borrow_mut() = p.to_string();
+        let mut prompt_cap = String::new();
+        let mut agent = |p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> {
+            prompt_cap = p.to_string();
             Ok(stub_json.clone())
         };
-        let (doc_events, doc_result) = run(&doc, "generate", &args, &mut agent).expect("doc generate");
-
-        assert_eq!(doc_events, interp_events, "generate NodeEvent 시퀀스 동일(항목 2 + task 3)");
-        assert_eq!(*doc_prompt.borrow(), *interp_prompt.borrow(), "gen 프롬프트 byte 동일(COMMON+역할+directive)");
-        assert_eq!(doc_result, crate::interp::val_to_json(&interp_result), "return 값 동일");
-
-        // ── skeleton stage("") 도 동일 — 발행 이벤트(chunk + generate task).
-        let mut h2 = ClaudeEmitHost::new(|_p: &str, _o: &BTreeMap<String, Val>| Ok(Val::Str(String::new())));
-        let em_args = json!({ "directive": "테스트 지시" });
-        Interp::new(&mut h2).run(program, em_args.clone()).expect("interp skeleton");
-        let mut no_agent = |_p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> { Err("no agent".into()) };
-        let (doc_skel, _) = run(&doc, "", &em_args, &mut no_agent).expect("doc skeleton");
-        assert_eq!(doc_skel, h2.wh.events, "skeleton 발행 이벤트 동일(chunk+gen task)");
+        let args = json!({ "stage": "generate", "directive": "테스트 지시", "chunkRef": "chunk" });
+        let (events, result) = run(&doc, "generate", &args, &mut agent).expect("doc generate");
+        // gen 프롬프트 = 렌더된 COMMON + 역할 본문 + directive(정확 조성 — 빈 마커 잔존 0).
+        let common = values.get("COMMON").and_then(|v| v.as_str()).unwrap();
+        assert!(prompt_cap.starts_with(common), "genPrompt 는 COMMON 으로 시작(렌더)");
+        assert!(prompt_cap.contains("Directive: \"테스트 지시\""), "directive 렌더");
+        assert!(!prompt_cap.contains("{{"), "미해석 마커 잔존 0");
+        // 이벤트: 항목 2 + hunt/classify/audit task 3.
+        assert_eq!(events.len(), 5);
+        let NodeEvent::Add { id, kind, parent, badge, schema, prompt_role, vars, var_refs, register_prompts, .. } = &events[0];
+        assert_eq!((id.as_str(), kind.as_str(), parent.as_deref()), ("i0", "item", Some("chunk")));
+        assert_eq!(badge.as_deref(), Some("검수전"));
+        assert_eq!(schema.as_ref(), values.get("VERIFY_SCHEMA"), "schema = 값 참조(전역 1행)");
+        assert_eq!(prompt_role.as_deref(), Some("verify"));
+        assert_eq!(vars.as_ref().unwrap(), &json!({ "description": "설명1", "title": "항목1" }), "vars 는 작은 값만");
+        assert_eq!(var_refs.as_ref().unwrap(), &json!({ "directive": "directive" }));
+        let reg = register_prompts.as_ref().expect("첫 항목에 registerPrompts");
+        assert_eq!(reg.get("verify"), values.get("VERIFY_TMPL"), "등록 템플릿 = 조성된 VERIFY_TMPL(COMMON 단일 원천)");
+        assert_eq!(reg.get("directive"), Some(&json!("테스트 지시")));
+        let NodeEvent::Add { register_prompts, .. } = &events[1];
+        assert!(register_prompts.is_none(), "registerPrompts 는 run 당 1회");
+        let expected_tasks = [
+            ("hunt", vec!["i0", "i1"]),
+            ("classify", vec!["i0", "i1", "hunt"]),
+            ("audit", vec!["i0", "i1", "hunt", "classify"]),
+        ];
+        for (idx, (tid, blocked)) in expected_tasks.iter().enumerate() {
+            let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &events[2 + idx];
+            assert_eq!((id.as_str(), kind.as_str(), stage.as_deref()), (*tid, "task", Some(*tid)));
+            assert_eq!(blocked_by, &blocked.iter().map(|s| s.to_string()).collect::<Vec<_>>(), "{tid} blockedBy 사슬");
+        }
+        assert_eq!(result, json!({ "chunkTitle": "테스트 덩어리", "titleOrigin": "agent" }), "return 계약");
     }
 
     /// [번들 정본] workflows/research.doc.json — research/plan stage 가 계약대로 실행되는지(stub agent).

@@ -1,9 +1,10 @@
-//! soksak-workflow — 워크플로 CLI. **workflow-doc@0.0.1**(언어중립 JSON 문서, doc_exec)을 stage 별로 실행해
-//! (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. 레거시 skeleton
-//! (추출기 ESTree AST, interp)도 같은 진입점에서 하위호환으로 해석한다. agent 는 host(claude -p 인증 프로필).
-//! 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을 모름 — 문서/AST 를 실행할 뿐.
+//! soksak-workflow — 워크플로 CLI. **workflow-doc@0.0.1**(언어중립 JSON 문서, doc_exec) 단일 경로 — stage 별로
+//! 실행해 (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. agent 는
+//! claude -p. 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을 모름 —
+//! 문서를 실행할 뿐. 레거시 skeleton(ESTree)/interp 경로는 backup/legacy-interp/ 에 보존(M5e).
 //!
-//!   soksak-workflow <doc.json|skeleton.json|-> --emit [--arg K=V ...] [--lang ko]  # 노드 DAG 발행(stdout JSON line, LLM 미호출)
+//!   soksak-workflow <doc.json|-> --emit [--args-json {...}] [--lang ko]     # 노드 DAG 발행(stdout JSON line, LLM 미호출)
+//!   soksak-workflow --workflow <name> --emit [--args-json {...}]            # 번들 정본(workflows/<name>.doc.json) 발행
 //!   soksak-workflow exec-one  [--lang ko] [--model m] [--allow-tools "..."] # stdin {prompt, schema?} 한 노드 실행 → {oxf, result} (스케줄러가 ready 노드에)
 //!   soksak-workflow exec-stage [--lang ko] [--model m]                      # stdin {skeleton, stage, args} stage 실행 → 자식 {ev:add} + {ev:result}
 //!   soksak-workflow synth --idea "..."                                      # ③파생 도메인 지시어만
@@ -14,12 +15,10 @@ use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
 use soksak_plugin::generate_skeleton::{build_system_prompt, build_user_prompt};
-use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost};
-use soksak_plugin::interp::{val_to_json, Host, Interp, Val};
+use soksak_plugin::host::build_prompt_with_schema;
 use soksak_plugin::lang::Language;
 use soksak_plugin::provider::{run_agent, run_agent_text, AgentRequest};
-use soksak_plugin::emit_host::{ClaudeEmitHost, EmitHost, NodeEvent};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
 
@@ -55,7 +54,8 @@ fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
-        eprintln!("  soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]                                  # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)");
+        eprintln!("  soksak-workflow <doc.json|-> --emit [--args-json {{...}}] [--lang ko]                                  # workflow-doc 발행(stdout JSON line, LLM 미호출)");
+        eprintln!("  soksak-workflow --workflow <name> --emit [--args-json {{...}}] [--lang ko]                             # 번들 정본(workflows/<name>.doc.json) 발행");
         eprintln!("  soksak-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → workflow-doc(LLM 저작·검증) JSON stdout");
         eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
         eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
@@ -83,14 +83,14 @@ fn real_main() -> Result<(), String> {
     }
 
     // exec-one — 단일 노드 실행(규칙 C). stdin {prompt, schema?, model?} → claude → {oxf, result}.
-    // 발행(interp)과 분리된 stateless 실행기. 코어 스케줄러가 칸반 ready 노드 하나를 이 경로로 실행한다.
+    // 발행과 분리된 stateless 실행기. 코어 스케줄러가 칸반 ready 노드 하나를 이 경로로 실행한다.
     if argv[0] == "exec-one" {
         return run_exec_one(&argv);
     }
 
-    // exec-stage — stage 작업 실행(모델 B 동적 발행). stdin {skeleton:{program}, stage, args:{directive, chunkRef}}
-    // → ClaudeEmitHost 로 해석(opts.publish 없으면 claude, 있으면 자식 노드 발행) → 자식 NodeEvent JSON line
-    // stdout + 최종 {ev:result}. main.js reconcile 가 kind=task 노드를 이 경로로 실행해 그룹/항목 동적 발행.
+    // exec-stage — stage 작업 실행(동적 발행). stdin {workflow|skeleton(doc), stage, args:{directive, chunkRef, ledger…}}
+    // → doc_exec 로 stage 실행(agent=claude, publish=NodeEvent) → 자식 {ev:add} JSON line + 최종 {ev:result}
+    // (generate 는 DraftDoc 1문서). main.js reconcile 가 kind=task 노드를 이 경로로 실행해 항목/fact 동적 발행.
     if argv[0] == "exec-stage" {
         return run_exec_stage(&argv);
     }
@@ -113,7 +113,7 @@ fn real_main() -> Result<(), String> {
     let mut args: Map<String, Value> = Map::new();
     let mut args_override: Option<Value> = None; // --args-json: cc 계약대로 args 를 verbatim(임의 JSON)
     let mut lang: Option<Language> = None; // --lang: 출력 언어 계약
-    let mut emit = false; // --emit: 노드 발행만(EmitHost) + stdout JSON line. LLM 미호출.
+    let mut emit = false; // --emit: 노드 발행만 + stdout JSON line. LLM 미호출.
     let mut i = arg_start;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -139,7 +139,7 @@ fn real_main() -> Result<(), String> {
         i += 1;
     }
 
-    // skeleton 입력: "-" 면 stdin(플러그인이 추출기 출력을 파이프), 그 외 파일.
+    // doc 입력: "-" 면 stdin(플러그인이 저작 산출을 파이프), 그 외 파일.
     let raw = if path == "-" {
         let mut buf = Vec::new();
         std::io::Read::read_to_end(&mut std::io::stdin(), &mut buf).map_err(|e| format!("read stdin: {e}"))?;
@@ -147,73 +147,35 @@ fn real_main() -> Result<(), String> {
     } else {
         std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?
     };
-    let skeleton: Value = serde_json::from_slice(&raw).map_err(|e| format!("parse skeleton: {e}"))?;
-    // workflow-doc@0.0.1(언어중립 JSON 문서) — doc_exec 경로. skeleton(ESTree AST)은 종래 interp 경로(하위호환).
-    if soksak_plugin::doc_exec::is_doc(&skeleton) {
-        if !emit {
-            return Err("workflow-doc 직접 실행 경로 없음(실행=스케줄러) — 발행은 --emit, stage 실행은 exec-stage".to_string());
-        }
-        let name = skeleton.pointer("/meta/name").and_then(|n| n.as_str()).unwrap_or("workflow");
-        if let Some(l) = &lang {
-            eprintln!("[soksak] 출력 언어: {} ({})", l.name, l.code);
-        }
-        eprintln!("[soksak] {name} — 발행 모드(workflow-doc, 노드 DAG stdout, LLM 미호출)");
-        // args: --arg/--args-json 조립 재사용 — doc 경로는 아래 program 조립 없이 바로 실행.
-        let mut args_json2 = args_override.take().unwrap_or(Value::Object(std::mem::take(&mut args)));
-        if let (Some(l), Value::Object(m)) = (&lang, &mut args_json2) {
-            m.insert("lang".to_string(), Value::String(l.code.clone()));
-        }
-        // skeleton stage("") — validate 가 agent op 를 금지하므로(발행=LLM 미호출 계약) 러너는 도달 불가 방어.
-        let mut no_agent = |_p: &str, _s: Option<&Value>, _l: &str| -> Result<Value, String> {
-            Err("발행(--emit)은 agent 를 호출하지 않는다".to_string())
-        };
-        let (events, _result) = soksak_plugin::doc_exec::run(&skeleton, "", &args_json2, &mut no_agent)?;
-        for ev in &events {
-            if let Ok(s) = serde_json::to_string(ev) {
-                println!("{s}");
-            }
-        }
-        return Ok(());
+    let doc: Value = serde_json::from_slice(&raw).map_err(|e| format!("parse workflow-doc: {e}"))?;
+    // doc 단일 경로(M5e) — 레거시 skeleton(ESTree)/interp 는 backup/legacy-interp/ 로 이동, 비-doc 입력은 명시 거부.
+    if !soksak_plugin::doc_exec::is_doc(&doc) {
+        return Err("workflow-doc@0.0.1 필요(spec 필드) — 레거시 skeleton(ESTree AST) 경로는 제거됨(backup/legacy-interp/)".to_string());
     }
-    let program = skeleton
-        .get("program")
-        .cloned()
-        .ok_or("skeleton 에 program(완전 AST) 없음 — 추출기 로 재추출 필요")?;
-    let name = skeleton.get("meta").and_then(|m| m.get("name")).and_then(|n| n.as_str()).unwrap_or("workflow").to_string();
-
-    // ③파생: IDEA 에서 도메인 지시어 합성 → args.directives 주입(워크플로가 args.directives 로 사용).
-    if let Some(Value::String(idea)) = args.get("IDEA").cloned() {
-        let directives = synth_directives(&idea, &builtin_library());
-        let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
-        eprintln!("[soksak] ③파생: 도메인 {:?} → 지시어 {}개 → args.directives", matched, directives.len());
-        args.insert("directives".to_string(), serde_json::to_value(&directives).unwrap_or_else(|_| json!([])));
+    if !emit {
+        return Err("workflow-doc 직접 실행 경로 없음(실행=스케줄러) — 발행은 --emit, stage 실행은 exec-stage".to_string());
     }
-    // args = --args-json(verbatim, cc 계약) 우선, 없으면 --arg 로 만든 객체.
-    let mut args_json = args_override.unwrap_or(Value::Object(args));
-    // args.lang 주입 — 워크플로가 args.lang 으로 읽을 수 있게(출력 언어 계약과 별개 채널).
-    if let (Some(l), Value::Object(m)) = (&lang, &mut args_json) {
-        m.insert("lang".to_string(), Value::String(l.code.clone()));
-    }
+    let name = doc.pointer("/meta/name").and_then(|n| n.as_str()).unwrap_or("workflow");
     if let Some(l) = &lang {
         eprintln!("[soksak] 출력 언어: {} ({})", l.name, l.code);
     }
-
-    // --emit: 발행만. EmitHost 가 program 을 해석하며 노드 DAG 를 stdout JSON line 으로 emit.
-    // 규칙 C — agent 는 트리거를 일으키지 않는다. LLM 미호출(토큰 불필요). 실행은 스케줄러+exec-one.
-    if emit {
-        eprintln!("[soksak] {name} — 발행 모드(노드 DAG stdout, LLM 미호출)");
-        let mut wh = EmitHost::new().with_emit(Box::new(|ev: &NodeEvent| {
-            if let Ok(s) = serde_json::to_string(ev) {
-                println!("{s}");
-            }
-        }));
-        Interp::new(&mut wh).run(&program, args_json).map_err(|e| format!("interpret: {e}"))?;
-        return Ok(());
+    eprintln!("[soksak] {name} — 발행 모드(workflow-doc, 노드 DAG stdout, LLM 미호출)");
+    // args = --args-json(verbatim) 우선, 없으면 --arg 조립. lang 주입.
+    let mut args_json = args_override.take().unwrap_or(Value::Object(std::mem::take(&mut args)));
+    if let (Some(l), Value::Object(m)) = (&lang, &mut args_json) {
+        m.insert("lang".to_string(), Value::String(l.code.clone()));
     }
-
-    // 직접-실행/dry-run 경로는 제거됨 — 실행은 코어 스케줄러(reconcile → exec-one/exec-stage).
-    // skeleton 경로는 발행(--emit) 전용. lang/args 는 발행 시 program 에 주입된다.
-    Err(format!("{name}: skeleton 직접 실행 경로 제거됨(실행=스케줄러). 발행은 --emit, 단위 실행은 exec-one/exec-stage"))
+    // skeleton stage("") — validate 가 agent op 를 금지하므로(발행=LLM 미호출 계약) 러너는 도달 불가 방어.
+    let mut no_agent = |_p: &str, _s: Option<&Value>, _l: &str| -> Result<Value, String> {
+        Err("발행(--emit)은 agent 를 호출하지 않는다".to_string())
+    };
+    let (events, _result) = soksak_plugin::doc_exec::run(&doc, "", &args_json, &mut no_agent)?;
+    for ev in &events {
+        if let Ok(s) = serde_json::to_string(ev) {
+            println!("{s}");
+        }
+    }
+    Ok(())
 }
 
 /// run_exec_one — exec-one 서브커맨드. stdin {prompt, schema?, model?} 한 노드 → claude → {oxf, result}.
@@ -309,72 +271,8 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     if let Some(doc) = input.get("skeleton").filter(|s| soksak_plugin::doc_exec::is_doc(s)).cloned() {
         return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
     }
-    // skeleton.program(완전 AST) 또는 program 직접 — 종래 interp 경로(하위호환).
-    let program = input
-        .get("skeleton")
-        .and_then(|s| s.get("program"))
-        .or_else(|| input.get("program"))
-        .cloned()
-        .ok_or("exec-stage 입력에 skeleton.program(완전 AST) 필요")?;
-    // args = input.args(객체) + stage + lang 주입.
-    let mut args_obj = match input.get("args") {
-        Some(Value::Object(m)) => m.clone(),
-        _ => Map::new(),
-    };
-    args_obj.insert("stage".to_string(), Value::String(stage.clone()));
-    if let Some(l) = &lang {
-        args_obj.insert("lang".to_string(), Value::String(l.code.clone()));
-    }
-    let args_json = Value::Object(args_obj);
-    let model = model_override
-        .or_else(|| input.get("model").and_then(|m| m.as_str()).map(String::from))
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
-
-    let (env, profile) = auth_env()?;
-    eprintln!("[soksak] exec-stage stage={stage} (model={model}, 프로필={profile})");
-    // claude 러너 = ClaudeHost(비-publish agent 만 탄다). publish agent 는 ClaudeEmitHost.wh 가 발행.
-    let mut ch = ClaudeHost { env, allow_tools, default_model: model, lang };
-    let run = move |p: &str, o: &BTreeMap<String, Val>| ch.agent(p, o);
-    // generate stage 는 산출을 **id 기반 정규형 DraftDoc 1문서**로 배치 출력(스트림 대신) — build+validate 로 인증.
-    // hunt/audit·비-draft·기타 stage 는 **기존 줄단위 스트림 유지**(자식 {ev:add} + {ev:result}) — 하위호환.
-    let is_generate = stage == "generate";
-    let mut h = if is_generate {
-        // 스트림 콜백 미설치 — 이벤트를 wh.events 버퍼에만 수집(끝에 DraftDoc 로 접어 배치 출력).
-        ClaudeEmitHost::new(run)
-    } else {
-        ClaudeEmitHost::new(run).with_emit(Box::new(|ev: &NodeEvent| {
-            if let Ok(s) = serde_json::to_string(ev) {
-                println!("{s}");
-            }
-        }))
-    };
-    let result = Interp::new(&mut h).run(&program, args_json).map_err(|e| format!("exec-stage interpret: {e}"))?;
-    if is_generate {
-        // 수집 이벤트 → DraftDoc(정규형) → validate(위반 시 stderr+exit). 통과 시 DraftDoc JSON 1문서 stdout.
-        let mut doc = soksak_plugin::draft_doc::build(&h.wh.events)?;
-        // 워크플로 return {chunkTitle} → 덩어리 title 갱신(relay 가 chunk_ref 노드에 적용). 스트림 result 대체.
-        if let Value::Object(m) = val_to_json(&result) {
-            if let Some(Value::String(t)) = m.get("chunkTitle") {
-                if !t.is_empty() {
-                    doc.chunk_title = Some(t.clone());
-                }
-            }
-        }
-        if let Err(violations) = soksak_plugin::draft_doc::validate(&doc) {
-            eprintln!("[soksak] generate DraftDoc 검증 실패(발행 거부):");
-            for x in &violations {
-                eprintln!("  - {x}");
-            }
-            return Err(format!("generate DraftDoc 검증 실패({}건) — 발행 거부", violations.len()));
-        }
-        // DraftDoc 1문서 — main.js relay 가 파싱(verify_contract prompt.put + requirements/tasks node.add; 평탄 — 그룹 없음).
-        println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
-    } else {
-        // 최종 워크플로 return — main.js 가 덩어리 title 갱신 등에 쓴다(ev:result 로 자식 add 와 구분).
-        let out = json!({ "ev": "result", "value": val_to_json(&result) });
-        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
-    }
-    Ok(())
+    // doc 단일 경로(M5e) — 레거시 skeleton(ESTree)/interp 는 backup/legacy-interp/ 로 이동, 비-doc 입력은 명시 거부.
+    Err("exec-stage 입력에 workflow(번들 이름) 또는 skeleton(workflow-doc@0.0.1) 필요 — 레거시 program(ESTree AST) 경로는 제거됨(backup/legacy-interp/)".to_string())
 }
 
 /// run_exec_stage_doc — workflow-doc@0.0.1 stage 실행(exec-stage 의 doc 분기). interp 경로와 출력 계약 동일:

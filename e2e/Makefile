@@ -130,12 +130,11 @@ exec-plan: build
 e2e-full: e2e exec-stage exec-hunt exec-classify exec-audit exec-research exec-plan
 	@echo "[e2e-full] 전 체인 통과 — 저작→발행→generate→hunt→classify→audit→research→plan"
 
-# emit-replay — 커밋 fixture 발행(결정적, LLM 0): doc(workflow-doc@0.0.1) + skeleton(레거시 AST 하위호환) 둘 다.
+# emit-replay — 커밋 fixture 발행(결정적, LLM 0): doc(workflow-doc@0.0.1) + 번들 정본(research).
 emit-replay: build
 	@test -s $(SOKSAK)/fixtures/gen.$(SLUG).doc.json || { echo "fixtures/gen.$(SLUG).doc.json 없음"; exit 1; }
 	$(BIN) $(SOKSAK)/fixtures/gen.$(SLUG).doc.json --emit --lang $(OUT_LANG)
-	@test -s $(SOKSAK)/fixtures/gen.$(SLUG).skeleton.json || { echo "fixtures/gen.$(SLUG).skeleton.json 없음 — make e2e 후 make commit-fixture"; exit 1; }
-	$(BIN) $(SOKSAK)/fixtures/gen.$(SLUG).skeleton.json --emit --lang $(OUT_LANG)
+	$(BIN) --workflow research --emit --lang $(OUT_LANG) --args-json "{\"chunkRef\":\"chunk\",\"directive\":\"replay\"}"
 
 # commit-fixture — make e2e 산출을 결정적 replay fixture 로 승격(수동 검토 후 git add).
 commit-fixture:
@@ -145,17 +144,16 @@ commit-fixture:
 
 check:
 	@test -x $(BIN) && echo "soksak-workflow: OK" || echo "soksak-workflow: make build 필요"
-	@test -f $(SOKSAK)/tools/parse-cli.mjs && echo "번들 파서: OK" || echo "번들 파서: 없음 (tools/parse-cli.mjs)"
-	@test -f $(SOKSAK)/tools/vendor/acorn.mjs && echo "vendored acorn: OK" || echo "vendored acorn: 없음"
+	@test -f $(SOKSAK)/workflows/research.doc.json && echo "번들 정본(research): OK" || echo "번들 정본: 없음 (workflows/research.doc.json)"
 	@test -f $(REFS)/draft-skill.md && echo "draft-skill.md(번들): OK" || echo "draft-skill.md: 없음 ($(REFS))"
 	@command -v node >/dev/null && echo "node: OK" || echo "node: 없음"
-	@echo "self-contained: 추출기 런타임 불요. 인증 e2e = run-e2e.zsh"
+	@echo "self-contained: 외부 런타임 불요(doc 단일 경로). 인증 e2e = run-e2e.zsh"
 
 clean:
 	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build
-	@test -s $(OUT)/skeleton.json && test -s $(OUT)/stage.jsonl || { echo "run make exec-stage first"; exit 1; }
-	@node $(SOKSAK)/tools/classify-input.mjs $(OUT)/skeleton.json $(OUT)/stage.jsonl $(IDEA_FILE) | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/classify.jsonl
+	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "run make exec-stage first"; exit 1; }
+	@node $(SOKSAK)/tools/classify-input.mjs $(OUT)/doc.json $(OUT)/stage.jsonl $(IDEA_FILE) | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/classify.jsonl
 	@node $(SOKSAK)/tools/verify-classify.mjs $(OUT)/classify.jsonl $(OUT)/stage.jsonl

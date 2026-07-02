@@ -1,18 +1,16 @@
-//! soksak-plugin — 워크플로 골격(추출기 추출) 실행 런타임.
-//! 골격을 읽어 steps 를 실행하고, agent 는 claude -p(인증 프로필 GLM) 로 위임한다.
-//! 레거시(server2 upstream:// 계약) 포팅 아님 — 골격을 단일 진실로 해석·실행한다.
+//! soksak-plugin — workflow-doc@0.0.1(언어중립 JSON 워크플로 문서) 실행 런타임.
+//! 문서를 stage 별로 실행하고(doc_exec), agent 는 claude -p 로 위임한다(provider).
+//! 발행 wire = NodeEvent(emit_host), generate 산출 = DraftDoc(draft_doc, validator 인증).
+//! 레거시 interp(ESTree)/skeleton 경로는 backup/legacy-interp/ 에 보존(M5e).
 
 pub mod derive_directive;
 pub mod directive_loop;
 pub mod doc_exec;
 pub mod draft_doc;
 pub mod domain_lib;
-pub mod exec;
 pub mod exec_one;
 pub mod generate_skeleton;
 pub mod host;
-pub mod interp;
 pub mod lang;
 pub mod provider;
-pub mod skeleton;
 pub mod emit_host;
