@@ -456,27 +456,42 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         schema: None,
         effort: "xhigh".into(),
     };
-    let raw = run_agent_text(&req, &env)?;
-    if let Some(p) = &gen_out {
-        std::fs::write(p, &raw).map_err(|e| format!("저작 원문 쓰기 {p}: {e}"))?;
-        eprintln!("[soksak] 저작 원문 보존 → {p}");
-    }
-    // 저작 게이트 ① JSON 파싱(펜스·앞뒤 prose 방어 — parse_json_lenient) ② workflow-doc validate(fail-loud).
-    let doc = soksak_plugin::provider::parse_json_lenient(&raw)
-        .map_err(|e| format!("generate-skeleton: 저작 산출이 JSON 아님 — {e}"))?;
-    if !soksak_plugin::doc_exec::is_doc(&doc) {
-        return Err(format!(
-            "generate-skeleton: 저작 산출이 workflow-doc@0.0.1 아님(spec={:?})",
-            doc.get("spec").and_then(|s| s.as_str()).unwrap_or("")
-        ));
-    }
-    if let Err(violations) = soksak_plugin::doc_exec::validate(&doc) {
-        eprintln!("[soksak] 저작 doc 검증 실패:");
-        for x in &violations {
-            eprintln!("  - {x}");
+    // 저작 = LLM 비결정 실패(출력 잘림·펜스 이탈·검증 위반)가 간헐적으로 난다 — 총 2회 시도(재저작 1회).
+    // 재시도는 기준 약화가 아니다: 각 시도는 동일 게이트(파싱+validate)를 통과해야 하고 최종 실패는 loud.
+    let mut last_err = String::new();
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            eprintln!("[soksak] generate-skeleton 재저작 시도 {attempt}/2 — 직전: {last_err}");
         }
-        return Err(format!("generate-skeleton: 저작 doc 검증 실패({}건)", violations.len()));
+        let raw = run_agent_text(&req, &env)?;
+        if let Some(p) = &gen_out {
+            std::fs::write(p, &raw).map_err(|e| format!("저작 원문 쓰기 {p}: {e}"))?;
+            eprintln!("[soksak] 저작 원문 보존 → {p}");
+        }
+        // 저작 게이트 ① JSON 파싱(펜스·앞뒤 prose 방어 — parse_json_lenient) ② workflow-doc validate(fail-loud).
+        // 실패 진단에 길이+tail 포함 — head 만으론 출력 잘림(균형 괄호 불성립)을 구분 못 한다.
+        let doc = match soksak_plugin::provider::parse_json_lenient(&raw) {
+            Ok(d) => d,
+            Err(e) => {
+                let tail: String = raw.chars().rev().take(120).collect::<Vec<_>>().into_iter().rev().collect();
+                last_err = format!("저작 산출이 JSON 아님({}자) — {e} … tail={:?}", raw.chars().count(), tail);
+                continue;
+            }
+        };
+        if !soksak_plugin::doc_exec::is_doc(&doc) {
+            last_err = format!("저작 산출이 workflow-doc@0.0.1 아님(spec={:?})", doc.get("spec").and_then(|s| s.as_str()).unwrap_or(""));
+            continue;
+        }
+        if let Err(violations) = soksak_plugin::doc_exec::validate(&doc) {
+            eprintln!("[soksak] 저작 doc 검증 실패:");
+            for x in &violations {
+                eprintln!("  - {x}");
+            }
+            last_err = format!("저작 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
+            continue;
+        }
+        println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
+        return Ok(());
     }
-    println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
-    Ok(())
+    Err(format!("generate-skeleton: 저작 2회 실패 — {last_err}"))
 }
