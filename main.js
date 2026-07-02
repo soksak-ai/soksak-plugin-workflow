@@ -640,6 +640,19 @@ export async function issuerizeTick(deps, chunkId) {
 
 // ── app 연결(런타임) ──
 
+/** resolveDirective — directive 단일 진실(PRINCIPLES.md §1) 해석(순수, 테스트 대상).
+ *  우선순위: ① 명시 directive 파라미터(사용자 직접 지정 = 최상위 정본)
+ *           ② workflow-doc 의 정련본(args.directive.default — 저작 게이트를 통과한 정본)
+ *           ③ raw 폴백(idea — 비-doc skeleton 하위호환).
+ *  칸반 chunk description(--emit 이 doc default 로 발행)과 task body args.directive 가 같은 문자열이
+ *  되도록 — 표시 표면과 검증 기준의 provenance 를 일치시킨다(의미가 바뀌면 결과가 바뀐다). */
+export function resolveDirective(explicit, doc, raw) {
+  if (typeof explicit === "string" && explicit.trim()) return explicit;
+  const refined = doc && doc.spec === "workflow-doc@0.0.1" ? doc.args?.directive?.default : undefined;
+  if (typeof refined === "string" && refined.trim()) return refined;
+  return raw;
+}
+
 /** genSkeletonArgs — generate-skeleton CLI 인자 조립(순수, 테스트 대상). idea 필수, 나머지 선택.
  *  아이디어 → gen.js(LLM 저작) → skeleton. --refs 는 references override(기본=플러그인 번들), --gen-out 은 gen.js 보존. */
 export function genSkeletonArgs({ idea, model, refs, genOut, lang } = {}) {
@@ -817,13 +830,15 @@ export default {
               app.bus?.emit?.("workflow.error", { message: `secrets.set: ${String(e)}` });
             }
           }
-          runtime.directive = directive || idea; // stage 작업 노드 directive: 명시 directive 우선, 없으면 idea
-          // idea 만 주어지면(skeleton/skeletonPath 없음) → generate-skeleton 으로 gen.js→skeleton 저작해 발행에 흘림.
+          // idea 만 주어지면(skeleton/skeletonPath 없음) → generate-skeleton 으로 workflow-doc 저작해 발행에 흘림.
           if (idea && !skeleton && !skeletonPath) {
             skeleton = await genSkeleton(app, runtime.bin, await execOpts(app, runtime), { idea, model, refs });
           }
           // skeleton 캡처(인라인 문자열) — stage 작업 노드 body 에 임베드해 reconcile 이 exec-stage 로 재실행.
           try { runtime.skeleton = skeleton ? JSON.parse(skeleton) : undefined; } catch { runtime.skeleton = undefined; }
+          // directive 단일 진실(PRINCIPLES §1): 명시 directive > doc 정련본(저작 게이트 통과 정본) > idea raw.
+          // --emit 의 chunk description(doc default)과 여기서 임베드하는 검증 기준이 같은 문자열이 된다.
+          runtime.directive = resolveDirective(directive, runtime.skeleton, idea);
           const input = skeletonPath || "-";
           const emitCmd = buildSpawnCmd(runtime.bin, [input, "--emit", "--lang", "ko"]);
           const handle = await app.process.spawn(emitCmd.cmd, emitCmd.args, {}); // 발행은 LLM 미호출 → env 불필요

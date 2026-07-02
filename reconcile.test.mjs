@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick, resolveDirective } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -1183,4 +1183,17 @@ test("issuerizeTick — 이미 승격된 덩어리(계보 issue 존재)는 멱�
   assert.equal(r.ok, false);
   assert.match(r.error, /이미 이슈라이즈/);
   assert.equal(deps.calls.add.length, 0);
+});
+
+// ── M5a directive 단일 진실 (PRINCIPLES §1) ──
+
+test("resolveDirective — 우선순위: 명시 > doc 정련본 > raw 폴백", () => {
+  const doc = { spec: "workflow-doc@0.0.1", args: { directive: { default: "정련본" } } };
+  assert.equal(resolveDirective("명시", doc, "raw"), "명시", "① 사용자 직접 지정이 최상위 정본");
+  assert.equal(resolveDirective(undefined, doc, "raw"), "정련본", "② 저작 게이트 통과 정련본");
+  assert.equal(resolveDirective("", doc, "raw"), "정련본", "빈 명시값은 미지정 취급");
+  assert.equal(resolveDirective(undefined, { program: {} }, "raw"), "raw", "③ 비-doc skeleton 은 raw 폴백");
+  assert.equal(resolveDirective(undefined, undefined, "raw"), "raw", "doc 없음 → raw");
+  const emptyDefault = { spec: "workflow-doc@0.0.1", args: { directive: { default: "" } } };
+  assert.equal(resolveDirective(undefined, emptyDefault, "raw"), "raw", "빈 정련본은 폴백(빈 검증 기준 금지)");
 });
