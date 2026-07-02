@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -1084,4 +1084,103 @@ test("reconcileTick — classify/audit 원장 materialize 실패는 실행 전 �
   assert.equal(r.ok, false);
   assert.match(r.error, /원장 materialize 실패\(audit\)/);
   assert.equal(deps.calls.stage.length, 0, "원장 없이 감사(f 집계 불가) 실행 금지");
+});
+
+// ── M4 research/plan/이슈라이즈 — isDone badge 일반화, fact/plan 원장, issuerizeTick 게이트 ──
+
+test("isDone — badge 보유 노드는 kind 무관 badge 로 판정(research fact 가 같은 검증 파이프)", () => {
+  assert.equal(isDone({ kind: "fact", badge: "o", status: "todo" }), true, "fact 검증 완료=done");
+  assert.equal(isDone({ kind: "fact", badge: "검수전", status: "todo" }), false, "미검증 fact 는 not-done");
+  assert.equal(isDone({ kind: "chunk", badge: "o", status: "todo" }), true, "인증 덩어리(M2)도 badge 축");
+  assert.equal(isDone({ kind: "task", status: "done" }), true, "badge 없는 task 는 status 축(종전)");
+});
+
+test("buildLedger — kind 파라미터로 fact 원장 분리(draft 요건 원장과 불혼합)", () => {
+  const nodes = [
+    { id: "i1", kind: "item", parentId: "chunk", title: "요건", badge: "o" },
+    { id: "f1", kind: "fact", parentId: "chunk", title: "프레임워크 확정", badge: "검수전", category: "framework" },
+  ];
+  assert.deepEqual(buildLedger(nodes, "chunk").map((e) => e.id), ["i1"], "기본=item(draft 원장)");
+  assert.deepEqual(buildLedger(nodes, "chunk", "fact").map((e) => e.id), ["f1"], "fact 원장 분리");
+});
+
+test("reconcileTick — plan stage 는 요건 원장(ledger)+기초지식 원장(facts) 둘 다 주입", async () => {
+  const nodes = [{ id: "plan", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"stage":"plan"}' }];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [{ id: "i0", title: "요건", badge: "o" }];
+  deps.materializeFacts = async () => [{ id: "f0", title: "프레임워크", badge: "o" }];
+  await reconcileTick(deps);
+  const sent = JSON.parse(deps.calls.stage[0]);
+  assert.deepEqual(sent.args.ledger.map((e) => e.id), ["i0"]);
+  assert.deepEqual(sent.args.facts.map((e) => e.id), ["f0"]);
+});
+
+/** issuerize 테스트 하니스 — 인증·research·plan 완료 상태의 덩어리. */
+function issuerizeNodes() {
+  return [
+    { id: "chunk", kind: "chunk", parentId: null, badge: "o", status: "todo" },
+    { id: "i0", kind: "item", parentId: "chunk", title: "요건", badge: "o" },
+    { id: "f0", kind: "fact", parentId: "chunk", title: "프레임워크: X 채택", badge: "o" },
+    { id: "f1", kind: "fact", parentId: "chunk", title: "방법론: 근거 부족", badge: "x" },
+    { id: "u0", kind: "plan-unit", parentId: "chunk", title: "재고 차감 구현", description: "PSEUDO:\n차감(order)…" },
+    { id: "u1", kind: "plan-unit", parentId: "chunk", title: "동기화 구현", description: "PSEUDO:\nsync()…" },
+  ];
+}
+function issuerizeDeps(nodes) {
+  const calls = { add: [] };
+  return {
+    calls,
+    listNodes: async () => ({ ok: true, nodes }),
+    addNode: async (params) => {
+      calls.add.push(params);
+      return "k-issue-" + calls.add.length;
+    },
+  };
+}
+
+test("issuerizeTick — 게이트 전부 충족 시 plan-unit 별 unlock 이슈 발행(계보+배경지식 동반)", async () => {
+  const deps = issuerizeDeps(issuerizeNodes());
+  const r = await issuerizeTick(deps, "chunk");
+  assert.equal(r.ok, true);
+  assert.equal(r.issued, 2, "plan-unit 2개 → 이슈 2개");
+  const first = deps.calls.add[0];
+  assert.equal(first.kind, "issue");
+  assert.equal(first.parentDraftId, "chunk", "드래프트 계보 유지");
+  assert.equal(first.locked, undefined, "이슈는 unlock(개별 노드로 입력)");
+  assert.match(first.description, /PSEUDO/, "슈도코드 전문 동반");
+  assert.match(first.description, /프레임워크: X 채택/, "o 확정 배경지식 동반(self-contained)");
+  assert.ok(!first.description.includes("방법론: 근거 부족"), "x fact 는 배경지식에서 제외");
+});
+
+test("issuerizeTick — 미인증 덩어리(badge≠o) 거부", async () => {
+  const nodes = issuerizeNodes();
+  nodes[0].badge = "f";
+  const deps = issuerizeDeps(nodes);
+  const r = await issuerizeTick(deps, "chunk");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /미인증/);
+  assert.equal(deps.calls.add.length, 0);
+});
+
+test("issuerizeTick — research 미경유(fact 없음)·미검증 fact·plan 미경유 각각 거부", async () => {
+  const noFacts = issuerizeNodes().filter((n) => n.kind !== "fact");
+  let r = await issuerizeTick(issuerizeDeps(noFacts), "chunk");
+  assert.match(r.error, /research 미경유/);
+  const pending = issuerizeNodes();
+  pending[2].badge = "검수전";
+  r = await issuerizeTick(issuerizeDeps(pending), "chunk");
+  assert.match(r.error, /미검증 1건/);
+  const noUnits = issuerizeNodes().filter((n) => n.kind !== "plan-unit");
+  r = await issuerizeTick(issuerizeDeps(noUnits), "chunk");
+  assert.match(r.error, /plan 미경유/);
+});
+
+test("issuerizeTick — 이미 승격된 덩어리(계보 issue 존재)는 멱등 거부", async () => {
+  const nodes = issuerizeNodes();
+  nodes.push({ id: "old", kind: "issue", parentId: null, parentDraftId: "chunk", title: "기존 이슈" });
+  const deps = issuerizeDeps(nodes);
+  const r = await issuerizeTick(deps, "chunk");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /이미 이슈라이즈/);
+  assert.equal(deps.calls.add.length, 0);
 });

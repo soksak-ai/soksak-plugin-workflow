@@ -121,7 +121,8 @@ pub fn validate(doc: &Json) -> Result<(), Vec<String>> {
             for ph in placeholders(t) {
                 let known = values.is_some_and(|m| m.contains_key(&ph))
                     || args_decl.is_some_and(|m| m.contains_key(&ph))
-                    || ph == "ledger";
+                    || ph == "ledger"
+                    || ph == "facts";
                 if !known {
                     v.push(format!("[prompts] {pname:?} 플레이스홀더 {{{{{ph}}}}} 미해석(values/args/ledger 아님)"));
                 }
@@ -292,7 +293,9 @@ impl Scope<'_> {
         let mut out = tmpl.to_string();
         for ph in placeholders(tmpl) {
             let rendered = if ph == "ledger" {
-                Some(ledger_view(&self.args))
+                Some(ledger_view(&self.args, "ledger"))
+            } else if ph == "facts" {
+                Some(ledger_view(&self.args, "facts"))
             } else {
                 self.lookup(&ph)
                     .or_else(|| self.lookup(&format!("args.{ph}")))
@@ -311,10 +314,10 @@ impl Scope<'_> {
     }
 }
 
-/// ledger_view — 원장(args.ledger) 렌더 빌트인. draft 계약의 줄 형식 그대로:
-/// `- [id] [badge] (category?) title | 근거: verified_value?` — gen.js ledgerView 와 byte 동일 규칙.
-fn ledger_view(args: &Json) -> String {
-    let Some(items) = args.get("ledger").and_then(|l| l.as_array()) else {
+/// ledger_view — 원장 렌더 빌트인({{ledger}}=args.ledger 요건 원장, {{facts}}=args.facts 기초지식 원장).
+/// draft 계약의 줄 형식 그대로: `- [id] [badge] (category?) title | 근거: verified_value?` — gen.js ledgerView 와 byte 동일 규칙.
+fn ledger_view(args: &Json, key: &str) -> String {
+    let Some(items) = args.get(key).and_then(|l| l.as_array()) else {
         return String::new();
     };
     items

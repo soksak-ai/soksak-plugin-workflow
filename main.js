@@ -16,12 +16,14 @@ const RECONCILE_ID = "workflow-reconcile";
 // ── 순수 로직(테스트 가능 — app 의존 없음) ──
 
 /** 노드 done 판정(미존재 의존=false, 안전).
- *  항목(kind=item)은 검증 시 badge(o/x/f)만 받고 status 는 영영 todo(execResultToEdit 가 badge 만 박음) —
- *  status 로 판정하면 hunt.blockedBy=[itemIds] 의 depsDone 이 영구 false 라 hunt/audit 가 영영 안 풀린다(deadlock).
- *  항목은 badge 확정(o/x/f)이 done. stage 작업/그룹/덩어리는 status="done" 이 done. */
+ *  badge 보유 노드(draft item, research fact 등 검증 대상)는 검증 시 badge(o/x/f)만 받고 status 는 영영
+ *  todo(execResultToEdit 가 badge 만 박음) — status 로 판정하면 blockedBy=[검증노드들] 의 depsDone 이 영구
+ *  false 라 후속 task 가 영영 안 풀린다(① deadlock). badge 축이 있으면 badge 확정(o/x/f)이 done —
+ *  kind 하드코딩이 아니라 badge 보유 여부로 판정(research fact 등 새 검증 kind 가 같은 파이프를 탄다).
+ *  badge 없는 노드(stage task/덩어리)는 status="done". */
 export function isDone(node) {
   if (!node) return false;
-  if (node.kind === "item") return node.badge === "o" || node.badge === "x" || node.badge === "f";
+  if (node.badge != null && node.badge !== "") return node.badge === "o" || node.badge === "x" || node.badge === "f";
   return node.status === "done";
 }
 
@@ -63,10 +65,11 @@ export function pickReady(nodes) {
   });
 }
 
-/** buildLedger — 덩어리(chunkId) 자손 항목(kind=item)을 ledger 엔트리로(hunt/classify/audit exec-stage args.ledger).
+/** buildLedger — 덩어리(chunkId) 자손 중 지정 kind 노드를 ledger 엔트리로(exec-stage args 주입용).
  *  부모 사슬로 자손 판정. **평탄** — 원장 항목에 id 포함(classify 가 id 로 배정). category = 항목 자신의 category 필드
- *  (부모 그룹 title 아님 — 평탄이라 그룹 없음; classify 전엔 없어서 빈 값). hunt 중복 회피·classify 배정·audit 완결성 인증에 씀. */
-export function buildLedger(nodes, chunkId) {
+ *  (부모 그룹 title 아님 — 평탄이라 그룹 없음; classify 전엔 없어서 빈 값). 기본 kind="item"(draft 요건 원장 —
+ *  hunt 중복 회피·classify 배정·audit 완결성 인증). kind="fact" 로 research 기초지식 원장도 같은 형식으로 뽑는다(plan 입력). */
+export function buildLedger(nodes, chunkId, kind = "item") {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map((n) => [n.id, n]));
   const descends = (n) => {
@@ -79,7 +82,7 @@ export function buildLedger(nodes, chunkId) {
     return false;
   };
   return list
-    .filter((n) => n.kind === "item" && descends(n))
+    .filter((n) => n.kind === kind && descends(n))
     .map((n) => ({ id: n.id, title: n.title, badge: n.badge, category: n.category }));
 }
 
@@ -451,19 +454,23 @@ async function reconcileStage(deps, target, body, nodes) {
       return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
     }
   }
-  // hunt/classify/audit 는 ledger(덩어리 자손 항목+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
+  // hunt/classify/audit/plan 은 ledger(덩어리 자손 요건+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
   // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
+  // plan(한턴 슈도코드화)은 요건 원장 + research 기초지식 원장(kind=fact, args.facts) 둘 다 받는다.
   let ledger;
-  if ((stageName === "hunt" || stageName === "classify" || stageName === "audit") && deps.materializeLedger && target.parentId) {
+  if ((stageName === "hunt" || stageName === "classify" || stageName === "audit" || stageName === "plan") && deps.materializeLedger && target.parentId) {
     try {
       ledger = await deps.materializeLedger(target.parentId);
       const inp = JSON.parse(body);
       inp.args = { ...(inp.args || {}), ledger };
+      if (stageName === "plan" && deps.materializeFacts) {
+        inp.args.facts = await deps.materializeFacts(target.parentId);
+      }
       stageBody = JSON.stringify(inp);
     } catch (e) {
-      // classify(배정 검증)·audit(f 집계=인증 계산)는 원장이 필수 — 없으면 실행을 거부(backoff 재시도).
+      // classify(배정 검증)·audit(f 집계=인증 계산)·plan(슈도코드의 입력=원장)은 원장이 필수 — 없으면 거부(backoff).
       // hunt 만 ledger 없이 진행 가능(프롬프트 입력용 — 빈 원장은 '중복 회피 정보 없음'일 뿐).
-      if (stageName === "classify" || stageName === "audit") {
+      if (stageName === "classify" || stageName === "audit" || stageName === "plan") {
         return { ok: false, processed: 0, id: target.id, error: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
       }
     }
@@ -575,6 +582,60 @@ async function reconcileStage(deps, target, body, nodes) {
   await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
   await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
   return { ok: true, processed: 1, id: target.id, stage: true, published: children.length, assigned };
+}
+
+/** issuerizeTick — 이슈라이즈(순수, deps 주입): 인증된 드래프트 덩어리의 plan-unit(슈도코드 단위)들을
+ *  **unlock 된 개별 개발 이슈 노드**로 승격한다. 드래프트는 잠긴 채 보존, 이슈에 parentDraftId=덩어리 계보.
+ *  게이트(전부 충족해야 승격 — fail-loud):
+ *   ① 덩어리 badge==='o' (audit 인증 — M2 상태 기계)
+ *   ② kind='fact'(research 기초지식) 자손이 ≥1 이고 전부 badge 확정(o/x/f) — research 경유 증명
+ *   ③ kind='plan-unit'(plan 한턴 슈도코드) 자손 ≥1 — plan 경유 증명
+ *  멱등: 이미 이 덩어리를 계보(parentDraftId)로 가진 kind='issue' 노드가 있으면 거부(중복 승격 차단).
+ *  개발 실행 자체는 이슈 소비자(빌더 에이전트·사람) 몫 — 여기는 이슈화까지. deps: listNodes()·addNode(params). */
+export async function issuerizeTick(deps, chunkId) {
+  const listed = await deps.listNodes();
+  const nodes = (listed && listed.nodes) || [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const chunk = byId.get(chunkId);
+  if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
+  if (chunk.badge !== "o") {
+    return { ok: false, error: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 이슈라이즈` };
+  }
+  const descends = (n) => {
+    let p = n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === chunkId) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  if (nodes.some((n) => n.kind === "issue" && n.parentDraftId === chunkId)) {
+    return { ok: false, error: "이미 이슈라이즈된 덩어리(계보 issue 존재) — 멱등 거부" };
+  }
+  const facts = nodes.filter((n) => n.kind === "fact" && descends(n));
+  if (facts.length === 0) return { ok: false, error: "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" };
+  const unverified = facts.filter((n) => !(n.badge === "o" || n.badge === "x" || n.badge === "f"));
+  if (unverified.length) return { ok: false, error: `기초지식 미검증 ${unverified.length}건(검수전) — 검증 완료 후 이슈라이즈` };
+  const units = nodes.filter((n) => n.kind === "plan-unit" && descends(n));
+  if (units.length === 0) return { ok: false, error: "plan 미경유(plan-unit 없음) — plan(한턴 슈도코드화) 후에만 이슈라이즈" };
+  // 배경지식(o 확정 fact)을 self-contained 로 이슈 본문에 동반 — 소비자가 덩어리를 다시 뒤지지 않게.
+  const knowledge = facts.filter((n) => n.badge === "o").map((n) => `- ${n.title}`).join("\n");
+  let issued = 0;
+  for (const u of units) {
+    const description = [u.description || u.title, knowledge ? `\n## 배경지식(research 확정)\n${knowledge}` : ""].join("");
+    const r = await deps.addNode({
+      title: u.title,
+      description,
+      type: "task",
+      kind: "issue",
+      parentDraftId: chunkId, // 계보 — 드래프트 원본은 잠긴 채 보존, 이슈는 unlock(locked 미지정)
+      blockedBy: [],
+    });
+    if (!r) return { ok: false, error: `이슈 발행 실패(${u.id}) — 부분 승격 중단(발행 ${issued}건)`, issued };
+    issued += 1;
+  }
+  return { ok: true, issued, chunk: chunkId };
 }
 
 // ── app 연결(런타임) ──
@@ -880,10 +941,15 @@ export default {
               const r = await app.commands.execute(KANBAN + ".node.add", params);
               return r && r.nodeId;
             },
-            // hunt/classify/audit 용 ledger — 덩어리 자손 항목+배지(node.list 로, limit 명시).
+            // hunt/classify/audit/plan 용 ledger — 덩어리 자손 요건+배지(node.list 로, limit 명시).
             materializeLedger: async (chunkId) => {
               const listed = await app.commands.execute(KANBAN + ".node.list", { limit: 100000 });
               return buildLedger((listed && listed.nodes) || [], chunkId);
+            },
+            // plan 용 기초지식 원장 — research 가 발행한 kind=fact 자손(검증 배지 포함).
+            materializeFacts: async (chunkId) => {
+              const listed = await app.commands.execute(KANBAN + ".node.list", { limit: 100000 });
+              return buildLedger((listed && listed.nodes) || [], chunkId, "fact");
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
@@ -893,6 +959,30 @@ export default {
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
           return await reconcileTick(deps, reconcileState);
+        },
+      }),
+    );
+
+    // 이슈라이즈 — 인증(badge='o')·research(fact 검증 완료)·plan(plan-unit) 을 전부 경유한 덩어리의
+    // 슈도코드 단위를 unlock 개발 이슈로 승격. 게이트·멱등은 issuerizeTick(순수)이 판정.
+    ctx.subscriptions.push(
+      app.commands.register("workflow.issuerize", {
+        description:
+          "인증된 드래프트 덩어리(badge='o', research fact 검증 완료, plan-unit 존재)의 슈도코드 단위를 unlock 개발 이슈 노드로 승격 — parentDraftId 계보, 원본 드래프트는 잠긴 채 보존, 재호출 멱등 거부.",
+        params: {
+          chunk: { type: "string", description: "이슈라이즈할 덩어리(칸반 노드 id)" },
+        },
+        returns: "{ ok, issued?, error? }",
+        handler: async ({ chunk }) => {
+          if (!chunk) return { ok: false, error: "chunk(덩어리 id) 필수" };
+          const deps = {
+            listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
+            addNode: async (params) => {
+              const r = await app.commands.execute(KANBAN + ".node.add", params);
+              return r && r.nodeId;
+            },
+          };
+          return await issuerizeTick(deps, chunk);
         },
       }),
     );
