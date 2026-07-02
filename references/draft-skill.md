@@ -215,10 +215,10 @@ if (STAGE === 'classify') {
   return { dimension: (r && r.dimension) || '', assignments: (r && r.assignments) || [] }
 }
 
-// ── stage: audit — auditPrompt(ledger) 실행 → 완결성 verdict. main.js 가 덩어리 result 에 기록. 폐기(f≥1)는 칸반 subValidation 이 badge 로 계산. ──
+// ── stage: audit — auditPrompt(ledger) 실행 → 완결성 verdict. main.js reconcileStage 가 덩어리에 기록:
+//    verdict → result(산문), complete+원장 f 집계 → badge('o'=인증 / 'f'=폐기 — complete ∧ f=0 일 때만 'o'). ──
 if (STAGE === 'audit') {
   const audit = await agent(auditPrompt(LEDGER), { label: '부모 감사', schema: AUDIT_SCHEMA })   // 실행
-  // reconcileStage: result.verdict(top-level) → 덩어리 node.result. classifyResult: complete/verdict → audit.
   return { verdict: (audit && audit.verdict) || '(감사 결과 없음)', complete: !!(audit && audit.complete) }
 }
 

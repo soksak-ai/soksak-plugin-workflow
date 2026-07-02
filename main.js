@@ -460,8 +460,12 @@ async function reconcileStage(deps, target, body, nodes) {
       const inp = JSON.parse(body);
       inp.args = { ...(inp.args || {}), ledger };
       stageBody = JSON.stringify(inp);
-    } catch {
-      /* hunt/audit: materialize 실패 시 ledger 없이 진행(프롬프트 입력용). classify 는 아래서 ledger 필수(배정 검증). */
+    } catch (e) {
+      // classify(배정 검증)·audit(f 집계=인증 계산)는 원장이 필수 — 없으면 실행을 거부(backoff 재시도).
+      // hunt 만 ledger 없이 진행 가능(프롬프트 입력용 — 빈 원장은 '중복 회피 정보 없음'일 뿐).
+      if (stageName === "classify" || stageName === "audit") {
+        return { ok: false, processed: 0, id: target.id, error: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
+      }
     }
   }
   let staged;
@@ -549,12 +553,23 @@ async function reconcileStage(deps, target, body, nodes) {
       assigned += 1;
     }
   }
+  // audit 는 결과가 곧 산출 — verdict/complete 없이 done 처리하면 '감사 없는 완결'이 된다(거부→재시도).
+  if (stageName === "audit" && !(res && typeof res === "object")) {
+    return { ok: false, processed: 0, id: target.id, error: "audit 결과 없음(verdict/complete 미반환)" };
+  }
   if (res && typeof res === "object" && target.parentId) {
     const chunkEdit = {};
     if (typeof res.chunkTitle === "string" && res.chunkTitle) chunkEdit.title = res.chunkTitle;
     if (typeof res.verdict === "string" && res.verdict) chunkEdit.result = res.verdict;
     // classify: dimension 을 덩어리 result 에 기록(분류 차원 = 원장 종합 산출).
     if (stageName === "classify" && typeof res.dimension === "string" && res.dimension) chunkEdit.result = res.dimension;
+    // audit: 인증 상태 기계 — complete(불리언) 소비 + 원장 f 집계 → 덩어리 badge 로 인증/폐기 확정.
+    // verdict 산문만으론 인증/미인증을 구조적으로 구분할 수 없다(어느 노드가 원인인지는 항목 badge/result 가 담당).
+    // 규칙: complete===true ∧ 원장 f=0 → 'o'(인증) / 그 외 → 'f'(폐기). 원장 미상(-1)은 인증 불가 → 'f'.
+    if (stageName === "audit") {
+      const fCount = Array.isArray(ledger) ? ledger.filter((e) => e && e.badge === "f").length : -1;
+      chunkEdit.badge = res.complete === true && fCount === 0 ? "o" : "f";
+    }
     if (Object.keys(chunkEdit).length) await deps.editNode(target.parentId, chunkEdit);
   }
   await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
