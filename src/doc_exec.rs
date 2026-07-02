@@ -76,6 +76,22 @@ pub fn resolved_values(doc: &Json) -> Result<Map<String, Json>, String> {
     Ok(out)
 }
 
+/// inject_refinement — 번들 정본 골격(draft template)에 정련 산출을 주입해 실행 doc 을 조립(순수).
+/// LLM 은 정련({directive, description})만 하고 상수(COMMON·스키마·프롬프트·stages)는 여기서 결정적으로
+/// 합쳐진다 — 19KB verbatim 재타이핑(문자 1개 누락=전체 파손)을 구조적으로 제거(PRINCIPLES §7).
+pub fn inject_refinement(template: &Json, directive: &str, description: &str) -> Json {
+    let mut doc = template.clone();
+    if let Some(d) = doc.pointer_mut("/args/directive/default") {
+        *d = Json::String(directive.to_string());
+    }
+    if !description.is_empty() {
+        if let Some(m) = doc.pointer_mut("/meta/description") {
+            *m = Json::String(description.to_string());
+        }
+    }
+    doc
+}
+
 // ── 검증(fail-loud) ──────────────────────────────────────────
 
 /// validate — 문서 정합 인증. 위반 목록 반환(빈 목록 = 통과). 저작 게이트(generate-skeleton)와
@@ -894,6 +910,26 @@ mod tests {
         assert_eq!(title, "재고 차감 구현");
         assert!(description.contains("acceptance"), "슈도코드 전문(검증 방법 포함) = description");
         assert!(badge.is_none(), "plan-unit 은 검증 파이프 비대상(badge 없음)");
+    }
+
+    /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
+    /// 저작 LLM 은 {directive, description}만 내고 상수는 이 템플릿이 정본(재타이핑 0 — PRINCIPLES §7).
+    #[test]
+    fn bundled_draft_template_accepts_refinement_injection() {
+        let tpl: Json = serde_json::from_str(include_str!("../workflows/draft.doc.json")).unwrap();
+        assert_eq!(validate(&tpl), Ok(()), "번들 draft 템플릿 자체가 유효 doc");
+        let doc = inject_refinement(&tpl, "정련된 지시어 전문", "약국 재고 SaaS 백로그");
+        assert_eq!(doc.pointer("/args/directive/default").and_then(|v| v.as_str()), Some("정련된 지시어 전문"));
+        assert_eq!(doc.pointer("/meta/description").and_then(|v| v.as_str()), Some("약국 재고 SaaS 백로그"));
+        assert_eq!(validate(&doc), Ok(()), "주입 후에도 유효");
+        // 주입된 정련본이 skeleton 발행의 chunk description 으로 흐른다(단일 진실 §1).
+        let mut no_agent = |_p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> { Err("no agent".into()) };
+        let (events, _) = run(&doc, "", &json!({}), &mut no_agent).unwrap();
+        let NodeEvent::Add { description, .. } = &events[0];
+        assert_eq!(description, "정련된 지시어 전문");
+        // description 빈 문자열이면 meta 는 템플릿 기본 유지.
+        let doc2 = inject_refinement(&tpl, "d", "");
+        assert_eq!(doc2.pointer("/meta/description"), tpl.pointer("/meta/description"));
     }
 
     #[test]

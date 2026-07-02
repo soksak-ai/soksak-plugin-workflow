@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
-use soksak_plugin::generate_skeleton::{build_system_prompt, build_user_prompt};
+use soksak_plugin::generate_skeleton::build_user_prompt;
 use soksak_plugin::host::build_prompt_with_schema;
 use soksak_plugin::lang::Language;
 use soksak_plugin::provider::{run_agent, run_agent_text, AgentRequest};
@@ -419,21 +419,15 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         return Err("generate-skeleton: --idea 필수".to_string());
     }
     // refs dir 해석: ① --refs, ② env WORKFLOW_DIR/references(레거시 override), ③ **플러그인 번들**(self-contained 기본).
-    // 기본 = 이 바이너리가 속한 플러그인 트리의 references/ — 외부 리포(추출기) 런타임 의존 없음.
     let refs_dir = refs
         .or_else(|| std::env::var("WORKFLOW_DIR").ok().filter(|d| !d.is_empty()).map(|d| format!("{d}/references")))
         .or_else(|| plugin_root().map(|r| format!("{}/references", r.display())))
         .ok_or("generate-skeleton: references 해석 실패 — --refs 또는 플러그인 번들(references/draft-skill.md) 확인")?;
-    let read_ref = |rel: &str| -> Result<String, String> {
-        std::fs::read_to_string(format!("{refs_dir}/{rel}")).map_err(|e| format!("refs 읽기 {refs_dir}/{rel}: {e}"))
-    };
-    // system 층 = 범용 Workflow 저작 스킬 + soksak draft 역할 지시어(전문).
-    let system = build_system_prompt(
-        &read_ref("workflow/SKILL.md")?,
-        &read_ref("workflow/api-reference.md")?,
-        &read_ref("workflow/patterns.md")?,
-        &read_ref("draft-skill.md")?,
-    );
+    // system 층 = draft **정련** 역할 지시어. LLM 은 정련만 한다(PRINCIPLES §7) — 문서 골격·상수(COMMON·
+    // 스키마·프롬프트)는 번들 정본(workflows/draft.doc.json)을 도구가 조립한다. 19KB verbatim 재타이핑은
+    // 문자 하나 누락으로 전체가 깨지는 취약 구조였다(실측: 18,911번째 문자 따옴표 누락).
+    let system = std::fs::read_to_string(format!("{refs_dir}/draft-skill.md"))
+        .map_err(|e| format!("refs 읽기 {refs_dir}/draft-skill.md: {e}"))?;
     // ③파생 도메인 지시어 → user 프롬프트 힌트.
     let directives = synth_directives(&idea, &builtin_library());
     let matched: Vec<&str> = directives.iter().map(|d| d.domain.as_str()).collect::<HashSet<_>>().into_iter().collect();
@@ -443,55 +437,62 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         user.push_str(&l.contract());
     }
 
-    // LLM 저작 — 인증 프로필, effort xhigh, schema 없음(문서는 크고 자유형 문자열 값이 많아 raw 텍스트 → 관용 파싱).
-    // text_only: 도구 전면 차단(모델이 파일 Write 시도 등으로 이탈 못 하게 — 순수 JSON 텍스트만). 529 backoff 는 provider.
+    // LLM 정련 — StructuredOutput 강제(REFINE_SCHEMA): 산출은 {directive, description} 소형 JSON 뿐이라
+    // 문법 실패(따옴표/펜스/잘림) 클래스가 구조적으로 소멸한다. text_only: 도구 전면 차단. 529 backoff 는 provider.
     let (env, profile) = auth_env()?;
-    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 저작(workflow-doc)");
+    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 정련(directive)");
+    let refine_schema = json!({
+        "type": "object",
+        "required": ["directive", "description"],
+        "properties": {
+            "directive": { "type": "string", "description": "정련된 DIRECTIVE 전문 — 아이디어의 실제 의도를 담은 지시어(섹션 라벨 재구성 허용, 실질 요건 누락 금지)" },
+            "description": { "type": "string", "description": "이 드래프트의 한 줄 서술(담백)" }
+        }
+    });
     let req = AgentRequest {
         prompt: user,
         model: &model,
         allowed_tools: vec![],
         timeout_secs: 7200,
         system_prompt: Some(system), text_only: true,
-        schema: None,
+        schema: Some(refine_schema),
         effort: "xhigh".into(),
     };
-    // 저작 = LLM 비결정 실패(출력 잘림·펜스 이탈·검증 위반)가 간헐적으로 난다 — 총 2회 시도(재저작 1회).
-    // 재시도는 기준 약화가 아니다: 각 시도는 동일 게이트(파싱+validate)를 통과해야 하고 최종 실패는 loud.
+    // 번들 정본 골격 로드 — 상수(COMMON·스키마·프롬프트·stages)는 도구가 조립(byte 안정 §3, LLM 재타이핑 0).
+    let tpl_path = bundled_workflow_path("draft")?;
+    let tpl_raw = std::fs::read(&tpl_path).map_err(|e| format!("번들 draft 읽기 {tpl_path}: {e}"))?;
+    let template: Value = serde_json::from_slice(&tpl_raw).map_err(|e| format!("번들 draft 파싱 {tpl_path}: {e}"))?;
+
+    // 정련은 LLM 비결정 — 총 2회 시도(재정련 1회). 각 시도는 동일 게이트(주입+validate)를 통과해야 하고 최종 실패는 loud.
     let mut last_err = String::new();
     for attempt in 1..=2 {
         if attempt > 1 {
-            eprintln!("[soksak] generate-skeleton 재저작 시도 {attempt}/2 — 직전: {last_err}");
+            eprintln!("[soksak] generate-skeleton 재정련 시도 {attempt}/2 — 직전: {last_err}");
         }
-        let raw = run_agent_text(&req, &env)?;
-        if let Some(p) = &gen_out {
-            std::fs::write(p, &raw).map_err(|e| format!("저작 원문 쓰기 {p}: {e}"))?;
-            eprintln!("[soksak] 저작 원문 보존 → {p}");
-        }
-        // 저작 게이트 ① JSON 파싱(펜스·앞뒤 prose 방어 — parse_json_lenient) ② workflow-doc validate(fail-loud).
-        // 실패 진단에 길이+tail 포함 — head 만으론 출력 잘림(균형 괄호 불성립)을 구분 못 한다.
-        let doc = match soksak_plugin::provider::parse_json_lenient(&raw) {
-            Ok(d) => d,
+        let out = match run_agent(&req, &env) {
+            Ok(o) => o,
             Err(e) => {
-                let tail: String = raw.chars().rev().take(120).collect::<Vec<_>>().into_iter().rev().collect();
-                last_err = format!("저작 산출이 JSON 아님({}자) — {e} … tail={:?}", raw.chars().count(), tail);
+                last_err = format!("정련 호출 실패: {e}");
                 continue;
             }
         };
-        if !soksak_plugin::doc_exec::is_doc(&doc) {
-            last_err = format!("저작 산출이 workflow-doc@0.0.1 아님(spec={:?})", doc.get("spec").and_then(|s| s.as_str()).unwrap_or(""));
+        if let Some(p) = &gen_out {
+            let _ = std::fs::write(p, serde_json::to_string_pretty(&out).unwrap_or_default());
+            eprintln!("[soksak] 정련 산출 보존 → {p}");
+        }
+        let directive = out.get("directive").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        let description = out.get("description").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        if directive.is_empty() {
+            last_err = "정련 directive 비어있음".to_string();
             continue;
         }
+        let doc = soksak_plugin::doc_exec::inject_refinement(&template, &directive, &description);
         if let Err(violations) = soksak_plugin::doc_exec::validate(&doc) {
-            eprintln!("[soksak] 저작 doc 검증 실패:");
-            for x in &violations {
-                eprintln!("  - {x}");
-            }
-            last_err = format!("저작 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
+            last_err = format!("조립 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
             continue;
         }
         println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    Err(format!("generate-skeleton: 저작 2회 실패 — {last_err}"))
+    Err(format!("generate-skeleton: 정련 2회 실패 — {last_err}"))
 }

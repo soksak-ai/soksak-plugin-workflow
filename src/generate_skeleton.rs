@@ -20,16 +20,6 @@ pub fn build_user_prompt(idea: &str, directives: &[DomainDirective]) -> String {
     s
 }
 
-/// build_system_prompt — system 층: 범용 Workflow 저작 스킬(SKILL/api/patterns) + soksak draft 역할 지시어.
-/// 재료 순서 = SKILL.md → api-reference.md → patterns.md → draft-skill.md. `---` 로 구분.
-pub fn build_system_prompt(skill_md: &str, api_ref: &str, patterns: &str, draft_skill: &str) -> String {
-    [skill_md, api_ref, patterns, draft_skill]
-        .iter()
-        .map(|s| s.trim())
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,14 +48,5 @@ mod tests {
         assert!(p.contains("[LEGAL] 마약류 재고 불일치 시 기한 내 신고 — 마약류관리법 의무"));
     }
 
-    #[test]
-    fn build_system_prompt_joins_all_four_in_order() {
-        let sys = build_system_prompt("SKILL_BODY", "API_BODY", "PATTERNS_BODY", "DRAFT_SKILL_BODY");
-        for part in ["SKILL_BODY", "API_BODY", "PATTERNS_BODY", "DRAFT_SKILL_BODY"] {
-            assert!(sys.contains(part), "{part} 누락");
-        }
-        // 순서: 스킬이 draft 역할 지시어보다 앞.
-        assert!(sys.find("SKILL_BODY").unwrap() < sys.find("DRAFT_SKILL_BODY").unwrap(), "SKILL 이 draft-skill 앞");
-        assert!(sys.contains("---"), "재료 구분자");
-    }
+
 }
