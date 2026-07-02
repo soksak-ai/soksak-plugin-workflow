@@ -101,12 +101,20 @@ fn real_main() -> Result<(), String> {
         return run_generate_skeleton(&argv);
     }
 
-    let path = &argv[0];
+    // --workflow <name> — 번들 정본 워크플로(plugin_root/workflows/<name>.doc.json) 해석(경로 대신 이름).
+    // research/plan 처럼 저작 LLM 불참(PRINCIPLES §7) canonical doc 의 실행 통로.
+    let (path, arg_start) = if argv[0] == "--workflow" {
+        let name = argv.get(1).ok_or("--workflow 값(이름) 누락")?;
+        (bundled_workflow_path(name)?, 2usize)
+    } else {
+        (argv[0].clone(), 1usize)
+    };
+    let path = &path;
     let mut args: Map<String, Value> = Map::new();
     let mut args_override: Option<Value> = None; // --args-json: cc 계약대로 args 를 verbatim(임의 JSON)
     let mut lang: Option<Language> = None; // --lang: 출력 언어 계약
     let mut emit = false; // --emit: 노드 발행만(EmitHost) + stdout JSON line. LLM 미호출.
-    let mut i = 1;
+    let mut i = arg_start;
     while i < argv.len() {
         match argv[i].as_str() {
             "--arg" => {
@@ -287,6 +295,16 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| format!("read stdin: {e}"))?;
     let input: Value = serde_json::from_str(raw.trim()).map_err(|e| format!("exec-stage 입력 JSON 파싱: {e}"))?;
     let stage = input.get("stage").and_then(|s| s.as_str()).ok_or("exec-stage 입력에 stage 필요")?.to_string();
+    // workflow 슬롯(이름) — 번들 정본 doc 로드(canonical doc 을 task 마다 임베드하지 않는 통로; 단일 원천=번들 파일).
+    if let Some(name) = input.get("workflow").and_then(|w| w.as_str()) {
+        let p = bundled_workflow_path(name)?;
+        let raw = std::fs::read(&p).map_err(|e| format!("번들 워크플로 읽기 {p}: {e}"))?;
+        let doc: Value = serde_json::from_slice(&raw).map_err(|e| format!("번들 워크플로 파싱 {p}: {e}"))?;
+        if !soksak_plugin::doc_exec::is_doc(&doc) {
+            return Err(format!("번들 워크플로 {name:?} 가 workflow-doc@0.0.1 아님"));
+        }
+        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
+    }
     // workflow-doc@0.0.1 — task body 의 skeleton 슬롯에 doc 이 임베드돼 오면(main.js 는 무판별 relay) doc_exec 경로.
     if let Some(doc) = input.get("skeleton").filter(|s| soksak_plugin::doc_exec::is_doc(s)).cloned() {
         return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
@@ -431,6 +449,20 @@ fn run_exec_stage_doc(
         println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
     }
     Ok(())
+}
+
+/// bundled_workflow_path — 번들 정본 워크플로 경로(plugin_root/workflows/<name>.doc.json).
+/// 이름은 파일명 안전 문자만 허용(경로 탈출 차단 — 영숫자/-/_).
+fn bundled_workflow_path(name: &str) -> Result<String, String> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(format!("--workflow 이름 부적합: {name:?} (영숫자/-/_ 만)"));
+    }
+    let root = plugin_root().ok_or("--workflow: 플러그인 루트 해석 실패(references/draft-skill.md 기준)")?;
+    let p = root.join("workflows").join(format!("{name}.doc.json"));
+    if !p.is_file() {
+        return Err(format!("번들 워크플로 없음: {}", p.display()));
+    }
+    Ok(p.display().to_string())
 }
 
 /// plugin_root — 이 바이너리가 속한 플러그인 루트(self-contained references/·tools/ 소재).

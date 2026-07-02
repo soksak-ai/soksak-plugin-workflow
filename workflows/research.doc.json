@@ -1,0 +1,135 @@
+{
+  "spec": "workflow-doc@0.0.1",
+  "meta": {
+    "name": "research",
+    "description": "RESEARCH+PLAN 워크플로 — 인증된 드래프트 덩어리(badge='o')의 기초지식(framework/methodology/directive)을 확정(fact 발굴→검증)하고, plan(한턴)이 요건+확정 fact 를 슈도코드 단위(plan-unit)로 분해한다. 이슈라이즈의 전제."
+  },
+  "args": {
+    "directive": { "from": ["directive", "DIRECTIVE"], "default": "" },
+    "chunkRef": { "from": ["chunkRef"], "default": "" }
+  },
+  "values": {
+    "PENDING": "검수전",
+    "RESEARCH_COMMON": "SHARED CONCEPTS (research):\n- A FACT = a foundational decision or obligation the build will stand on — a FRAMEWORK/stack choice, a METHODOLOGY rule (how the work is verified, gated, shipped), or a DOMAIN DIRECTIVE (a law/regulation/standard obligation this domain compels). Imperative, concrete, buildable-on — NOT a survey, NOT a tutorial, NOT a restatement of the directive.\n- MAKE-OR-BREAK only: a genuine one is a DECISION two competent practitioners could resolve DIFFERENTLY, whose wrong resolution would make the build FAIL, be ILLEGAL, or be REWRITTEN later. NOT a nice-to-have, NOT one methodology's enumerated beat-list.\n- GROUNDING (the one rule for any claim you rely on): could you be WRONG from memory? A version number, the CURRENT status of a law/standard/library, pricing, deprecations, anything possibly post-cutoff → WebSearch FIRST (put the current year in queries) and mark origin \"search\" with the source. A stable principle or design choice you RELIABLY know → reason it, origin \"agent\". NEVER assert such specifics from memory; never re-search the settled.\n- NO FABRICATION: every fact must trace to the requirements' real needs or a real external source. An invented obligation is worse than a gap.\n- INVARIANTS — every fact: (1) ATOMIC — one decision per fact, not bundled; (2) NO DUPLICATE — judged by MEANING; (3) CONSEQUENTIAL — the description states what the decision enables or prevents (\"choose/do X so that Y\"); a bare name is not a decision.",
+    "FACT_VERIFY_TMPL": {
+      "concat": [
+        { "$": "values.RESEARCH_COMMON" },
+        "\n\nYOUR ROLE — VERIFIER (hostile). Verify ONE foundational fact — judge whether it is a real, correctly-grounded make-or-break for THIS directive. Do NOT propose new facts (a separate step).\n\nFACT:\n- {{title}} — {{description}}\n\nPick the method by GROUNDING: could the claim be WRONG from memory (a version, a law's current status, an external specific) → WebSearch and CONFIRM it (verified_value = the confirmed specific + where it was confirmed); a stable principle → verify by REASONING (necessary AND sound for this directive? verified_value = why).\nThen judge the OUTCOME — YOU decide the severity (field \"oxf\"):\n- holds AND is a real foundational make-or-break → oxf \"o\" + origin + verified_value + sources + reason.\n- NOT one (wrong for this directive / unnecessary / out-of-scope / restates the directive / a nice-to-have) → \"x\" + reason — a legitimate rejection, NOT a failure (the node is KEPT, badge x, not removed).\n- CRITICAL — the fact is false in a way that would poison the build (a wrong law, a dead/renamed library, an impossible premise) → \"f\" + reason. Reserve \"f\" for genuine show-stoppers; a negative-but-verified conclusion is \"o\", not fatal.\nSet ORIGIN to how it is BACKED, record that backing in verified_value: \"agent\" (reasoned → the knowledge basis) / \"search\" (grounded externally → fact + quoted passage, sources = URLs).\n\"x\" ≠ a failed search: if a NEEDED WebSearch ERRORS/empty (529), retry — do NOT \"x\".\n\nDirective: \"{{directive}}\"\n\nDo any needed search first (only if fact-hinged). FINAL message = ONLY this JSON."
+      ]
+    },
+    "RESEARCH_SCHEMA": {
+      "type": "object",
+      "required": ["facts"],
+      "properties": {
+        "facts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "description", "origin", "area"],
+            "properties": {
+              "title": { "type": "string" },
+              "description": { "type": "string" },
+              "origin": { "type": "string", "enum": ["agent", "search"] },
+              "area": { "type": "string", "enum": ["framework", "methodology", "directive"] }
+            }
+          }
+        }
+      }
+    },
+    "VERIFY_SCHEMA": {
+      "type": "object",
+      "required": ["oxf", "origin"],
+      "properties": {
+        "oxf": { "type": "string", "enum": ["o", "x", "f"] },
+        "origin": { "type": "string", "enum": ["user", "agent", "search"] },
+        "verified_value": { "type": "string" },
+        "sources": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" }
+      }
+    },
+    "PLAN_SCHEMA": {
+      "type": "object",
+      "required": ["units"],
+      "properties": {
+        "units": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["title", "pseudocode"],
+            "properties": {
+              "title": { "type": "string" },
+              "pseudocode": { "type": "string", "description": "self-contained pseudocode for ONE startable development task — cites the requirement ids ([iN]) it implements and the facts ([factN]) it stands on, states inputs/outputs and its acceptance check" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "prompts": {
+    "research": "{{RESEARCH_COMMON}}\n\nYOUR ROLE — RESEARCHER: the backlog below is CERTIFIED (every requirement individually verified). Your job is to fix the GROUND the build stands on — the foundational knowledge a senior practitioner locks BEFORE planning:\n- framework: the concrete stack/storage/library decisions this directive's requirements actually compel — name the choice AND the requirement constraint that compels it (not a technology survey; if two options are genuinely equivalent, that is NOT a fact).\n- methodology: how THIS build must be verified, gated, and shipped (test gates, audit/evidence trail, release discipline) — only rules this domain genuinely compels, never a generic process beat-list.\n- directive: domain obligations (law/regulation/standard) the requirements imply but do not spell out — the SPECIFIC trigger/deadline/duty/qualification, grounded per GROUNDING (search what you could misremember).\nEmit facts[] FLAT. Cast NARROW — make-or-breaks only; over-enumeration is failure (the per-fact verifier rejects padding as x). origin: \"search\" if externally grounded, \"agent\" if reliably reasoned. area: framework|methodology|directive.\n\nCertified requirements ledger:\n{{ledger}}\n\nDirective: \"{{directive}}\"\n\nDo any needed search first. FINAL message = ONLY this JSON.",
+    "plan": "YOUR ROLE — PLANNER (one turn). The backlog is certified and the ground is fixed — do NOT re-litigate either. Decompose the work into PSEUDOCODE UNITS: each unit is ONE development task a builder (human or agent) can start and finish without asking anything.\n\nRules:\n- A unit = one coherent authoring boundary (a module/feature/file seam). Do NOT author phase-units like \"testing\" or \"deployment\" — verification lives INSIDE each unit as its acceptance line(s).\n- SELF-CONTAINED pseudocode: cite inline the requirement ids it implements ([i3], [i17]) and the facts it stands on ([fact0]); state inputs/outputs; end with the acceptance check the builder uses to prove it done.\n- Respect the fixed ground: never contradict an \"o\" fact. Where requirements interact, resolve by the directive and say so inside the unit.\n- Order units by dependency (earlier unlocks later). Every unit traces to at least one requirement — no padding units.\n\nCertified requirements ledger:\n{{ledger}}\n\nFixed ground (verified facts):\n{{facts}}\n\nDirective: \"{{directive}}\"\n\nFINAL message = ONLY this JSON."
+  },
+  "stages": {
+    "": [
+      {
+        "op": "publish",
+        "node": { "id": "research", "kind": "task", "stage": "research", "parent": { "$": "args.chunkRef" }, "title": "기초지식 확정" }
+      }
+    ],
+    "research": [
+      { "op": "agent", "prompt": "research", "schema": "RESEARCH_SCHEMA", "label": "기초지식 발굴", "bind": "r" },
+      {
+        "op": "forEach",
+        "in": "r.facts",
+        "when": "item.title",
+        "collect": "factIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": { "auto": "fact" },
+              "kind": "fact",
+              "parent": { "$": "args.chunkRef", "or": "chunk" },
+              "title": { "$": "item.title" },
+              "description": { "$": "item.description", "or": "" },
+              "origin": { "$": "item.origin" },
+              "category": { "$": "item.area" },
+              "badge": { "$": "values.PENDING" },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": { "title": { "$": "item.title" }, "description": { "$": "item.description", "or": "" } },
+              "varRefs": { "directive": "directive" },
+              "registerPromptsOnce": { "fact-verify": { "$": "values.FACT_VERIFY_TMPL" }, "directive": { "$": "args.directive" } }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "node": { "id": "plan", "kind": "task", "stage": "plan", "parent": { "$": "args.chunkRef", "or": "chunk" }, "title": "슈도코드화", "blockedBy": [{ "$": "factIds" }] }
+      },
+      { "op": "return", "value": {} }
+    ],
+    "plan": [
+      { "op": "agent", "prompt": "plan", "schema": "PLAN_SCHEMA", "label": "슈도코드화", "bind": "p" },
+      {
+        "op": "forEach",
+        "in": "p.units",
+        "when": "item.title",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": { "auto": "unit" },
+              "kind": "plan-unit",
+              "parent": { "$": "args.chunkRef", "or": "chunk" },
+              "title": { "$": "item.title" },
+              "description": { "$": "item.pseudocode" }
+            }
+          }
+        ]
+      },
+      { "op": "return", "value": {} }
+    ]
+  }
+}

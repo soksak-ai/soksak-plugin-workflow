@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick, resolveDirective } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick, resolveDirective, researchGate } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -1196,4 +1196,112 @@ test("resolveDirective — 우선순위: 명시 > doc 정련본 > raw 폴백", (
   assert.equal(resolveDirective(undefined, undefined, "raw"), "raw", "doc 없음 → raw");
   const emptyDefault = { spec: "workflow-doc@0.0.1", args: { directive: { default: "" } } };
   assert.equal(resolveDirective(undefined, emptyDefault, "raw"), "raw", "빈 정련본은 폴백(빈 검증 기준 금지)");
+});
+
+// ── M5b research/plan 배선 — workflowRef 참조, ledger 필수, 멱등 가드, researchGate ──
+
+test("buildAddParams — taskCtx.workflowRef 면 body={workflow,stage,args}(번들 이름 참조 — doc 임베드 아님)", () => {
+  const p = buildAddParams(
+    { id: "research", kind: "task", stage: "research", title: "기초지식 확정" },
+    "K-7",
+    [],
+    { workflowRef: "research", directive: "정련 지시" },
+  );
+  assert.deepEqual(JSON.parse(p.body), { workflow: "research", stage: "research", args: { directive: "정련 지시", chunkRef: "K-7" } });
+});
+
+test("reconcileTick — research stage 는 원장 필수 주입(실패 시 거부) + 멱등 가드(fact 마커)", async () => {
+  // 주입 확인.
+  const nodes = [{ id: "research", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"workflow":"research","stage":"research"}' }];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [{ id: "i0", title: "요건", badge: "o" }];
+  await reconcileTick(deps);
+  assert.deepEqual(JSON.parse(deps.calls.stage[0]).args.ledger.map((e) => e.id), ["i0"], "인증 원장 주입(발굴 근거)");
+  // materialize 실패 → 거부.
+  const deps2 = fakeDeps(nodes, null, { children: [], result: null });
+  deps2.materializeLedger = async () => {
+    throw new Error("kanban 응답 없음");
+  };
+  const r2 = await reconcileTick(deps2);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /원장 materialize 실패\(research\)/);
+  // 멱등: 덩어리 직속 fact 존재 = 발행 완료 마커 → execStage 재실행 0.
+  const reNodes = [
+    { id: "research", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"workflow":"research","stage":"research"}' },
+    { id: "f0", kind: "fact", status: "todo", parentId: "chunk", badge: "검수전", blockedBy: [] },
+  ];
+  const deps3 = fakeDeps(reNodes, null, { children: [], result: null });
+  deps3.materializeLedger = async () => [];
+  const r3 = await reconcileTick(deps3);
+  assert.equal(deps3.calls.stage.length, 0, "fact 마커 → 재실행 안 함");
+  assert.equal(deps3.calls.edit.find((e) => e.id === "research").fields.status, "done");
+  assert.equal(r3.ok, true);
+});
+
+test("reconcileTick — plan stage 멱등 가드(plan-unit 마커)", async () => {
+  const nodes = [
+    { id: "plan", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"workflow":"research","stage":"plan"}' },
+    { id: "u0", kind: "plan-unit", status: "todo", parentId: "chunk" },
+  ];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => [];
+  deps.materializeFacts = async () => [];
+  const r = await reconcileTick(deps);
+  assert.equal(deps.calls.stage.length, 0, "plan-unit 마커 → 재실행 안 함");
+  assert.equal(r.ok, true);
+});
+
+test("reconcileStage — 자식 task 에 workflowRef 전파(body.workflow → childCtx)", async () => {
+  // research stage 가 plan task 를 발행하면 그 body 도 workflow 이름 참조여야 한다(임베드 아님).
+  const nodes = [{ id: "research", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"workflow":"research","stage":"research","args":{"directive":"정련"}}' }];
+  const staged = {
+    children: [
+      { ev: "add", id: "fact0", kind: "fact", parent: "chunk", title: "저장소 확정", badge: "검수전" },
+      { ev: "add", id: "plan", kind: "task", parent: "chunk", stage: "plan", title: "슈도코드화", blocked_by: ["fact0"] },
+    ],
+    result: null,
+  };
+  const deps = fakeDeps(nodes, null, staged);
+  deps.materializeLedger = async () => [{ id: "i0", title: "요건", badge: "o" }];
+  await reconcileTick(deps);
+  const planAdd = deps.calls.add.find((p) => p.kind === "task");
+  assert.deepEqual(JSON.parse(planAdd.body), { workflow: "research", stage: "plan", args: { directive: "정련", chunkRef: "chunk" } });
+});
+
+/** researchGate 하니스 — 인증 덩어리 + 조회 deps. */
+function gateDeps(nodes, bodies = {}) {
+  return {
+    listNodes: async () => ({ ok: true, nodes }),
+    getNode: async (id) => ({ ok: true, node: { ...nodes.find((n) => n.id === id), body: bodies[id] || "" } }),
+  };
+}
+
+test("researchGate — 인증(badge='o')·정련 description 존재 시 통과, directive=description(단일 진실)", async () => {
+  const nodes = [{ id: "chunk", kind: "chunk", badge: "o", description: "정련 지시" }];
+  const g = await researchGate(gateDeps(nodes), "chunk");
+  assert.equal(g.ok, true);
+  assert.equal(g.directive, "정련 지시");
+});
+
+test("researchGate — 미존재/미인증/설명없음 각각 거부", async () => {
+  assert.match((await researchGate(gateDeps([]), "chunk")).error, /미존재/);
+  assert.match((await researchGate(gateDeps([{ id: "chunk", badge: "검수전", description: "d" }]), "chunk")).error, /미인증/);
+  assert.match((await researchGate(gateDeps([{ id: "chunk", badge: "o", description: " " }]), "chunk")).error, /비어있음/);
+});
+
+test("researchGate — 멱등: 자손 fact 또는 research task 존재 시 거부", async () => {
+  const withFact = [
+    { id: "chunk", kind: "chunk", badge: "o", description: "d" },
+    { id: "f0", kind: "fact", parentId: "chunk" },
+  ];
+  assert.match((await researchGate(gateDeps(withFact), "chunk")).error, /fact 존재/);
+  const withTask = [
+    { id: "chunk", kind: "chunk", badge: "o", description: "d" },
+    { id: "t1", kind: "task", parentId: "chunk" },
+  ];
+  const g = await researchGate(gateDeps(withTask, { t1: '{"workflow":"research","stage":"research"}' }), "chunk");
+  assert.match(g.error, /research task 발행됨/);
+  // 다른 워크플로 task(draft 잔재)는 멱등 사유 아님.
+  const g2 = await researchGate(gateDeps(withTask, { t1: '{"stage":"audit"}' }), "chunk");
+  assert.equal(g2.ok, true);
 });

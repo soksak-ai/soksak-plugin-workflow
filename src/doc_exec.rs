@@ -825,6 +825,63 @@ mod tests {
         assert_eq!(doc_skel, h2.wh.events, "skeleton 발행 이벤트 동일(chunk+gen task)");
     }
 
+    /// [번들 정본] workflows/research.doc.json — research/plan stage 가 계약대로 실행되는지(stub agent).
+    #[test]
+    fn bundled_research_doc_validates_and_runs_research_and_plan() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        assert_eq!(validate(&doc), Ok(()), "번들 research doc 은 스키마 검증 통과");
+
+        // research stage — fact 발행(정규화·registerPromptsOnce 1회·area→category) + plan task(blockedBy=factIds).
+        let mut agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
+            assert!(prompt.contains("RESEARCHER"), "research 역할 프롬프트");
+            assert!(prompt.contains("- [i0] [o] 요건A"), "{{{{ledger}}}} 렌더(인증 원장)");
+            assert!(prompt.contains("Directive: \"정련 지시\""), "{{{{directive}}}} 렌더");
+            assert!(schema.is_some_and(|s| s["required"][0] == "facts"), "RESEARCH_SCHEMA 전달");
+            Ok(json!({ "facts": [
+                { "title": "저장소: SQLite 채택", "description": "동시성 요건이 단일 노드 — [i0] 근거", "origin": "agent", "area": "framework" },
+                { "title": "마약류 보고 기한 준수", "description": "재고 불일치 시 기한 내 보고", "origin": "search", "area": "directive" }
+            ] }))
+        };
+        let args = json!({ "stage": "research", "directive": "정련 지시", "chunkRef": "K-7",
+            "ledger": [{ "id": "i0", "title": "요건A", "badge": "o" }] });
+        let (events, _r) = run(&doc, "research", &args, &mut agent).expect("research 실행");
+        assert_eq!(events.len(), 3, "fact 2 + plan task 1");
+        let NodeEvent::Add { id, kind, parent, badge, category, prompt_role, register_prompts, var_refs, .. } = &events[0];
+        assert_eq!((id.as_str(), kind.as_str()), ("fact0", "fact"));
+        assert_eq!(parent.as_deref(), Some("K-7"), "args.chunkRef(기존 칸반 id) 직속");
+        assert_eq!(badge.as_deref(), Some("검수전"), "fact 는 draft 항목과 같은 검증 파이프");
+        assert_eq!(category.as_deref(), Some("framework"), "area → category");
+        assert_eq!(prompt_role.as_deref(), Some("fact-verify"));
+        assert!(register_prompts.is_some(), "첫 fact 에 registerPromptsOnce(fact-verify+directive)");
+        assert!(var_refs.is_some(), "directive 콘텐츠 주소 참조");
+        let NodeEvent::Add { register_prompts, .. } = &events[1];
+        assert!(register_prompts.is_none(), "registerPromptsOnce 는 1회만");
+        let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &events[2];
+        assert_eq!((id.as_str(), kind.as_str()), ("plan", "task"));
+        assert_eq!(stage.as_deref(), Some("plan"));
+        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "plan 은 fact 전부 검증 후");
+
+        // plan stage — 요건 원장+fact 원장 렌더 → plan-unit 발행.
+        let mut plan_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
+            assert!(prompt.contains("PLANNER"), "plan 역할 프롬프트");
+            assert!(prompt.contains("- [i0] [o] 요건A"), "{{{{ledger}}}} 렌더");
+            assert!(prompt.contains("- [fact0] [o] (framework) 저장소: SQLite 채택"), "{{{{facts}}}} 렌더: {prompt}");
+            assert!(schema.is_some_and(|s| s["required"][0] == "units"), "PLAN_SCHEMA 전달");
+            Ok(json!({ "units": [ { "title": "재고 차감 구현", "pseudocode": "impl deduct([i0], [fact0])\nacceptance: 차감 후 잔량 일치" } ] }))
+        };
+        let plan_args = json!({ "stage": "plan", "directive": "정련 지시", "chunkRef": "K-7",
+            "ledger": [{ "id": "i0", "title": "요건A", "badge": "o" }],
+            "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
+        let (pev, _pr) = run(&doc, "plan", &plan_args, &mut plan_agent).expect("plan 실행");
+        assert_eq!(pev.len(), 1);
+        let NodeEvent::Add { id, kind, parent, title, description, badge, .. } = &pev[0];
+        assert_eq!((id.as_str(), kind.as_str()), ("unit0", "plan-unit"));
+        assert_eq!(parent.as_deref(), Some("K-7"));
+        assert_eq!(title, "재고 차감 구현");
+        assert!(description.contains("acceptance"), "슈도코드 전문(검증 방법 포함) = description");
+        assert!(badge.is_none(), "plan-unit 은 검증 파이프 비대상(badge 없음)");
+    }
+
     #[test]
     fn concat_value_composes_from_plain_values() {
         let d = json!({ "spec": SPEC, "meta": {"name":"x","description":""},

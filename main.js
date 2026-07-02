@@ -195,10 +195,14 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
   let body;
   if (ev.kind === "task") {
     const stage = ev.stage || "generate";
+    // workflowRef(번들 정본 이름) 우선 — canonical doc(research 등)은 task 마다 임베드하지 않고 이름 참조,
+    // exec-stage 가 plugin_root/workflows/<name>.doc.json 을 로드한다(단일 원천). 저작 doc(draft)은 임베드 유지.
     body = JSON.stringify(
-      taskCtx && taskCtx.skeleton
-        ? { skeleton: taskCtx.skeleton, stage, args: { directive: taskCtx.directive, chunkRef: parentId } }
-        : { stage }
+      taskCtx && taskCtx.workflowRef
+        ? { workflow: taskCtx.workflowRef, stage, args: { directive: taskCtx.directive, chunkRef: parentId } }
+        : taskCtx && taskCtx.skeleton
+          ? { skeleton: taskCtx.skeleton, stage, args: { directive: taskCtx.directive, chunkRef: parentId } }
+          : { stage }
     );
   } else if (ev.prompt_role || ev.promptRole) {
     // 정규화 item — 콘텐츠 주소화 참조. role→hash(roleToHash 는 이번 발행 배치의 registerPrompts 등록 결과).
@@ -447,18 +451,25 @@ async function reconcileStage(deps, target, body, nodes) {
         ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id)
         : stageName === "hunt"
           ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item" && !huntBlocked.has(n.id))
-          : false;
+          : stageName === "research"
+            ? // research 는 fact 를 최초 발행하는 유일한 출처 — 덩어리 직속 fact 존재=발행 완료 마커.
+              nodes.some((n) => n && n.parentId === target.parentId && n.kind === "fact")
+            : stageName === "plan"
+              ? // plan 은 plan-unit 을 최초 발행하는 유일한 출처 — 동일 패턴.
+                nodes.some((n) => n && n.parentId === target.parentId && n.kind === "plan-unit")
+              : false;
     if (published) {
       await deps.editNode(target.id, { status: "done" });
       await deps.poke();
       return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
     }
   }
-  // hunt/classify/audit/plan 은 ledger(덩어리 자손 요건+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
+  // hunt/classify/audit/research/plan 은 ledger(덩어리 자손 요건+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
   // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
-  // plan(한턴 슈도코드화)은 요건 원장 + research 기초지식 원장(kind=fact, args.facts) 둘 다 받는다.
+  // research(기초지식 발굴)는 인증 요건 원장이 발굴 근거. plan(한턴 슈도코드화)은 요건 원장 + fact 원장(args.facts) 둘 다.
   let ledger;
-  if ((stageName === "hunt" || stageName === "classify" || stageName === "audit" || stageName === "plan") && deps.materializeLedger && target.parentId) {
+  const LEDGER_STAGES = new Set(["hunt", "classify", "audit", "research", "plan"]);
+  if (LEDGER_STAGES.has(stageName) && deps.materializeLedger && target.parentId) {
     try {
       ledger = await deps.materializeLedger(target.parentId);
       const inp = JSON.parse(body);
@@ -468,9 +479,9 @@ async function reconcileStage(deps, target, body, nodes) {
       }
       stageBody = JSON.stringify(inp);
     } catch (e) {
-      // classify(배정 검증)·audit(f 집계=인증 계산)·plan(슈도코드의 입력=원장)은 원장이 필수 — 없으면 거부(backoff).
-      // hunt 만 ledger 없이 진행 가능(프롬프트 입력용 — 빈 원장은 '중복 회피 정보 없음'일 뿐).
-      if (stageName === "classify" || stageName === "audit" || stageName === "plan") {
+      // classify(배정 검증)·audit(f 집계=인증 계산)·research(발굴 근거=인증 원장)·plan(슈도코드 입력=원장)은
+      // 원장이 필수 — 없으면 거부(backoff). hunt 만 ledger 없이 진행 가능(빈 원장='중복 회피 정보 없음'일 뿐).
+      if (stageName !== "hunt") {
         return { ok: false, processed: 0, id: target.id, error: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
       }
     }
@@ -481,11 +492,13 @@ async function reconcileStage(deps, target, body, nodes) {
   } catch (e) {
     return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
   }
-  // 자식 stage 노드(Hunt/Audit)에 skeleton 전파 — 이 task 입력 body 에서 추출(같은 워크플로 골격 재실행).
+  // 자식 stage 노드(hunt/classify/audit·plan)에 워크플로 전파 — 이 task 입력 body 에서 추출(같은 골격 재실행).
+  // workflowRef(번들 정본 이름)가 있으면 그것을, 없으면 임베드 skeleton 을 전파.
   let childCtx;
   try {
     const inp = JSON.parse(body);
-    if (inp && inp.skeleton) childCtx = { skeleton: inp.skeleton, directive: inp.args && inp.args.directive };
+    if (inp && inp.workflow) childCtx = { workflowRef: inp.workflow, directive: inp.args && inp.args.directive };
+    else if (inp && inp.skeleton) childCtx = { skeleton: inp.skeleton, directive: inp.args && inp.args.directive };
   } catch {
     /* body 가 exec-stage 입력이 아니면 전파 없음(자식에 task 없을 때) */
   }
@@ -636,6 +649,47 @@ export async function issuerizeTick(deps, chunkId) {
     issued += 1;
   }
   return { ok: true, issued, chunk: chunkId };
+}
+
+/** researchGate — workflow.research 진입 게이트(순수, deps 주입: listNodes·getNode).
+ *  ① 덩어리 badge==='o'(audit 인증 — PRINCIPLES §5 의 전제와 동일 축) ② description(정련 directive) 비어있지 않음
+ *  ③ 멱등: 자손 fact(실행 흔적) 또는 research task(body.workflow==='research') 존재 시 거부.
+ *  통과 시 directive=덩어리 description(단일 진실 §1 — 표시 표면이 곧 검증 기준). */
+export async function researchGate(deps, chunkId) {
+  const listed = await deps.listNodes();
+  const nodes = (listed && listed.nodes) || [];
+  const chunk = nodes.find((n) => n.id === chunkId);
+  if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
+  if (chunk.badge !== "o") {
+    return { ok: false, error: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 research` };
+  }
+  if (!chunk.description || !String(chunk.description).trim()) {
+    return { ok: false, error: "덩어리 description(정련 directive) 비어있음 — 검증 기준 없이 research 불가" };
+  }
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const descends = (n) => {
+    let p = n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === chunkId) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  if (nodes.some((n) => n.kind === "fact" && descends(n))) {
+    return { ok: false, error: "이미 research 진행/완료(fact 존재) — 멱등 거부" };
+  }
+  for (const t of nodes.filter((n) => n.kind === "task" && n.parentId === chunkId)) {
+    const full = await deps.getNode(t.id);
+    let b;
+    try {
+      b = JSON.parse(((full && full.node) || {}).body || "");
+    } catch {
+      continue;
+    }
+    if (b && b.workflow === "research") return { ok: false, error: "이미 research task 발행됨 — 멱등 거부" };
+  }
+  return { ok: true, directive: chunk.description };
 }
 
 // ── app 연결(런타임) ──
@@ -799,11 +853,112 @@ function execStage(app, bin, opts, body) {
 export default {
   async activate(ctx) {
     const app = ctx.app;
-    // 실행 런타임(workflow.run 이 갱신). reconcile 핸들러가 exec-one/exec-stage spawn 에, relay 가 task body 임베드에 쓴다.
+    // 실행 런타임(workflow.run/workflow.research 가 갱신). reconcile 핸들러가 exec spawn 에, relay 가 task body 에 쓴다.
     // bin=null → buildSpawnCmd 로그인셸 랩 기본(재시작 후에도 결정 가능). env 는 세션 캡처 — 영속은 secrets(env:*).
-    const runtime = { bin: null, env: undefined, skeleton: undefined, directive: undefined };
+    // workflowRef: 번들 정본 이름(research 등) — 설정 시 task body 는 doc 임베드 대신 이름 참조(exec-stage 가 로드).
+    const runtime = { bin: null, env: undefined, skeleton: undefined, directive: undefined, workflowRef: undefined };
     // reconcile 인메모리 상태(무판정 상한·기아 방지 카운터) — activate 수명, 재시작 시 리셋 허용.
     const reconcileState = makeReconcileState();
+
+    /** emitAndRelay — --emit spawn + 발행 relay(workflow.run/workflow.research 공유).
+     *  stdout JSON line → 칸반 node.add(keyOf 부모 해석·roleToHash 정규화·taskCtx 임베드), stderr 수집,
+     *  exit code·relay 실패를 검사해 fail-loud 반환(선반환 {ok:true} 금지 — PRINCIPLES §2). */
+    async function emitAndRelay(emitArgs, stdinContent) {
+      const emitCmd = buildSpawnCmd(runtime.bin, emitArgs);
+      const handle = await app.process.spawn(emitCmd.cmd, emitCmd.args, {}); // 발행은 LLM 미호출 → env 불필요
+
+      const keyOf = new Map(); // 워크플로 노드 id → 칸반 노드 id
+      let buf = "";
+      let errBuf = ""; // --emit stderr(러스트 error: 진단) — 실패 시 사용자 표면으로.
+      const queue = [];
+      let processing = false;
+      let relayErrors = 0; // node.add/prompt.put relay 실패 집계 — 침묵 삼킴 금지(fail-loud).
+      let firstRelayError = "";
+
+      const roleToHash = new Map(); // 프롬프트 정규화: registerPrompts 등록 결과(role→sha256). item 발행이 참조.
+      const handleEv = async (line) => {
+        if (!line.startsWith("{")) return;
+        let ev;
+        try { ev = JSON.parse(line); } catch { return; }
+        try {
+          if (ev.ev === "add") {
+            // 정규화: chunk/stage 의 registerPrompts({role:text}) → kanban prompt.put(sha256 dedup) → roleToHash.
+            if (ev.register_prompts || ev.registerPrompts) {
+              const putPrompt = (value) => app.commands.execute(KANBAN + ".prompt.put", { value });
+              const reg = await registerPromptTemplates(ev.register_prompts || ev.registerPrompts, putPrompt);
+              for (const [role, hash] of reg) roleToHash.set(role, hash);
+            }
+            // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
+            const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
+            const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
+            // stage 작업(kind=task) 노드 body: workflowRef(번들 이름 참조) 우선, 없으면 skeleton 임베드.
+            const taskCtx = runtime.workflowRef
+              ? { workflowRef: runtime.workflowRef, directive: runtime.directive }
+              : runtime.skeleton
+                ? { skeleton: runtime.skeleton, directive: runtime.directive }
+                : undefined;
+            const params = buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash); // 발행 relay·exec-stage relay 공유
+            const r = await app.commands.execute(KANBAN + ".node.add", params);
+            if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
+            else throw new Error(`node.add 거부: ${(r && r.error) || JSON.stringify(r)}`);
+          }
+        } catch (e) {
+          relayErrors += 1;
+          if (!firstRelayError) firstRelayError = String((e && e.message) || e);
+          app.bus?.emit?.("workflow.error", { message: String(e) });
+        }
+      };
+
+      // drain — 큐 순차 처리(재진입 방지로 발행 순서·keyOf race 차단).
+      const drain = async () => {
+        if (processing) return;
+        processing = true;
+        while (queue.length) await handleEv(queue.shift());
+        processing = false;
+      };
+
+      app.process.onData(handle, (bytes) => {
+        buf += new TextDecoder().decode(bytes);
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          queue.push(buf.slice(0, nl).trim());
+          buf = buf.slice(nl + 1);
+        }
+        void drain();
+      });
+      if (app.process.onStderr) {
+        const errDec = new TextDecoder();
+        app.process.onStderr(handle, (bytes) => {
+          errBuf += errDec.decode(bytes, { stream: true });
+        });
+      }
+      const exited = new Promise((resolve) => {
+        app.process.onExit(handle, (code) => resolve(code));
+      });
+
+      if (stdinContent) {
+        await app.process.write(handle, stdinContent);
+        if (app.process.closeStdin) await app.process.closeStdin(handle);
+      }
+
+      // 발행 완결까지 대기 — exit code·relay 실패를 검사해 fail-loud 로 반환(선반환 {ok:true} 금지).
+      const code = await exited;
+      if (buf.trim()) queue.push(buf.trim());
+      await drain();
+      if (code !== 0) {
+        const tail = errBuf.trim().slice(-500);
+        const error = `--emit exit ${code}${tail ? `: ${tail}` : ""}`;
+        app.bus?.emit?.("workflow.error", { message: error });
+        return { ok: false, error, published: keyOf.size };
+      }
+      if (relayErrors > 0) {
+        return { ok: false, error: `발행 relay 실패 ${relayErrors}건(첫: ${firstRelayError})`, published: keyOf.size };
+      }
+      app.bus?.emit?.("workflow.done", {});
+      // 발행 완료 → reconcile 깨워 새 ready 노드 처리.
+      app.scheduler?.poke?.(RECONCILE_ID);
+      return { ok: true, published: keyOf.size };
+    }
 
     ctx.subscriptions.push(
       app.commands.register("workflow.run", {
@@ -836,100 +991,42 @@ export default {
           }
           // skeleton 캡처(인라인 문자열) — stage 작업 노드 body 에 임베드해 reconcile 이 exec-stage 로 재실행.
           try { runtime.skeleton = skeleton ? JSON.parse(skeleton) : undefined; } catch { runtime.skeleton = undefined; }
+          runtime.workflowRef = undefined; // 저작/skeleton 경로는 임베드 — 번들 이름 참조 아님(research 잔재 차단)
           // directive 단일 진실(PRINCIPLES §1): 명시 directive > doc 정련본(저작 게이트 통과 정본) > idea raw.
           // --emit 의 chunk description(doc default)과 여기서 임베드하는 검증 기준이 같은 문자열이 된다.
           runtime.directive = resolveDirective(directive, runtime.skeleton, idea);
           const input = skeletonPath || "-";
-          const emitCmd = buildSpawnCmd(runtime.bin, [input, "--emit", "--lang", "ko"]);
-          const handle = await app.process.spawn(emitCmd.cmd, emitCmd.args, {}); // 발행은 LLM 미호출 → env 불필요
+          return await emitAndRelay([input, "--emit", "--lang", "ko"], !skeletonPath && skeleton ? skeleton : undefined);
+        },
+      }),
+    );
 
-          const keyOf = new Map(); // 워크플로 노드 id → 칸반 노드 id
-          let buf = "";
-          let errBuf = ""; // --emit stderr(러스트 error: 진단) — 실패 시 사용자 표면으로.
-          const queue = [];
-          let processing = false;
-          let relayErrors = 0; // node.add/prompt.put relay 실패 집계 — 침묵 삼킴 금지(fail-loud).
-          let firstRelayError = "";
-
-          const roleToHash = new Map(); // 프롬프트 정규화: registerPrompts 등록 결과(role→sha256). item 발행이 참조.
-          const handleEv = async (line) => {
-            if (!line.startsWith("{")) return;
-            let ev;
-            try { ev = JSON.parse(line); } catch { return; }
-            try {
-              if (ev.ev === "add") {
-                // 정규화: chunk/stage 의 registerPrompts({role:text}) → kanban prompt.put(sha256 dedup) → roleToHash.
-                if (ev.register_prompts || ev.registerPrompts) {
-                  const putPrompt = (value) => app.commands.execute(KANBAN + ".prompt.put", { value });
-                  const reg = await registerPromptTemplates(ev.register_prompts || ev.registerPrompts, putPrompt);
-                  for (const [role, hash] of reg) roleToHash.set(role, hash);
-                }
-                // 부모 ref: 로컬 emit id(이번 발행에서 추가됨)면 keyOf 로 칸반 id, 아니면 기존 칸반 id(chunkRef) 그대로.
-                const parentId = ev.parent ? keyOf.get(ev.parent) || ev.parent : undefined;
-                const blockedBy = (ev.blocked_by || ev.blockedBy || []).map((id) => keyOf.get(id) || id).filter(Boolean);
-                // stage 작업(kind=task) 노드는 body 에 skeleton 임베드(exec-stage 입력). 항목/그룹은 무관.
-                const taskCtx = runtime.skeleton ? { skeleton: runtime.skeleton, directive: runtime.directive } : undefined;
-                const params = buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash); // 발행 relay·exec-stage relay 공유
-                const r = await app.commands.execute(KANBAN + ".node.add", params);
-                if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
-                else throw new Error(`node.add 거부: ${(r && r.error) || JSON.stringify(r)}`);
-              }
-            } catch (e) {
-              relayErrors += 1;
-              if (!firstRelayError) firstRelayError = String((e && e.message) || e);
-              app.bus?.emit?.("workflow.error", { message: String(e) });
-            }
-          };
-
-          // drain — 큐 순차 처리(재진입 방지로 발행 순서·keyOf race 차단).
-          const drain = async () => {
-            if (processing) return;
-            processing = true;
-            while (queue.length) await handleEv(queue.shift());
-            processing = false;
-          };
-
-          app.process.onData(handle, (bytes) => {
-            buf += new TextDecoder().decode(bytes);
-            let nl;
-            while ((nl = buf.indexOf("\n")) >= 0) {
-              queue.push(buf.slice(0, nl).trim());
-              buf = buf.slice(nl + 1);
-            }
-            void drain();
-          });
-          if (app.process.onStderr) {
-            const errDec = new TextDecoder();
-            app.process.onStderr(handle, (bytes) => {
-              errBuf += errDec.decode(bytes, { stream: true });
-            });
-          }
-          const exited = new Promise((resolve) => {
-            app.process.onExit(handle, (code) => resolve(code));
-          });
-
-          if (!skeletonPath && skeleton) {
-            await app.process.write(handle, skeleton);
-            if (app.process.closeStdin) await app.process.closeStdin(handle);
-          }
-
-          // 발행 완결까지 대기 — exit code·relay 실패를 검사해 fail-loud 로 반환(선반환 {ok:true} 금지).
-          const code = await exited;
-          if (buf.trim()) queue.push(buf.trim());
-          await drain();
-          if (code !== 0) {
-            const tail = errBuf.trim().slice(-500);
-            const error = `--emit exit ${code}${tail ? `: ${tail}` : ""}`;
-            app.bus?.emit?.("workflow.error", { message: error });
-            return { ok: false, error, published: keyOf.size };
-          }
-          if (relayErrors > 0) {
-            return { ok: false, error: `발행 relay 실패 ${relayErrors}건(첫: ${firstRelayError})`, published: keyOf.size };
-          }
-          app.bus?.emit?.("workflow.done", {});
-          // 발행 완료 → reconcile 깨워 새 ready(검수전) 노드 처리.
-          app.scheduler?.poke?.(RECONCILE_ID);
-          return { ok: true, published: keyOf.size };
+    // research — 인증 덩어리에 번들 정본 워크플로(workflows/research.doc.json)를 건다(저작 LLM 불참 — PRINCIPLES §7).
+    ctx.subscriptions.push(
+      app.commands.register("workflow.research", {
+        description:
+          "인증된 드래프트 덩어리(badge='o')에 research 워크플로를 발행 — 기초지식(fact: framework/methodology/directive) 발굴·검증 후 plan(한턴 슈도코드화)이 자동 연결된다. directive=덩어리 description(정련 정본, 단일 진실). 재호출 멱등 거부.",
+        params: {
+          chunk: { type: "string", description: "대상 덩어리(칸반 노드 id) — audit 인증(badge='o') 필수" },
+        },
+        returns: "{ ok, published?, error? }",
+        handler: async ({ chunk }) => {
+          if (!chunk) return { ok: false, error: "chunk(덩어리 id) 필수" };
+          const gate = await researchGate(
+            {
+              listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
+              getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
+            },
+            chunk,
+          );
+          if (!gate.ok) return gate;
+          runtime.workflowRef = "research"; // task body = 이름 참조(exec-stage 가 번들 doc 로드)
+          runtime.skeleton = undefined;
+          runtime.directive = gate.directive; // 단일 진실(§1): 덩어리 description = 정련 정본 = 검증 기준
+          return await emitAndRelay(
+            ["--workflow", "research", "--emit", "--lang", "ko", "--args-json", JSON.stringify({ chunkRef: chunk, directive: gate.directive })],
+            undefined,
+          );
         },
       }),
     );
