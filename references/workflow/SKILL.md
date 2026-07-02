@@ -1,50 +1,45 @@
 ---
-name: workflow
-description: Use when a task needs many subagents orchestrated deterministically — comprehensive coverage (decompose + parallel), confidence (independent perspectives + adversarial checks), or scale one context can't hold (migrations, audits, sweeps).
-provenance: Restored from the Workflow tool description loaded in the orchestrator (Claude) system prompt of cc 2.1.195. High fidelity for behavior/API/patterns. NOT a byte-copy of a cc-internal SKILL.md — the Workflow feature ships as a TOOL; this file reconstructs its usage as a skill for our clone's authoring LLM.
+name: workflow-doc
+description: Author a workflow-doc@0.0.1 — a declarative, language-neutral JSON document that the soksak-workflow executor runs stage by stage. Replaces JS (gen.js) authoring: no syntax risk, schema-validated, fail-loud.
+provenance: soksak-workflow doc executor (src/doc_exec.rs) is the single runtime contract. This skill teaches its input format.
 ---
 
-# Workflow — orchestrate many subagents deterministically
+# workflow-doc@0.0.1 — the document IS the program
 
-A workflow is a JavaScript script that fans work out across subagents under **deterministic** control flow (loops, conditionals, fan-out) — control flow you decide in code, not control flow the model improvises. The runtime runs the script in the background, spawning each `agent()` call as a subagent, and returns one structured result.
+A workflow is authored as ONE JSON document. The executor (`soksak-workflow`) runs one **stage** per invocation: the empty stage `""` publishes the initial kanban nodes (`--emit`, never calls an LLM), and named stages (`generate`, `hunt`, …) run under `exec-stage` (LLM allowed). Publishing emits kanban node events; the scheduler executes published nodes later. You never execute anything yourself — you DECLARE.
 
-## When to author a workflow
+## Top-level shape
 
-Reach for a workflow when the task is one of:
-- **Understand** — parallel readers over subsystems → structured map
-- **Design** — judge panel of N independent approaches → scored synthesis
-- **Review** — dimensions → find → adversarially verify
-- **Research** — multi-modal sweep → deep-read → synthesize
-- **Migrate** — discover sites → transform each (worktree isolation) → verify
+```json
+{
+  "spec": "workflow-doc@0.0.1",
+  "meta":    { "name": "draft", "description": "one line, plain" },
+  "args":    { "directive": { "from": ["directive", "DIRECTIVE", "IDEA"], "default": "…" } },
+  "values":  { "NAME": "verbatim text or JSON object — NEVER rendered" },
+  "prompts": { "name": "rendered at agent time — {{ref}} placeholders" },
+  "stages":  { "": [ops…], "generate": [ops…], "hunt": [ops…] }
+}
+```
 
-For a single-fact lookup, do NOT author a workflow — just search. For larger work, run several workflows in **sequence**, reading each result before deciding the next phase.
+- `args` — declares runtime inputs: `from` is a priority list of keys looked up in the invocation args; `default` applies when none present. Runtime-injected keys (`stage`, `chunkRef`, `ledger`, `lang`) pass through without declaration.
+- `values` — constants: prompt fragments, JSON Schemas, templates. Values are **verbatim** — `{{…}}` markers inside a value survive untouched (consumption-time substitution elsewhere). A value may be composed once at load: `{"concat": [{"$": "values.COMMON"}, "…suffix…"]}` (references plain string values only).
+- `prompts` — templates rendered when an `agent` op runs. `{{name}}` resolves from values, args, bound locals, or the builtin `{{ledger}}` (renders `args.ledger` as the canonical ledger lines). An unresolvable placeholder is a validation error — nothing fails silently.
+- `stages` — each key is a stage name; the value is an ordered op list. Stage `""` is the skeleton (publish-only; an `agent` op there is rejected).
 
-**Hybrid is often right:** scout inline first (list the files, find the channels, scope the diff) to discover the work-list, THEN author a workflow to pipeline over it. You don't need the shape before the *task* — only before the *orchestration step*.
+## The 4 ops
 
-## Opt-in discipline
+| op | does | key fields |
+|---|---|---|
+| `agent` | render a prompt, call the LLM, bind the JSON result | `prompt`(prompts key), `schema`(values key, optional), `label`, `bind`(local name) |
+| `forEach` | iterate an array binding `item`/`index` | `in`(path), `when`(path filter), `collect`(gathers published node ids), `do`(ops) |
+| `publish` | emit one kanban node event | `node`{…} — see api-reference |
+| `return` | end the stage with a result object | `value`{k: expr} |
 
-A workflow can spawn dozens of agents and burn a large token budget. Only author/run one when the user has explicitly opted in (asked for a workflow / multi-agent orchestration, invoked a skill that calls it, or ultracode is on). For any other task, use a single `Agent` instead, or describe what a workflow could do and ask.
+## Expressions
 
-## Lifecycle
+A field value is either a JSON literal, or a reference `{"$": "path", "or": default}`. Paths are dot chains whose first segment is a bound local (`tree`, `item`, `index`, `itemIds`, …) or the roots `args` / `values`. `or` applies when the path is missing or null. In `blockedBy` arrays, a reference resolving to an array is spread inline.
 
-1. **Author** the script — begins with `export const meta = {...}` (pure literal), then the body using `agent()/parallel()/pipeline()/phase()/log()`.
-2. **Invoke** — `Workflow({script})` (inline), `Workflow({name})` (saved/built-in), or `Workflow({scriptPath})` (a file). Pass `args` to parameterize.
-3. **Runs in background** — the call returns immediately with a `runId` + a persisted `scriptPath`. A `<task-notification>` arrives on completion.
-4. **Watch** live progress with `/workflows`.
-5. **Read** the returned result (the script's `return` value) — relay what matters; it is not shown to the user.
+## Discipline
 
-## Iterating
-
-Every invocation persists its script to a file under the session dir and returns that path. To iterate: **edit that file** (Write/Edit) and re-invoke `Workflow({scriptPath})` — do not re-send the whole script.
-
-## Resume
-
-To resume after a pause/kill/edit: relaunch with `Workflow({scriptPath, resumeFromRunId})`. The longest unchanged prefix of `agent()` calls returns cached results instantly; the first edited/new call and everything after runs live. Same script + same args → 100% cache hit. (This is why `Date.now()/Math.random()/new Date()` are unavailable in scripts — they would break resume. Stamp timestamps after the workflow returns, or pass them via `args`.)
-
-**Fallback when no journal is available:** Read the `agent-<id>.jsonl` files in the transcript directory and hand-author a continuation script.
-
-## The one rule that decides quality: pipeline() by default
-
-DEFAULT TO `pipeline()`. A barrier (`parallel()` between stages) is correct ONLY when stage N genuinely needs ALL of stage N-1 together (dedup/merge across the full set, early-exit on zero, or a prompt that references "the other findings"). It is NOT justified by "I need to flatten/map/filter first" (do that inside a stage), "the stages are conceptually separate", or "it's cleaner". Barrier latency is real.
-
-See `api-reference.md` for every hook, `patterns.md` for the quality patterns, and `../../extracted/2.1.193/deep-research/deep-research.workflow.js` for a canonical fan-out script.
+- Validation is the gate: the document is schema-checked at authoring, at `--emit`, and at `exec-stage`. A violation is a loud rejection — prefer failing here over a runtime surprise.
+- Output ONLY the JSON document. No markdown fence, no prose before or after.

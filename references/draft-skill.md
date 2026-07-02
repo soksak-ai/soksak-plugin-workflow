@@ -1,38 +1,357 @@
-# draft 역할 워크플로 작성 지시 (soksak)
+# draft 역할 워크플로 저작 지시 (soksak — workflow-doc@0.0.1)
 
-너는 soksak 의 draft 역할 워크플로를 JS 코드로 작성한다. 산출물 = soksak-workflow interp 가 parse 해 실행하는 **완전한 워크플로 파일 1개**. 사용자 아이디어 → 백로그 요건 덩어리 → 칸반 노드 발행(agent opts.publish:true). 아래 원문(draft.js verbatim) COMMON·스키마·역할 프롬프트·발행 패턴을 그대로 써라.
+너는 soksak 의 draft 역할 워크플로를 **workflow-doc@0.0.1 JSON 문서**로 저작한다. 산출물 = soksak-workflow doc 실행기가 검증(validate)하고 stage 별로 실행하는 **완전한 JSON 문서 1개**. 사용자 아이디어 → 백로그 요건 덩어리 → 칸반 노드 발행. 코드가 아니다 — 문서가 프로그램이다(op 의미론은 system 의 workflow-doc 스킬).
 
-**파일은 반드시 `export const meta = {...}` (순수 리터럴)로 시작한다** — 추출기 parse 의 계약이며, 없으면 "export const meta 없음" 으로 파싱 실패한다. 아래 「워크플로 골격」의 뼈대(export const meta → args/DIRECTIVE 추출 → 상수/스키마/프롬프트 → STAGE 추출 → if-STAGE 분기 → skeleton emit)를 그 순서 그대로 하나의 파일로 조립하라. 마크다운 펜스·설명 없이 순수 JS 만 출력.
+**출력 계약**: 순수 JSON 만 출력한다 — 마크다운 펜스·설명·주석 없이 `{` 로 시작해 `}` 로 끝난다. 산출은 즉시 스키마 검증(fail-loud)되며, 위반 하나라도 있으면 저작 실패로 거부된다(플레이스홀더 미해석·참조 오타·id 중복 전부).
 
-**프롬프트 정규화(콘텐츠 주소화) — 필수**: item 노드에 완성 프롬프트(COMMON+본문 ~8.7KB)를 통째 박지 마라. **3수준 분리**: (1) VERIFY_TMPL = {{key}} 마커 템플릿 상수(전역 공유, 모든 드래프트), (2) DIRECTIVE = 청크당 1개 큰 공유값(~1KB), (3) category/title/description = 항목당 작은 값(~100자). item agent 는 1번째 인자 빈 문자열('') + opts.promptRole:'verify' + opts.vars(**작은 값만**: category/title/description) + **opts.varRefs:{directive:'directive'}**(directive 를 콘텐츠 주소 참조). 첫 group 발행에 registerPrompts:{verify:VERIFY_TMPL, directive:DIRECTIVE} 로 **둘 다** 1회 등록(sha256 dedup). 소비 시점(kanban prompt.resolve)에 {{key}}→vars(인라인)/refs(hash deref) 치환. **directive 를 vars 에 넣지 마라 — 항목마다 1.1KB 복붙된다.**
+## 골격 (canonical — 이 구조 그대로, `<…>` 슬롯만 채운다)
 
-## 워크플로 골격 (draft.js 원문 — 반드시 이 뼈대, `export const meta` 로 시작)
-export const meta = {
-  name: 'draft',
-  description: 'DRAFT 워크플로 — 아이디어(DIRECTIVE)를 백로그 덩어리로 구체화. exec-stage 가 stage(generate/hunt/audit) 별로 호출. generate=genPrompt 실행→그룹/항목 발행(항목 body=verifyPrompt), 항목 검증=exec-one, 누락=hunt, 완결성=audit.',
+```json
+{
+  "spec": "workflow-doc@0.0.1",
+  "meta": {
+    "name": "draft",
+    "description": "DRAFT 워크플로 — 아이디어(directive)를 백로그 덩어리로 구체화. exec-stage 가 stage(generate/hunt/classify/audit) 별로 호출. generate=요건 발굴·평탄 발행, 항목 검증=exec-one, 누락=hunt, 분류=classify(완성 집합), 완결 인증=audit."
+  },
+  "args": {
+    "directive": {
+      "from": [
+        "directive",
+        "DIRECTIVE",
+        "IDEA"
+      ],
+      "default": "<여기에 정련된 DIRECTIVE — 아래 「저작 자유도」>"
+    },
+    "parentDraftId": {
+      "from": [
+        "parentDraftId"
+      ],
+      "default": null
+    }
+  },
+  "values": {
+    "PENDING": "검수전",
+    "COMMON": "<COMMON 원문 — 아래 「원문 블록」 그대로>",
+    "VERIFY_TMPL": {
+      "concat": [
+        {
+          "$": "values.COMMON"
+        },
+        "<VERIFY 역할 본문 — 아래 「원문 블록」 그대로>"
+      ]
+    },
+    "GEN_SCHEMA": "<원문 블록>",
+    "CLASSIFY_SCHEMA": "<원문 블록>",
+    "VERIFY_SCHEMA": "<원문 블록>",
+    "HUNT_SCHEMA": "<원문 블록>",
+    "AUDIT_SCHEMA": "<원문 블록>"
+  },
+  "prompts": {
+    "gen": "<원문 블록>",
+    "hunt": "<원문 블록>",
+    "classify": "<원문 블록>",
+    "audit": "<원문 블록>"
+  },
+  "stages": {
+    "": [
+      {
+        "op": "publish",
+        "node": {
+          "id": "chunk",
+          "kind": "chunk",
+          "isDraft": true,
+          "parentDraftId": {
+            "$": "args.parentDraftId",
+            "or": ""
+          },
+          "title": {
+            "$": "args.title",
+            "or": "구체화 덩어리"
+          },
+          "description": {
+            "$": "args.directive"
+          }
+        }
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "gen",
+          "kind": "task",
+          "stage": "generate",
+          "parent": "chunk",
+          "title": "요건 도출"
+        }
+      }
+    ],
+    "generate": [
+      {
+        "op": "agent",
+        "prompt": "gen",
+        "schema": "GEN_SCHEMA",
+        "label": "요건 도출",
+        "bind": "tree"
+      },
+      {
+        "op": "forEach",
+        "in": "tree.requirements",
+        "when": "item.title",
+        "collect": "itemIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "i"
+              },
+              "kind": "item",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "verify": {
+                  "$": "values.VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "hunt",
+          "kind": "task",
+          "stage": "hunt",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "누락 탐색",
+          "blockedBy": [
+            {
+              "$": "itemIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "classify",
+          "kind": "task",
+          "stage": "classify",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "분류",
+          "blockedBy": [
+            {
+              "$": "itemIds"
+            },
+            "hunt"
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "audit",
+          "kind": "task",
+          "stage": "audit",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "부모 감사",
+          "blockedBy": [
+            {
+              "$": "itemIds"
+            },
+            "hunt",
+            "classify"
+          ]
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "chunkTitle": {
+            "$": "tree.title",
+            "or": ""
+          },
+          "titleOrigin": {
+            "$": "tree.titleOrigin",
+            "or": "agent"
+          }
+        }
+      }
+    ],
+    "hunt": [
+      {
+        "op": "agent",
+        "prompt": "hunt",
+        "schema": "HUNT_SCHEMA",
+        "label": "누락 탐색",
+        "bind": "r"
+      },
+      {
+        "op": "forEach",
+        "in": "r.additions",
+        "when": "item.title",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "add"
+              },
+              "kind": "item",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "verify": {
+                  "$": "values.VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "return",
+        "value": {}
+      }
+    ],
+    "classify": [
+      {
+        "op": "agent",
+        "prompt": "classify",
+        "schema": "CLASSIFY_SCHEMA",
+        "label": "분류",
+        "bind": "r"
+      },
+      {
+        "op": "return",
+        "value": {
+          "dimension": {
+            "$": "r.dimension",
+            "or": ""
+          },
+          "assignments": {
+            "$": "r.assignments",
+            "or": []
+          }
+        }
+      }
+    ],
+    "audit": [
+      {
+        "op": "agent",
+        "prompt": "audit",
+        "schema": "AUDIT_SCHEMA",
+        "label": "부모 감사",
+        "bind": "r"
+      },
+      {
+        "op": "return",
+        "value": {
+          "verdict": {
+            "$": "r.verdict",
+            "or": "(감사 결과 없음)"
+          },
+          "complete": {
+            "$": "r.complete",
+            "or": false
+          }
+        }
+      }
+    ]
+  }
 }
+```
 
-// ── 입력 DIRECTIVE — args 우선(string | {directive|DIRECTIVE|IDEA}). 클론 VM: string 은 typeof 로 판정(member 접근 X).
-let DIRECTIVE = ''
-if (typeof args === 'string') DIRECTIVE = args
-else if (args && args.directive) DIRECTIVE = args.directive
-else if (args && args.DIRECTIVE) DIRECTIVE = args.DIRECTIVE
-else if (args && args.IDEA) DIRECTIVE = args.IDEA
-const parentDraftId = (args && args.parentDraftId) || null
+**stages 는 위 구조 그대로다** — op 를 추가/삭제/재배열하지 마라. blockedBy 사슬(hunt=전 항목 → classify=+hunt → audit=+classify)이 절차 순서다: generate(평탄 발굴) → verify(항목별 exec-one, 스케줄러 몫) → hunt(누락 보강) → classify(완성 집합 분류) → audit(전체 감사).
 
-// ↓↓ 그 다음: PENDING · COMMON · 스키마+ledgerView · 역할 프롬프트+VERIFY_TMPL+verifyVars (아래 원문 그대로) ↓↓
-// ↓↓ 이어서 STAGE 라우팅 상수 + if-STAGE 분기 + skeleton emit(맨 끝) ↓↓
+## 저작 자유도 (네가 채우는 것)
 
-// ── stage 라우팅 — exec-stage 가 args.stage 주입. skeleton(--emit)은 stage 없음(''):
-const STAGE = (args && args.stage) || ''
-const CHUNK_REF = (args && args.chunkRef) || 'chunk'   // 기존 덩어리 kanban id(skeleton 발행분; exec-stage args 주입)
-const LEDGER = (args && args.ledger) || []             // hunt/audit 원장(main.js materialize → args.ledger)
-// (STAGE 상수는 프롬프트/스키마 정의 뒤, if-STAGE 분기 앞에 둔다 — 아래 「stage 발행 패턴」 참조.)
+- `args.directive.default`: 사용자 아이디어를 **정련해** 임베드 — 표면 문구 복사가 아니라 실제 의도를 담은 지시어로. ③파생 도메인 지시어(user 프롬프트에 제공되면)는 강제가 아니라 힌트다: 이 도메인에 진짜 해당하는 것만 지시어 정련에 흡수하라.
+- `meta.description`: 이 드래프트의 한 줄 서술(담백하게).
+- 그 외 전부(values 원문·prompts 원문·stages)는 아래 원문 블록을 **byte 그대로** 넣는다 — 표현을 다듬지 마라. 템플릿·프롬프트가 byte 동일해야 콘텐츠 주소화(sha256 dedup)가 전 드래프트에 걸쳐 1행으로 수렴한다.
 
-## PENDING / COMMON (draft.js 원문)
-const PENDING = '검수전'   // 검증 배지 초기값(드래프트 항목). o/x/f 는 검증(exec-one)이 매김.
+## 정규화(콘텐츠 주소화) — 왜 이 구조인가
 
-const COMMON = `SHARED CONCEPTS:
+item 노드에 완성 프롬프트(COMMON+본문 ~8.7KB)를 통째 박지 않는다. 3수준 분리: (1) VERIFY_TMPL = {{title}}/{{description}}/{{directive}} 마커 템플릿(전역 공유 1행 — values.COMMON 과 concat 으로 조성, 문서 내 중복 0), (2) directive = 청크당 1행(첫 항목의 registerPromptsOnce 로 등록, varRefs 로 참조), (3) title/description = 항목당 작은 vars. 소비 시점(kanban prompt.resolve)에 치환된다 — VERIFY_TMPL 안의 {{…}} 마커는 **그대로 남긴다**(지금 렌더되는 게 아니다).
+
+## 원문 블록 (values·prompts 에 byte 그대로)
+
+### values.COMMON
+```text
+SHARED CONCEPTS:
 - A REQUIREMENT = an imperative the result must satisfy ("the system/plan/novel/work must …"): concrete and developable/executable — NOT a background fact, NOT a restatement of the directive. (Form: not "X regulations" but "the system must DO <Y> to satisfy <X>".)
 - MAKE-OR-BREAK = its absence would make the result FAIL or be WRONG, not merely less polished. A genuine one is a DECISION two competent practitioners could resolve DIFFERENTLY — NOT a nice-to-have, NOT one methodology's enumerated beat-list, NOT the HOW / implementation-detail of another requirement (that is covered by its parent, not a separate requirement).
 - EXPERT STANCE: read THIS directive as the SENIOR PRACTITIONER of its real domain (a pharmacist / compliance officer for a drug system, a novelist for a novel, an expedition leader for a climb). An expert never stops at the CATEGORY — "comply with the narcotics law" / "protect personal data" is NOT a requirement; it HIDES the concrete obligations the law compels, each its own make-or-break ("on a stock discrepancy, file the incident report to the authority within the statutory deadline"; "verify the vendor is a licensed wholesaler at registration"). Name the SPECIFIC trigger / deadline / check whoever builds, writes, or executes it must satisfy — a distinct requirement an expert knows, never an implementation beat. (Likewise outside law: a novel — not "a satisfying ending" but the specific turn that earns it; a plan — not "be safe" but the specific abort threshold.) A broad "support / comply with X" topic HIDES the gap, it does not cover it.
@@ -44,51 +363,12 @@ const COMMON = `SHARED CONCEPTS:
 - LEGAL LENS: wherever the intent's success turns on real-world LAW, RULE, or LEGITIMACY — to be COMPLIANT (a statutory duty it must satisfy), to be PERMITTED (an approval / license / qualification that gates an act or a participation), or to be ACCURATE (a work that portrays or relies on real law) — surface the binding obligations, approvals, triggers, and deadlines the real, current law actually compels, not just the functional surface (ground them by GROUNDING below). This is NOT only for regulated systems: a plan may need a clearance, a novel may need its law right. Apply ONLY where the intent genuinely turns on law; never force it onto one that does not.
 - GROUNDING (when to SEARCH vs REASON — the one rule for any fact you rely on): the real test is "could you be WRONG from memory?" — info beyond your knowledge cutoff (a recent event, the CURRENT status of a law/program/standard), OR the SPECIFICS of a named statute/article/standard/figure/framework you could misremember, OR genuine uncertainty → WebSearch (put the current year in queries; NEVER assert such specifics from memory). A general principle or common design/craft choice you RELIABLY know → reason it; do NOT search what you reliably know (wasteful), and never re-search the settled.
 - COMMON-SENSE DEFAULT: where the directive leaves a gap or ambiguity, resolve it with the SIMPLEST answer common reasoning reaches — what most competent people would call obvious. Do NOT invent an unusual, elaborate, or restrictive mechanism (a quantity cap, an enforcement, a control) the directive never asked for; a plain reading beats a clever one. The unusual must come from the directive — never from you.
-- INVARIANTS — every requirement, whether GENERATED or ADDED: (1) ATOMIC — one subject, not bundled, not over-split; (2) NO DUPLICATE — not a restatement of another, judged by MEANING not wording (a narrower / re-angled / renamed / split version of an existing one is NOT new); (3) NO FORCING/FABRICATION — a genuine grounded make-or-break, never invented to seem thorough.`
+- INVARIANTS — every requirement, whether GENERATED or ADDED: (1) ATOMIC — one subject, not bundled, not over-split; (2) NO DUPLICATE — not a restatement of another, judged by MEANING not wording (a narrower / re-angled / renamed / split version of an existing one is NOT new); (3) NO FORCING/FABRICATION — a genuine grounded make-or-break, never invented to seem thorough.
+```
 
-## 스키마 + ledgerView (draft.js 원문)
-// GEN: 생성은 **분류하지 않는다** — 평탄 요건만 발굴. 분류(카테고리)는 검토 절차(classify)가 종합해서 한다.
-const GEN_SCHEMA = { type:'object', required:['title','requirements'], properties:{
-  title:{type:'string'}, titleOrigin:{type:'string', enum:['user','agent']},
-  requirements:{ type:'array', items:{ type:'object', required:['title','description','origin'], properties:{
-    title:{type:'string'}, description:{type:'string'}, origin:{type:'string', enum:['user','agent']} } } } } }
-// CLASSIFY: 생성이 아니라 **검토 절차(hunt 뒤)** — 완성된 전체 요건(원장)을 보고 분류 차원 하나를 발명 + 각 요건(id)에 카테고리 배정.
-// 새 요건 X, 재배치 X — 이미 존재하는 항목에 카테고리 메타만 부여(node.edit). id 기준(원장의 [id]). 모든 id 정확히 1회.
-const CLASSIFY_SCHEMA = { type:'object', required:['dimension','assignments'], properties:{
-  dimension:{type:'string'},
-  assignments:{ type:'array', items:{ type:'object', required:['id','category'], properties:{
-    id:{type:'string'}, category:{type:'string'} } } } } }
-// VERIFY: exec-one 항목 노드 1개 산출(oxf 판정 문서). 필드명 oxf — exec_one.extract_oxf 가 oxf|verdict 에서 배지 추출 → node.edit(badge).
-const VERIFY_SCHEMA = { type:'object', required:['oxf','origin'], properties:{
-  oxf:{type:'string', enum:['o','x','f']}, origin:{type:'string', enum:['user','agent','search']},
-  verified_value:{type:'string'}, sources:{type:'array', items:{type:'string'}}, reason:{type:'string'} } }
-// HUNT: exec-one 누락 탐색 노드 산출 — 추가 항목(검수전 → 다시 검증).
-const HUNT_SCHEMA = { type:'object', required:['additions'], properties:{ additions:{ type:'array', items:{ type:'object', required:['title','description','origin'], properties:{
-  title:{type:'string'}, description:{type:'string'}, origin:{type:'string', enum:['agent','search']}, reason:{type:'string'} } } } } }
-// AUDIT: exec-one 부모 감사 노드 산출 — 전체 완결성 인증.
-const AUDIT_SCHEMA = { type:'object', required:['complete','verdict'], properties:{
-  complete:{type:'boolean'}, gaps:{type:'array', items:{type:'string'}}, contradictions:{type:'array', items:{type:'string'}}, sufficiency:{type:'string'}, verdict:{type:'string'} } }
+### values.VERIFY_TMPL 의 concat 두 번째 원소(역할 본문 — {{title}}/{{description}}/{{directive}} 마커 보존)
+```text
 
-// 원장 줄 = [id] [badge] (category?) title — classify 는 [id] 로 배정한다(category 는 classify 전엔 빈 칸).
-const ledgerView = (items) => items.map(t => `- [${t.id}] [${t.badge||PENDING}]${t.category ? ' ('+t.category+')' : ''} ${t.title}${t.verified_value ? ' | 근거: '+t.verified_value : ''}`).join('\n')
-
-## 역할 프롬프트 + VERIFY_TMPL(정규화 템플릿) + verifyVars (draft.js 원문)
-const genPrompt = `${COMMON}
-
-YOUR ROLE — GENERATOR: turn the directive into a BACKLOG CHUNK (덩어리) — a title for the whole + the full FLAT set of REQUIREMENTS. **You do NOT classify.** Categorization is a LATER review step (classify), run after the set is complete; here you only DISCOVER.
-
-1) CHUNK TITLE: if the directive states or clearly implies a name for the whole, EXTRACT it (titleOrigin "user"); else GENERATE a short faithful title from its real intent (titleOrigin "agent"). One short noun phrase in the directive's language — the name a practitioner files this backlog under.
-2) REQUIREMENTS — **INTERPRET, do NOT echo.** Read the directive's real intent; never pass surface phrasing through verbatim. A terse directive bundles several DISTINCT requirements in one run-on clause — split each into its OWN atomic item (title = the imperative requirement in 입력 언어, description = one line of what it must do / why make-or-break). ATOMIC: split bundled DISTINCT requirements; never split ONE requirement into its implementation beats.
-   **GENERATION IS GENEROUS — cast WIDE.** Include EVERY plausible make-or-break (content, structural/craft, operational, regulated, the back-side). Generosity is SAFE: the per-item verifier grounds each and rejects (x) any that does not hold — better to slightly OVER-include than to miss one. No cap, no stinginess; this set must be COMPLETE. Obey the INVARIANTS. origin = "user" if the directive states/implies it, "agent" if you derive it as a make-or-break the directive never stated. You cannot search here. There is NO optional tier — a nice-to-have is NOT a requirement.
-   **DO NOT group, do NOT invent a category dimension, do NOT prune to fit a frame.** Pre-classifying prunes topics outside the frame and breaks completeness — emit requirements[] FLAT. The classify step (after hunt completes the set) invents the dimension and assigns categories then.
-
-Directive: "${DIRECTIVE}"`
-
-// [Ground 노드 — exec-one per 항목] 한 요건의 oxf 판정. 노드 1개 = 요건 1개. self-contained(전체 원장 없이 그 요건만 판정).
-// 프롬프트 정규화(콘텐츠 주소화): 클로저 대신 {{key}} 마커 템플릿 상수. COMMON·역할 본문은 고정(전 item 공유),
-// 요건별 값(category/title/description)과 directive 는 vars 로 분리 → 템플릿은 draft·item 무관 완전 고정 = sha256 1 row.
-// 소비 시점(kanban prompt.resolve)에 {{key}}→vars 치환. item 노드 body 엔 promptHash+vars 만(완성 프롬프트 안 박음).
-const VERIFY_TMPL = `${COMMON}
 
 YOUR ROLE — VERIFIER (hostile). Verify ONE requirement — judge whether it is a real, grounded make-or-break. Do NOT propose new ones (a separate step).
 
@@ -105,12 +385,225 @@ Set ORIGIN to how it is BACKED, record that backing in verified_value: "user" (d
 
 Directive: "{{directive}}"
 
-Do any needed search first (only if fact-hinged). FINAL message = ONLY this JSON.`
-// item vars 헬퍼 — 옛 클로저의 fallback(||'미분류', ||'') 를 미리 계산해 vars 로(소비 시점 치환 결과가 옛 렌더와 byte 동일).
-const verifyVars = (item) => ({ title: item.title, description: item.description || '' })   // category 없음(검증 시점엔 미분류). directive 는 vars 아님 — varRefs 로 콘텐츠 주소 참조(청크당 1행). {{directive}} 는 소비 시점 deref.
+Do any needed search first (only if fact-hinged). FINAL message = ONLY this JSON.
+```
 
-// [Hunt 노드 — exec-one] 전체 원장에서 누락 make-or-break 도출(certify-whole lens). 추가 항목 → 검수전 → 재검증.
-const huntPrompt = (all) => `${COMMON}
+### values.GEN_SCHEMA
+```json
+{
+  "type": "object",
+  "required": [
+    "title",
+    "requirements"
+  ],
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "titleOrigin": {
+      "type": "string",
+      "enum": [
+        "user",
+        "agent"
+      ]
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "title",
+          "description",
+          "origin"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "user",
+              "agent"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### values.CLASSIFY_SCHEMA
+```json
+{
+  "type": "object",
+  "required": [
+    "dimension",
+    "assignments"
+  ],
+  "properties": {
+    "dimension": {
+      "type": "string"
+    },
+    "assignments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "category"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### values.VERIFY_SCHEMA
+```json
+{
+  "type": "object",
+  "required": [
+    "oxf",
+    "origin"
+  ],
+  "properties": {
+    "oxf": {
+      "type": "string",
+      "enum": [
+        "o",
+        "x",
+        "f"
+      ]
+    },
+    "origin": {
+      "type": "string",
+      "enum": [
+        "user",
+        "agent",
+        "search"
+      ]
+    },
+    "verified_value": {
+      "type": "string"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  }
+}
+```
+
+### values.HUNT_SCHEMA
+```json
+{
+  "type": "object",
+  "required": [
+    "additions"
+  ],
+  "properties": {
+    "additions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "title",
+          "description",
+          "origin"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "search"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### values.AUDIT_SCHEMA
+```json
+{
+  "type": "object",
+  "required": [
+    "complete",
+    "verdict"
+  ],
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "contradictions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sufficiency": {
+      "type": "string"
+    },
+    "verdict": {
+      "type": "string"
+    }
+  }
+}
+```
+
+### prompts.gen ({{COMMON}}/{{directive}} 는 실행 시 렌더)
+```text
+{{COMMON}}
+
+YOUR ROLE — GENERATOR: turn the directive into a BACKLOG CHUNK (덩어리) — a title for the whole + the full FLAT set of REQUIREMENTS. **You do NOT classify.** Categorization is a LATER review step (classify), run after the set is complete; here you only DISCOVER.
+
+1) CHUNK TITLE: if the directive states or clearly implies a name for the whole, EXTRACT it (titleOrigin "user"); else GENERATE a short faithful title from its real intent (titleOrigin "agent"). One short noun phrase in the directive's language — the name a practitioner files this backlog under.
+2) REQUIREMENTS — **INTERPRET, do NOT echo.** Read the directive's real intent; never pass surface phrasing through verbatim. A terse directive bundles several DISTINCT requirements in one run-on clause — split each into its OWN atomic item (title = the imperative requirement in 입력 언어, description = one line of what it must do / why make-or-break). ATOMIC: split bundled DISTINCT requirements; never split ONE requirement into its implementation beats.
+   **GENERATION IS GENEROUS — cast WIDE.** Include EVERY plausible make-or-break (content, structural/craft, operational, regulated, the back-side). Generosity is SAFE: the per-item verifier grounds each and rejects (x) any that does not hold — better to slightly OVER-include than to miss one. No cap, no stinginess; this set must be COMPLETE. Obey the INVARIANTS. origin = "user" if the directive states/implies it, "agent" if you derive it as a make-or-break the directive never stated. You cannot search here. There is NO optional tier — a nice-to-have is NOT a requirement.
+   **DO NOT group, do NOT invent a category dimension, do NOT prune to fit a frame.** Pre-classifying prunes topics outside the frame and breaks completeness — emit requirements[] FLAT. The classify step (after hunt completes the set) invents the dimension and assigns categories then.
+
+Directive: "{{directive}}"
+```
+
+### prompts.hunt ({{ledger}} = 원장 빌트인 렌더)
+```text
+{{COMMON}}
 
 YOUR ROLE — VERIFIER (hostile). CERTIFY THE WHOLE, not the parts. A part-by-part "o" does NOT mean the result works — certify the ASSEMBLED set delivers the goal. The generator is an LLM; DISTRUST the list. Run ALL FIVE checks; request what each surfaces (→ additions, each a new requirement: title + description + category):
   - GOAL-REACH: state, in your reasoning, what the result must ACHIEVE for the requester beneath the surface, then check the ledger reaches it. If the core outcome rests on an impossible/unverified premise, VERIFY it (search if external) and request the feasibility precondition. Never assume the premise holds.
@@ -121,29 +614,32 @@ YOUR ROLE — VERIFIER (hostile). CERTIFY THE WHOLE, not the parts. A part-by-pa
 Do NOT request nice-to-haves. Do NOT re-request what the ledger covers (NO DUPLICATE — by MEANING). Additions are FLAT requirements (title + description + origin) — do NOT categorize; the classify step (which runs AFTER you) invents the dimension over the COMPLETE set. ZERO additions is the correct, expected answer for a complete ledger — a forced requirement is worse than none. Over-enumeration is failure.
 
 Full ledger (propose ONLY missing make-or-breaks; do NOT re-verify these):
-${ledgerView(all)}
+{{ledger}}
 
-Directive: "${DIRECTIVE}"
+Directive: "{{directive}}"
 
-Do any needed search first. FINAL message = ONLY this JSON.`
+Do any needed search first. FINAL message = ONLY this JSON.
+```
 
-// [Classify 노드 — exec-one] 검토·분류: hunt 까지 완성된 전체 원장을 보고 분류 차원 발명 + 각 요건(id)에 카테고리 배정.
-// 새 요건 X, reparent X — 기존 항목에 카테고리 메타만. reconcileStage 가 assignments 로 node.edit(category).
-const classifyPrompt = (all) => `${COMMON}
+### prompts.classify
+```text
+{{COMMON}}
 
 YOUR ROLE — CLASSIFIER (검토·분류). 생성·누락탐색이 끝났다 — 아래 원장이 **완성된 전체 요건**이다. 새 요건을 만들지 마라(그건 hunt 몫). 전체를 senior practitioner 로서 읽고, 이 도메인에 맞는 분류 차원 하나를 INVENT 한 뒤, 모든 요건을 정확히 한 카테고리로 배정한다.
   - DIMENSION: 이 도메인에 맞는 차원 하나를 발명(a system: 기능 영역; a novel: 막/장; a plan: 국면; a climb: 구간 — 고정 분류법 금지, directive 와 실제 요건들에서 도출). **집합이 이미 완성됐으니(hunt 후) 프레임 밖 토픽이 잘릴 위험이 없다 — 그래서 생성이 아니라 여기서 분류한다.**
   - ASSIGN: 원장의 모든 항목을 그 차원의 카테고리로. assignments[] 각 원소 = {id(원장 줄 맨 앞 [id]), category}. 모든 id 를 정확히 한 번씩, 정확히 한 카테고리로. category 는 짧은 명사구(입력 언어). 카테고리 수는 집합이 정하게 — 억지로 늘리거나 줄이지 마라.
 
 완성된 전체 원장(각 줄 맨 앞 [id] 로 배정):
-${ledgerView(all)}
+{{ledger}}
 
-Directive: "${DIRECTIVE}"
+Directive: "{{directive}}"
 
-FINAL message = ONLY this JSON.`
+FINAL message = ONLY this JSON.
+```
 
-// [Audit 노드 — exec-one] 부모 감사: 전체 집합 완결성 인증(부품 아닌 전체). 누락/모순/충분 → 한 verdict.
-const auditPrompt = (all) => `${COMMON}
+### prompts.audit
+```text
+{{COMMON}}
 
 YOUR ROLE — AUDITOR (the backlog chunk's parent certification). The per-item badges are already set. Your job is NOT to re-judge items one by one — CERTIFY THE WHOLE ASSEMBLED SET (부품 아닌 전체): does this set, taken together, deliver the directive's goal completely and coherently? Judge three axes, give ONE verdict:
   - 누락 (gaps): any make-or-break MISSING that the goal cannot stand without? List each (empty if none).
@@ -152,83 +648,13 @@ YOUR ROLE — AUDITOR (the backlog chunk's parent certification). The per-item b
 Set complete=true ONLY if no goal-breaking gaps, no unresolved contradictions, and the set genuinely suffices. verdict = one paragraph: what the assembled draft achieves and the single most important thing still missing or wrong (or "완결" if none). Do NOT pad. Stay inside the directive's stated scope.
 
 Full ledger (CERTIFY this whole):
-${ledgerView(all)}
+{{ledger}}
 
-Directive: "${DIRECTIVE}"
+Directive: "{{directive}}"
 
-Do any needed search first. FINAL message = ONLY this JSON.`
-
-// ════════════════════════════════════════════════════════════════════════════
-
-## stage 발행 패턴 (draft.js 원문 — 정규화 promptRole+vars+registerPrompts)
-if (STAGE === 'generate') {
-  const tree = await agent(genPrompt, { label: '요건 도출', schema: GEN_SCHEMA })   // 실행(발굴만 — 분류 안 함)
-  const reqs = (tree && tree.requirements) || []
-  const itemIds = []   // 발행한 항목 nodeId — hunt/classify/audit blockedBy
-  // 프롬프트 정규화: verify 템플릿 등록(registerPrompts)을 첫 항목 발행에 얹는다(별도 노드 없이 — 보드 오염 0).
-  // main.js relay 가 sha256·dedup 후 role→hash 맵 채움 → 이후 item 이 promptRole:'verify' 로 참조. 1회만.
-  let registered = false
-  let ii = 0
-  for (const it of reqs) {
-    if (it && it.title) {
-      const iid = 'i' + ii
-      // 정규화 항목: 1번째 인자 빈 문자열. **CHUNK_REF 직속 — 그룹 없음, category 없음. 분류는 classify 가 나중에 node.edit 로.**
-      const itemOpts = { publish: true, kind: 'item', nodeId: iid, parent: CHUNK_REF,
-        title: it.title, description: it.description || '', origin: it.origin, badge: PENDING, schema: VERIFY_SCHEMA,
-        promptRole: 'verify', vars: verifyVars({ title: it.title, description: it.description }), varRefs: { directive: 'directive' } }
-      if (!registered) { itemOpts.registerPrompts = { verify: VERIFY_TMPL, directive: DIRECTIVE }; registered = true }
-      await agent('', itemOpts)
-      itemIds.push(iid)
-    }
-    ii = ii + 1
-  }
-  // task 노드 발행 — blockedBy 사슬로 순서: hunt(항목 검증 후) → classify(hunt 후 = 완성 집합) → audit(classify 후).
-  await agent('', { publish: true, kind: 'task', stage: 'hunt', nodeId: 'hunt', parent: CHUNK_REF, title: '누락 탐색', blockedBy: itemIds })
-  await agent('', { publish: true, kind: 'task', stage: 'classify', nodeId: 'classify', parent: CHUNK_REF, title: '분류', blockedBy: itemIds.concat(['hunt']) })
-  await agent('', { publish: true, kind: 'task', stage: 'audit', nodeId: 'audit', parent: CHUNK_REF, title: '부모 감사', blockedBy: itemIds.concat(['hunt', 'classify']) })
-  return { chunkTitle: (tree && tree.title) || '', titleOrigin: (tree && tree.titleOrigin) || 'agent' }   // reconcileStage: chunkTitle → 덩어리 title 갱신
-}
-
-// ── stage: hunt — huntPrompt(ledger) 실행 → 누락 항목. 추가 항목 발행(검수전 → 같은 verifyPrompt). ──
-if (STAGE === 'hunt') {
-  const r = await agent(huntPrompt(LEDGER), { label: '누락 탐색', schema: HUNT_SCHEMA })   // 실행
-  const additions = (r && r.additions) || []
-  let ai = 0
-  // hunt 추가항목도 verify 템플릿 참조(promptRole:'verify'). 템플릿은 generate 단계서 이미 등록(같은 sha256 → dedup, 재등록해도 무해).
-  for (const a of additions) {
-    if (a && a.title) {
-      await agent('', { publish: true, kind: 'item', nodeId: 'add' + ai, parent: CHUNK_REF,
-        title: a.title, description: a.description || '', origin: a.origin, badge: PENDING, schema: VERIFY_SCHEMA,
-        promptRole: 'verify', vars: verifyVars({ title: a.title, description: a.description }), varRefs: { directive: 'directive' },
-        registerPrompts: ai === 0 ? { verify: VERIFY_TMPL, directive: DIRECTIVE } : undefined })   // 첫 추가항목에 verify+directive 재등록(hunt 단독 재실행 대비)
-    }
-    ai = ai + 1
-  }
-  // 추가 항목은 CHUNK_REF 직속(flat, category 없음) — 분류는 이후 classify stage 가 완성 집합 보고. return 무관(reconcileStage children relay).
-  return {}
-}
-
-// ── stage: classify — classifyPrompt(ledger) 실행(hunt 후 완성 집합) → {dimension, assignments}. main.js reconcileStage 가 assignments 로 각 항목 node.edit(category). ──
-if (STAGE === 'classify') {
-  const r = await agent(classifyPrompt(LEDGER), { label: '분류', schema: CLASSIFY_SCHEMA })   // 검토(완성 집합 → 분류 차원 + id 배정)
-  // reconcileStage: result.assignments([{id,category}]) → 각 항목 node.edit(category); dimension 은 덩어리 result 에.
-  return { dimension: (r && r.dimension) || '', assignments: (r && r.assignments) || [] }
-}
-
-// ── stage: audit — auditPrompt(ledger) 실행 → 완결성 verdict. main.js reconcileStage 가 덩어리에 기록:
-//    verdict → result(산문), complete+원장 f 집계 → badge('o'=인증 / 'f'=폐기 — complete ∧ f=0 일 때만 'o'). ──
-if (STAGE === 'audit') {
-  const audit = await agent(auditPrompt(LEDGER), { label: '부모 감사', schema: AUDIT_SCHEMA })   // 실행
-  return { verdict: (audit && audit.verdict) || '(감사 결과 없음)', complete: !!(audit && audit.complete) }
-}
-
-// ── skeleton(--emit, claude 0): 덩어리(isDraft) + Generate 노드(kind:task, stage:'generate'). main.js 가 task body 에 skeleton+directive 임베드. ──
-await agent('', { publish: true, kind: 'chunk', nodeId: CHUNK_REF, isDraft: true, parentDraftId: parentDraftId || '',
-  title: (args && args.title) || '구체화 덩어리', description: DIRECTIVE })   // 발행(덩어리 — title 은 generate 가 갱신)
-await agent('', { publish: true, kind: 'task', stage: 'generate', nodeId: 'gen', parent: CHUNK_REF, title: '요건 도출' })   // 발행(Generate 노드: stage='generate'→ev.stage 필드→task body.stage. skeleton/directive 는 main.js relay 가 임베드)
+Do any needed search first. FINAL message = ONLY this JSON.
+```
 
 ## 지시
-위 원문(COMMON·스키마·역할 프롬프트·VERIFY_TMPL·발행)을 그대로 반영해, 사용자 아이디어(아래)를 draft 역할 JS 워크플로로 작성.
-**절차는 5개**: generate(평탄 발굴) → verify(항목별 oxf) → hunt(누락 보강) → **classify(hunt 뒤, 완성 집합 분류)** → audit(전체 감사). **generate 는 category 를 정하지 않는다(그룹·category 필드 금지) — 항목은 CHUNK_REF 직속 flat.** 분류는 classify stage 가 완성 원장(id) 보고 배정.
-**item agent 는 반드시 정규화 형태**: `agent('', {publish:true, kind:'item', nodeId, parent:CHUNK_REF, title, description, origin, badge:'검수전', schema:VERIFY_SCHEMA, promptRole:'verify', vars:verifyVars({title,description}), varRefs:{directive:'directive'}})` — **1번째 인자는 빈 문자열('')**. **category 를 항목에 넣지 마라(분류는 classify).** 완성 프롬프트를 body 에 박지 말고 promptRole+vars+varRefs 로 참조. VERIFY_TMPL 은 {{title}}/{{description}}/{{directive}} 마커 템플릿(category 없음). 첫 항목 발행에 registerPrompts:{verify:VERIFY_TMPL, directive:DIRECTIVE} 1회. **directive 는 vars 아님 — varRefs 로 콘텐츠 주소 참조(항목마다 1.1KB 복붙 방지).**
-**절대 verifyPrompt(it) 를 1번째 인자로 넣지 마라(옛 방식 — 8.7KB 중복).** **절대 JSON.stringify(데이터)를 1번째 인자로 넣지 마라.** 순수 JS 본문만 출력(마크다운 펜스·설명 없이).
+
+위 골격에 원문 블록을 그대로 넣고, 사용자 아이디어(아래 user 프롬프트)를 정련해 `args.directive.default` 에 임베드한 **workflow-doc@0.0.1 JSON 문서 하나**를 출력하라. 절차는 5개(generate → verify → hunt → classify → audit), generate 는 분류하지 않는다(평탄 — 분류는 classify). 순수 JSON 만.

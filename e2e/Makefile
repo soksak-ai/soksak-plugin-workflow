@@ -35,26 +35,26 @@ test:
 	cd $(SOKSAK) && cargo test
 	cd $(SOKSAK) && node --test reconcile.test.mjs
 
-# e2e — LLM 저작(인증 env 주입식). idea → gen.js → skeleton → 발행 스모크(chunk + generate task 확인).
+# e2e — LLM 저작(인증 env 주입식). idea → workflow-doc(JSON) → 발행 스모크(chunk + generate task 확인).
 e2e: build
 	@mkdir -p $(OUT)
 	$(BIN) generate-skeleton --idea "$$(cat $(IDEA_FILE))" --model $(MODEL) --lang $(OUT_LANG) \
-	    --gen-out $(OUT)/gen.js > $(OUT)/skeleton.json
-	@test -s $(OUT)/skeleton.json || { echo "skeleton 비어있음 — 인증(env)·모델 확인"; exit 1; }
-	$(BIN) $(OUT)/skeleton.json --emit --lang $(OUT_LANG) > $(OUT)/emit.jsonl
+	    --gen-out $(OUT)/authored.txt > $(OUT)/doc.json
+	@test -s $(OUT)/doc.json || { echo "doc 비어있음 — 인증(env)·모델 확인"; exit 1; }
+	$(BIN) $(OUT)/doc.json --emit --lang $(OUT_LANG) > $(OUT)/emit.jsonl
 	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/emit.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
 	  const k={};for(const e of L)if(e.ev==="add")k[e.kind]=(k[e.kind]||0)+1; \
 	  console.log("[e2e] 발행 kinds:",JSON.stringify(k)); \
 	  const chunk=L.find(e=>e.kind==="chunk"); if(!chunk){console.error("[e2e] FAIL: chunk 없음");process.exit(1)} \
 	  console.log("[e2e] chunk:",JSON.stringify(chunk.title),"| is_draft:",chunk.is_draft); \
 	  const gen=L.find(e=>e.kind==="task"&&e.stage==="generate"); if(!gen){console.error("[e2e] FAIL: generate task 없음");process.exit(1)} \
-	  console.log("[e2e] OK — chunk + generate task 발행. gen.js:",("$(OUT)/gen.js"),"| 다음: make exec-stage");'
+	  console.log("[e2e] OK — chunk + generate task 발행. doc:",("$(OUT)/doc.json"),"| 다음: make exec-stage");'
 
-# exec-stage — generate stage 실행(LLM) → 평탄 DraftDoc(categories 0·requirements·hunt/classify/audit) 관찰. skeleton 은 make e2e 산출.
+# exec-stage — generate stage 실행(LLM) → 평탄 DraftDoc(requirements·hunt/classify/audit) 관찰. doc 은 make e2e 산출.
 exec-stage: build
-	@test -s $(OUT)/skeleton.json || { echo "먼저 make e2e (skeleton.json 필요)"; exit 1; }
-	@node -e 'const fs=require("fs");const sk=JSON.parse(fs.readFileSync("$(OUT)/skeleton.json","utf8")); \
-	  process.stdout.write(JSON.stringify({skeleton:{program:sk.program},stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
+	@test -s $(OUT)/doc.json || { echo "먼저 make e2e (doc.json 필요)"; exit 1; }
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
+	  process.stdout.write(JSON.stringify({skeleton:doc,stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
 	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/stage.jsonl
 	@node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync("$(OUT)/stage.jsonl","utf8")); \
 	  if(d.kind!=="draft-chunk"){console.error("[exec-stage] FAIL: DraftDoc(draft-chunk) 아님");process.exit(1)} \
@@ -66,17 +66,18 @@ exec-stage: build
 	  if(bad.length){console.error("[exec-stage] FAIL: 요건에 군더더기 인라인",bad.length);process.exit(1)} \
 	  console.log("[exec-stage] 요건 군더더기(schema/directive/category/vars 인라인): 0 ✓ | 크기:",fs.statSync("$(OUT)/stage.jsonl").size,"B");'
 
-# emit-replay — 커밋된 gen.$(SLUG).skeleton.json 으로 발행(결정적, LLM 0).
+# emit-replay — 커밋 fixture 발행(결정적, LLM 0): doc(workflow-doc@0.0.1) + skeleton(레거시 AST 하위호환) 둘 다.
 emit-replay: build
+	@test -s $(SOKSAK)/fixtures/gen.$(SLUG).doc.json || { echo "fixtures/gen.$(SLUG).doc.json 없음"; exit 1; }
+	$(BIN) $(SOKSAK)/fixtures/gen.$(SLUG).doc.json --emit --lang $(OUT_LANG)
 	@test -s $(SOKSAK)/fixtures/gen.$(SLUG).skeleton.json || { echo "fixtures/gen.$(SLUG).skeleton.json 없음 — make e2e 후 make commit-fixture"; exit 1; }
 	$(BIN) $(SOKSAK)/fixtures/gen.$(SLUG).skeleton.json --emit --lang $(OUT_LANG)
 
 # commit-fixture — make e2e 산출을 결정적 replay fixture 로 승격(수동 검토 후 git add).
 commit-fixture:
-	@test -s $(OUT)/gen.js && test -s $(OUT)/skeleton.json || { echo "먼저 make e2e"; exit 1; }
-	cp $(OUT)/gen.js $(SOKSAK)/fixtures/gen.$(SLUG).js
-	cp $(OUT)/skeleton.json $(SOKSAK)/fixtures/gen.$(SLUG).skeleton.json
-	@echo "→ fixtures/gen.$(SLUG).js·skeleton.json 복사됨. 검토 후: git add fixtures/gen.$(SLUG).*"
+	@test -s $(OUT)/doc.json || { echo "먼저 make e2e"; exit 1; }
+	cp $(OUT)/doc.json $(SOKSAK)/fixtures/gen.$(SLUG).doc.json
+	@echo "→ fixtures/gen.$(SLUG).doc.json 복사됨. 검토 후: git add fixtures/gen.$(SLUG).doc.json"
 
 check:
 	@test -x $(BIN) && echo "soksak-workflow: OK" || echo "soksak-workflow: make build 필요"
@@ -87,7 +88,7 @@ check:
 	@echo "self-contained: 추출기 런타임 불요. 인증 e2e = run-e2e.zsh"
 
 clean:
-	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl
+	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build

@@ -1,75 +1,55 @@
-# Workflow — full API reference
+# workflow-doc@0.0.1 — field reference
 
-> Provenance: restored from the Workflow tool description (orchestrator system prompt, cc 2.1.195). The clone runtime (soksak-run `interp.rs`) implements a subset; differences are noted where known.
+> Single source of truth: `src/doc_exec.rs` (validate + run). This file mirrors it for the authoring LLM.
 
-## `export const meta` — required first statement
+## Document
 
-```js
-export const meta = {
-  name: 'find-flaky-tests',                 // required
-  description: 'Find flaky tests and fix',  // required — one line, shown in the permission dialog
-  whenToUse: '...',                         // optional — shown in the workflow list
-  phases: [                                 // optional — one entry per phase() call
-    { title: 'Scan', detail: 'grep logs' },
-    { title: 'Fix',  detail: 'one agent per flaky test', model: 'sonnet' },
-  ],
-}
-```
+| key | type | rules |
+|---|---|---|
+| `spec` | string | MUST be `"workflow-doc@0.0.1"` |
+| `meta.name` | string | non-empty |
+| `meta.description` | string | one plain line |
+| `args` | object | `{ name: {"from": [key…], "default": any} }` — `from` keys are tried in order against the invocation args; first non-null wins; else `default`; else null. Invocation args always pass through under their own names too. |
+| `values` | object | constants. NEVER rendered — `{{…}}` inside a value survives to consumption time. Composition: `{"concat": [part…]}` where part = string literal or `{"$": "values.NAME"}` referencing a **plain string** value (one level only). |
+| `prompts` | object | `{ name: template }`. Every `{{ph}}` must be a values key, a declared args key, or `ledger`. |
+| `stages` | object | `{ stageName: [op…] }`. `""` = skeleton stage (publish-only — `agent` op rejected there). |
 
-`meta` MUST be a PURE LITERAL — no variables, function calls, spreads, or template interpolation. Use the SAME phase titles in `meta.phases` as in `phase()` calls (matched exactly). A `phase()` with no matching meta entry gets its own progress group.
+## Ops
 
-## Hooks
+### `{"op": "agent", "prompt": P, "schema"?: S, "label"?: L, "bind": V}`
+Renders `prompts.P` ({{ph}} → values / args / locals / builtin `ledger`), calls the runner (claude), binds the result JSON to local `V`. `S` must name a values entry that is a JSON object (passed as forced output schema). Runner failure PROPAGATES — the stage exits non-zero (no silent empty success).
 
-### `agent(prompt, opts?) → Promise`
-Spawn a subagent.
-- **Without `schema`** → returns the subagent's final text as a **string**.
-- **With `schema`** (a JSON Schema) → the subagent is **forced to call a StructuredOutput tool**; `agent()` returns the **validated object** (no parsing). Validation is at the tool-call layer, so the model retries on mismatch.
-- Returns **`null`** if the user skips the agent mid-run or the subagent dies on a terminal error after retries → `.filter(Boolean)`.
+### `{"op": "forEach", "in": PATH, "when"?: PATH, "collect"?: V, "do": [op…]}`
+`in` must resolve to an array (null/missing = empty). Binds `item` and `index` per element. `when` skips elements whose path is falsy (null/false/""/0). `collect` binds local `V` to the array of node ids published inside the loop (for later `blockedBy`). Note: `index` is the ORIGINAL array index (filtered elements still advance it).
 
-`opts`:
-| key | effect |
+### `{"op": "publish", "node": {…}}`
+Emits one kanban node event (same wire as the legacy interp path). Fields — every value may be a literal or `{"$": path, "or": default}`:
+
+| field | notes |
 |---|---|
-| `label` | display label override |
-| `phase` | assign this agent to a progress group (use inside pipeline/parallel stages to avoid racing the global `phase()` state — same string → same box) |
-| `schema` | JSON Schema → forced structured output |
-| `model` | model override. **Default: omit** — inherits the main-loop model (almost always correct). Only set when highly confident a different tier fits. |
-| `effort` | `'low'｜'medium'｜'high'｜'xhigh'｜'max'` — omit to inherit session effort; `'low'` for cheap mechanical stages, higher only for the hardest verify/judge |
-| `isolation: 'worktree'` | fresh git worktree — EXPENSIVE (~200-500ms + disk). ONLY when agents mutate files in parallel and would conflict. Auto-removed if unchanged. |
-| `agentType` | custom subagent type (e.g. `'Explore'`, `'code-reviewer'`) instead of the default. Composes with `schema`. |
+| `id` | literal string, or `{"auto": "prefix"}` inside forEach → `prefix + index`. Literal ids must be unique per stage. |
+| `kind` | required — `chunk` / `item` / `task` (draft model) |
+| `parent` | parent ref — a local emit id (same run) or an existing kanban id (e.g. `{"$": "args.chunkRef", "or": "chunk"}`) |
+| `title` `description` `origin` `badge` `category` | strings |
+| `stage` | task nodes only — which stage the scheduler will exec-stage |
+| `blockedBy` | array; element = literal id or `{"$": path}` — an array value is spread inline |
+| `schema` | values key (string, must name an object) or inline object — per-node output contract |
+| `promptRole` | logical role label (relay maps role → registered prompt hash) |
+| `vars` | `{k: expr}` — SMALL per-node values only (title/description). Big shared text goes through registerPromptsOnce + varRefs. |
+| `varRefs` | `{templateKey: roleLabel}` — consumption-time content-address deref (e.g. `{"directive": "directive"}`) |
+| `registerPromptsOnce` | `{role: expr}` — attached to the FIRST published node of this run only; relay content-addresses each value (sha256 dedup) |
+| `isDraft` | bool — draft chunk marker |
+| `parentDraftId` | string — draft lineage |
 
-Subagents are told **their final text IS the return value** (not a human-facing message), so they return raw data.
+### `{"op": "return", "value": {k: expr}}`
+Ends the stage; the object becomes the stage result (`{ev:"result"}` for stream stages; folded into the DraftDoc for `generate`).
 
-**MCP tools:** Workflow agents can reach all session-connected MCP tools via ToolSearch — schemas load on demand per agent. Caveat: interactively-authenticated MCP servers (e.g. claude.ai) may be absent in headless/cron runs.
+## Builtins
 
-### `pipeline(items, stage1, stage2, ...) → Promise<any[]>`
-Run each item through all stages **independently — NO barrier between stages**. Item A can be in stage 3 while item B is still in stage 1. **This is the DEFAULT for multi-stage work.** Wall-clock = slowest single-item chain, not sum-of-slowest-per-stage. Every stage callback receives `(prevResult, originalItem, index)` — use `originalItem`/`index` in later stages to label work without threading context through stage 1's return. A stage that throws drops that item to `null` and skips its remaining stages.
+- `{{ledger}}` (prompts only) — renders `args.ledger` entries as `- [id] [badge] (category?) title | 근거: verified_value?` lines, badge falling back to `검수전`.
 
-### `parallel(thunks) → Promise<any[]>`
-Run tasks concurrently. **This is a BARRIER** — awaits all thunks. A thunk that throws (or whose agent errors) resolves to `null` — the call never rejects → `.filter(Boolean)` before using. Use ONLY when you genuinely need all results together.
+## Execution contract (what the executor guarantees)
 
-### `log(message)` — narrator line above the progress tree.
-### `phase(title)` — start a phase; subsequent `agent()` calls group under it.
-### `args` — the value passed as Workflow's `args`, verbatim. Pass arrays/objects as real JSON (NOT a JSON-encoded string, or `args.map`/`args.filter` throw).
-### `budget` — `{total, spent(), remaining()}`.
-- `budget.total` is null if no target set. The target is a HARD ceiling: once `spent()` reaches `total`, further `agent()` calls throw.
-- Dynamic loop: `while (budget.total && budget.remaining() > 50_000) { ... }`. Static scaling: `const FLEET = budget.total ? Math.floor(budget.total / 100_000) : 5`.
-- Guard on `budget.total` — with no target, `remaining()` is `Infinity` and a budget loop runs to the agent cap.
-### `workflow(nameOrRef, args?) → Promise` — run another workflow inline as a sub-step (returns its return value). Shares this run's concurrency cap, agent counter, abort signal, token budget. Nesting is ONE level only — `workflow()` inside a child throws.
-
-## Language / runtime constraints
-
-- Plain **JavaScript**, NOT TypeScript — no type annotations, interfaces, generics.
-- Body runs async — `await` directly.
-- Standard JS built-ins available **EXCEPT** `Date.now()` / `Math.random()` / argless `new Date()` — they **throw** (would break resume). Pass timestamps via `args`; for randomness vary the agent prompt/label by index.
-- No filesystem or Node.js API access.
-- (clone subset, `interp.rs`: ForOf + While only — NO C-style `for`; schema must be a named top-level const, not inline/computed; no regex.)
-
-## Caps
-
-- Concurrent `agent()` calls capped at **min(16, cpu-2)** per workflow — excess queues.
-- Total agents across a workflow's lifetime capped at **1000** (runaway backstop).
-- A single `parallel()`/`pipeline()` call accepts at most **4096** items.
-
-## Ultracode
-
-When a system-reminder confirms ultracode is on, the opt-in is standing: author and run a workflow for every substantive task by default; token cost is not a constraint. Multi-phase work → several workflows in sequence (one per phase). When the reminder says ultracode is off, revert to explicit opt-in.
+- `--emit` runs stage `""` — LLM is never called; events stream to stdout as `{"ev":"add",…}` lines.
+- `exec-stage` runs a named stage — `generate` output is folded into a normalized DraftDoc and **validated (violations = loud rejection, nothing published)**; other stages stream events plus a final `{"ev":"result","value":…}`.
+- Document validation runs at authoring, `--emit`, and `exec-stage`. Unknown ops, dangling prompt/schema references, unresolvable placeholders, duplicate ids — all rejected with the exact violation listed.

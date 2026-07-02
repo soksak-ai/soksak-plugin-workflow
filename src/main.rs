@@ -1,9 +1,9 @@
-//! soksak-workflow — 워크플로 CLI. 추출기 가 떠낸 완전 skeleton 의 program(중립 AST)을 인터프리터로
-//! **해석**해 (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. agent 는
-//! host(claude -p 인증 프로필). 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을
-//! 모름 — program 을 해석할 뿐. agent 수는 워크플로가 정함(내가 아님). 직접-실행/dry-run 경로는 제거됨.
+//! soksak-workflow — 워크플로 CLI. **workflow-doc@0.0.1**(언어중립 JSON 문서, doc_exec)을 stage 별로 실행해
+//! (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. 레거시 skeleton
+//! (추출기 ESTree AST, interp)도 같은 진입점에서 하위호환으로 해석한다. agent 는 host(claude -p 인증 프로필).
+//! 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을 모름 — 문서/AST 를 실행할 뿐.
 //!
-//!   soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]    # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)
+//!   soksak-workflow <doc.json|skeleton.json|-> --emit [--arg K=V ...] [--lang ko]  # 노드 DAG 발행(stdout JSON line, LLM 미호출)
 //!   soksak-workflow exec-one  [--lang ko] [--model m] [--allow-tools "..."] # stdin {prompt, schema?} 한 노드 실행 → {oxf, result} (스케줄러가 ready 노드에)
 //!   soksak-workflow exec-stage [--lang ko] [--model m]                      # stdin {skeleton, stage, args} stage 실행 → 자식 {ev:add} + {ev:result}
 //!   soksak-workflow synth --idea "..."                                      # ③파생 도메인 지시어만
@@ -13,7 +13,7 @@ use serde_json::{json, Map, Value};
 use soksak_plugin::derive_directive::synth_directives;
 use soksak_plugin::domain_lib::builtin_library;
 use soksak_plugin::exec_one;
-use soksak_plugin::generate_skeleton::{build_system_prompt, build_user_prompt, strip_js_fence};
+use soksak_plugin::generate_skeleton::{build_system_prompt, build_user_prompt};
 use soksak_plugin::host::{build_prompt_with_schema, ClaudeHost};
 use soksak_plugin::interp::{val_to_json, Host, Interp, Val};
 use soksak_plugin::lang::Language;
@@ -56,7 +56,7 @@ fn real_main() -> Result<(), String> {
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
         eprintln!("  soksak-workflow <skeleton.json|-> --emit [--arg K=V ...] [--lang ko]                                  # program 해석 → 노드 DAG 발행(stdout JSON line, LLM 미호출)");
-        eprintln!("  soksak-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → gen.js(LLM 저작) → skeleton stdout");
+        eprintln!("  soksak-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → workflow-doc(LLM 저작·검증) JSON stdout");
         eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
         eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
         eprintln!("  soksak-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
@@ -95,8 +95,8 @@ fn real_main() -> Result<(), String> {
         return run_exec_stage(&argv);
     }
 
-    // generate-skeleton — 아이디어 → gen.js(LLM 저작) → node 추출기 parse → skeleton stdout.
-    // system=범용 Workflow 스킬 + soksak draft-skill.md, user=아이디어+③파생. 실행 워크플로 산출(draft.js 아님).
+    // generate-skeleton — 아이디어 → workflow-doc@0.0.1(LLM 저작) → validate(fail-loud) → doc JSON stdout.
+    // system=workflow-doc 저작 스킬 + soksak draft-skill.md(역할), user=아이디어+③파생.
     if argv[0] == "generate-skeleton" {
         return run_generate_skeleton(&argv);
     }
@@ -140,6 +140,33 @@ fn real_main() -> Result<(), String> {
         std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?
     };
     let skeleton: Value = serde_json::from_slice(&raw).map_err(|e| format!("parse skeleton: {e}"))?;
+    // workflow-doc@0.0.1(언어중립 JSON 문서) — doc_exec 경로. skeleton(ESTree AST)은 종래 interp 경로(하위호환).
+    if soksak_plugin::doc_exec::is_doc(&skeleton) {
+        if !emit {
+            return Err("workflow-doc 직접 실행 경로 없음(실행=스케줄러) — 발행은 --emit, stage 실행은 exec-stage".to_string());
+        }
+        let name = skeleton.pointer("/meta/name").and_then(|n| n.as_str()).unwrap_or("workflow");
+        if let Some(l) = &lang {
+            eprintln!("[soksak] 출력 언어: {} ({})", l.name, l.code);
+        }
+        eprintln!("[soksak] {name} — 발행 모드(workflow-doc, 노드 DAG stdout, LLM 미호출)");
+        // args: --arg/--args-json 조립 재사용 — doc 경로는 아래 program 조립 없이 바로 실행.
+        let mut args_json2 = args_override.take().unwrap_or(Value::Object(std::mem::take(&mut args)));
+        if let (Some(l), Value::Object(m)) = (&lang, &mut args_json2) {
+            m.insert("lang".to_string(), Value::String(l.code.clone()));
+        }
+        // skeleton stage("") — validate 가 agent op 를 금지하므로(발행=LLM 미호출 계약) 러너는 도달 불가 방어.
+        let mut no_agent = |_p: &str, _s: Option<&Value>, _l: &str| -> Result<Value, String> {
+            Err("발행(--emit)은 agent 를 호출하지 않는다".to_string())
+        };
+        let (events, _result) = soksak_plugin::doc_exec::run(&skeleton, "", &args_json2, &mut no_agent)?;
+        for ev in &events {
+            if let Ok(s) = serde_json::to_string(ev) {
+                println!("{s}");
+            }
+        }
+        return Ok(());
+    }
     let program = skeleton
         .get("program")
         .cloned()
@@ -259,14 +286,18 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     let mut raw = String::new();
     std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| format!("read stdin: {e}"))?;
     let input: Value = serde_json::from_str(raw.trim()).map_err(|e| format!("exec-stage 입력 JSON 파싱: {e}"))?;
-    // skeleton.program(완전 AST) 또는 program 직접.
+    let stage = input.get("stage").and_then(|s| s.as_str()).ok_or("exec-stage 입력에 stage 필요")?.to_string();
+    // workflow-doc@0.0.1 — task body 의 skeleton 슬롯에 doc 이 임베드돼 오면(main.js 는 무판별 relay) doc_exec 경로.
+    if let Some(doc) = input.get("skeleton").filter(|s| soksak_plugin::doc_exec::is_doc(s)).cloned() {
+        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
+    }
+    // skeleton.program(완전 AST) 또는 program 직접 — 종래 interp 경로(하위호환).
     let program = input
         .get("skeleton")
         .and_then(|s| s.get("program"))
         .or_else(|| input.get("program"))
         .cloned()
         .ok_or("exec-stage 입력에 skeleton.program(완전 AST) 필요")?;
-    let stage = input.get("stage").and_then(|s| s.as_str()).ok_or("exec-stage 입력에 stage 필요")?.to_string();
     // args = input.args(객체) + stage + lang 주입.
     let mut args_obj = match input.get("args") {
         Some(Value::Object(m)) => m.clone(),
@@ -328,6 +359,80 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// run_exec_stage_doc — workflow-doc@0.0.1 stage 실행(exec-stage 의 doc 분기). interp 경로와 출력 계약 동일:
+/// generate = DraftDoc 1문서(build→validate→stdout, 위반=발행 거부) / 그 외 = {ev:add} 스트림 + {ev:result}.
+fn run_exec_stage_doc(
+    doc: &Value,
+    stage: &str,
+    input: &Value,
+    lang: Option<Language>,
+    allow_tools: Vec<String>,
+    model_override: Option<String>,
+) -> Result<(), String> {
+    // args = input.args + stage + lang 주입(interp 경로와 동일 조립 — 워크플로가 args.ledger/chunkRef 를 읽는다).
+    let mut args_obj = match input.get("args") {
+        Some(Value::Object(m)) => m.clone(),
+        _ => Map::new(),
+    };
+    args_obj.insert("stage".to_string(), Value::String(stage.to_string()));
+    if let Some(l) = &lang {
+        args_obj.insert("lang".to_string(), Value::String(l.code.clone()));
+    }
+    let args_json = Value::Object(args_obj);
+    let model = model_override
+        .or_else(|| input.get("model").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    let (env, profile) = auth_env()?;
+    eprintln!("[soksak] exec-stage stage={stage} (workflow-doc, model={model}, 프로필={profile})");
+    // agent 러너 — ClaudeHost.agent 동형(빌드 프롬프트+언어 계약, schema 는 --json-schema 강제, 실패는 전파).
+    let mut agent_fn = |prompt: &str, schema: Option<&Value>, label: &str| -> Result<Value, String> {
+        let full = build_prompt_with_schema(prompt, None, lang.as_ref());
+        eprintln!("[soksak] agent {label:?} (model={model}, effort=xhigh) → claude -p");
+        let req = AgentRequest {
+            prompt: full,
+            model: &model,
+            allowed_tools: allow_tools.clone(),
+            timeout_secs: 3600,
+            system_prompt: None,
+            schema: schema.cloned(),
+            effort: "xhigh".into(),
+            text_only: false,
+        };
+        if schema.is_some() {
+            run_agent(&req, &env).map_err(|e| format!("agent {label:?} 실패: {e}"))
+        } else {
+            run_agent_text(&req, &env).map(Value::String).map_err(|e| format!("agent {label:?} 실패: {e}"))
+        }
+    };
+    let (events, result) = soksak_plugin::doc_exec::run(doc, stage, &args_json, &mut agent_fn)?;
+    if stage == "generate" {
+        // interp 경로와 동일한 generate 배치 계약: 이벤트 → DraftDoc build → validate(위반=거부) → 1문서 stdout.
+        let mut ddoc = soksak_plugin::draft_doc::build(&events)?;
+        if let Some(Value::String(t)) = result.get("chunkTitle") {
+            if !t.is_empty() {
+                ddoc.chunk_title = Some(t.clone());
+            }
+        }
+        if let Err(violations) = soksak_plugin::draft_doc::validate(&ddoc) {
+            eprintln!("[soksak] generate DraftDoc 검증 실패(발행 거부):");
+            for x in &violations {
+                eprintln!("  - {x}");
+            }
+            return Err(format!("generate DraftDoc 검증 실패({}건) — 발행 거부", violations.len()));
+        }
+        println!("{}", serde_json::to_string(&ddoc).map_err(|e| e.to_string())?);
+    } else {
+        for ev in &events {
+            if let Ok(s) = serde_json::to_string(ev) {
+                println!("{s}");
+            }
+        }
+        let out = json!({ "ev": "result", "value": result });
+        println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+
 /// plugin_root — 이 바이너리가 속한 플러그인 루트(self-contained references/·tools/ 소재).
 /// current_exe(<plugin>/target/<profile>/soksak-workflow)의 조상 중 `references/draft-skill.md` 를 가진 첫 디렉토리.
 /// generate-skeleton 이 외부 리포(추출기) 없이 자기 트리의 지시어·파서를 찾는 근거.
@@ -343,9 +448,10 @@ fn plugin_root() -> Option<std::path::PathBuf> {
     None
 }
 
-/// run_generate_skeleton — generate-skeleton 서브커맨드. 아이디어 → gen.js(LLM 저작) → skeleton stdout.
+/// run_generate_skeleton — generate-skeleton 서브커맨드. 아이디어 → workflow-doc@0.0.1(LLM 저작) → doc JSON stdout.
 /// system=SKILL+api+patterns+draft-skill(**플러그인 번들 references/**, --refs 로 override 가능), user=아이디어+③파생.
-/// gen.js 는 파일로 떨궈 `node <plugin>/tools/parse-cli.mjs <gen.js>`(self-contained, vendored acorn) → skeleton. --gen-out 시 보존.
+/// 저작 게이트 = JSON 파싱(parse_json_lenient — 펜스/prose 방어) + doc_exec::validate(fail-loud) —
+/// 종전 gen.js(JS 저작)의 acorn 파싱·node 서브프로세스는 doc 경로에서 불필요(문법 실패 모드 자체가 소멸).
 fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     let mut idea = String::new();
     let mut model = DEFAULT_MODEL.to_string();
@@ -407,9 +513,10 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         user.push_str(&l.contract());
     }
 
-    // LLM 저작 — 인증 프로필, effort xhigh, schema 없음(gen.js 는 JS 소스 → run_agent_text raw). 529 backoff 는 provider.
+    // LLM 저작 — 인증 프로필, effort xhigh, schema 없음(문서는 크고 자유형 문자열 값이 많아 raw 텍스트 → 관용 파싱).
+    // text_only: 도구 전면 차단(모델이 파일 Write 시도 등으로 이탈 못 하게 — 순수 JSON 텍스트만). 529 backoff 는 provider.
     let (env, profile) = auth_env()?;
-    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 저작");
+    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 저작(workflow-doc)");
     let req = AgentRequest {
         prompt: user,
         model: &model,
@@ -420,42 +527,26 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         effort: "xhigh".into(),
     };
     let raw = run_agent_text(&req, &env)?;
-    let gen_js = strip_js_fence(&raw);
-    if gen_js.trim().is_empty() {
-        return Err("generate-skeleton: 저작 산출이 비어있음(인증/모델/네트워크 확인)".to_string());
+    if let Some(p) = &gen_out {
+        std::fs::write(p, &raw).map_err(|e| format!("저작 원문 쓰기 {p}: {e}"))?;
+        eprintln!("[soksak] 저작 원문 보존 → {p}");
     }
-
-    // gen.js 파일로 — cli.js parse 는 stdin 미지원(파일 인자만). --gen-out 없으면 temp(파싱 후 삭제).
-    let gen_path = match &gen_out {
-        Some(p) => p.clone(),
-        None => format!("{}/soksak-gen-{}.js", std::env::temp_dir().display(), std::process::id()),
-    };
-    std::fs::write(&gen_path, &gen_js).map_err(|e| format!("gen.js 쓰기 {gen_path}: {e}"))?;
-
-    // 파서 = **플러그인 번들** tools/parse-cli.mjs (self-contained, vendored acorn) → skeleton JSON stdout.
-    let parser = plugin_root()
-        .map(|r| r.join("tools").join("parse-cli.mjs"))
-        .ok_or("generate-skeleton: 번들 파서(tools/parse-cli.mjs) 해석 실패 — 플러그인 트리 확인")?;
-    let out = std::process::Command::new("node")
-        .arg(&parser)
-        .arg(&gen_path)
-        .output()
-        .map_err(|e| format!("node parse spawn: {e} (parser={})", parser.display()))?;
-    if !out.status.success() {
-        if gen_out.is_none() {
-            let _ = std::fs::remove_file(&gen_path);
-        }
+    // 저작 게이트 ① JSON 파싱(펜스·앞뒤 prose 방어 — parse_json_lenient) ② workflow-doc validate(fail-loud).
+    let doc = soksak_plugin::provider::parse_json_lenient(&raw)
+        .map_err(|e| format!("generate-skeleton: 저작 산출이 JSON 아님 — {e}"))?;
+    if !soksak_plugin::doc_exec::is_doc(&doc) {
         return Err(format!(
-            "워크플로 parse 실패(gen.js 가 interp 서브셋 위반?): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "generate-skeleton: 저작 산출이 workflow-doc@0.0.1 아님(spec={:?})",
+            doc.get("spec").and_then(|s| s.as_str()).unwrap_or("")
         ));
     }
-    // skeleton stdout 통과.
-    print!("{}", String::from_utf8_lossy(&out.stdout));
-    if gen_out.is_none() {
-        let _ = std::fs::remove_file(&gen_path);
-    } else {
-        eprintln!("[soksak] gen.js 보존 → {gen_path}");
+    if let Err(violations) = soksak_plugin::doc_exec::validate(&doc) {
+        eprintln!("[soksak] 저작 doc 검증 실패:");
+        for x in &violations {
+            eprintln!("  - {x}");
+        }
+        return Err(format!("generate-skeleton: 저작 doc 검증 실패({}건)", violations.len()));
     }
+    println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
     Ok(())
 }
