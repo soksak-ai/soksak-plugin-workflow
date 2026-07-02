@@ -66,6 +66,19 @@ exec-stage: build
 	  if(bad.length){console.error("[exec-stage] FAIL: 요건에 군더더기 인라인",bad.length);process.exit(1)} \
 	  console.log("[exec-stage] 요건 군더더기(schema/directive/category/vars 인라인): 0 ✓ | 크기:",fs.statSync("$(OUT)/stage.jsonl").size,"B");'
 
+# exec-verify — verify(항목 검증) 실측(LLM): 요건 1개를 exec-one 으로 — 소비 시점 조립(템플릿 {{}} 치환) 후 oxf 판정.
+exec-verify: build
+	@test -s $(OUT)/stage.jsonl || { echo "먼저 make exec-stage"; exit 1; }
+	@node -e 'const fs=require("fs");const d=JSON.parse(fs.readFileSync("$(OUT)/stage.jsonl","utf8")); \
+	  const vc=d.verify_contract, r=d.requirements[0]; \
+	  const prompt=vc.template.replaceAll("{{title}}",r.title).replaceAll("{{description}}",r.description||"").replaceAll("{{directive}}",vc.directive); \
+	  if(/{{\w+}}/.test(prompt)){console.error("[exec-verify] FAIL: 마커 잔존");process.exit(1)} \
+	  process.stdout.write(JSON.stringify({prompt,schema:vc.schema}));' \
+	  | $(BIN) exec-one --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/verify.json
+	@node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync("$(OUT)/verify.json","utf8")); \
+	  if(!["o","x","f"].includes(o.oxf)){console.error("[exec-verify] FAIL: oxf 판정 없음:",JSON.stringify(o).slice(0,200));process.exit(1)} \
+	  console.log("[exec-verify] OK — oxf:",o.oxf,"| origin:",(o.result&&o.result.origin)||"?");'
+
 # exec-hunt — hunt stage 실측(LLM): 요건 badge=o 시뮬 원장 → 누락 발굴(additions 0 도 정답).
 exec-hunt: build
 	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "먼저 make e2e && make exec-stage"; exit 1; }
@@ -127,8 +140,8 @@ exec-plan: build
 	  console.log("[exec-plan] OK — units:",units.length,"| 요건 인용 unit:",cited.length+"/"+units.length);'
 
 # e2e-full — 전 체인 실측(LLM): 저작→발행→generate→hunt→classify→audit→research→plan.
-e2e-full: e2e exec-stage exec-hunt exec-classify exec-audit exec-research exec-plan
-	@echo "[e2e-full] 전 체인 통과 — 저작→발행→generate→hunt→classify→audit→research→plan"
+e2e-full: e2e exec-stage exec-verify exec-hunt exec-classify exec-audit exec-research exec-plan
+	@echo "[e2e-full] 전 체인 통과 — 저작→발행→generate→verify→hunt→classify→audit→research→plan"
 
 # emit-replay — 커밋 fixture 발행(결정적, LLM 0): doc(workflow-doc@0.0.1) + 번들 정본(research).
 emit-replay: build
@@ -150,7 +163,7 @@ check:
 	@echo "self-contained: 외부 런타임 불요(doc 단일 경로). 인증 e2e = run-e2e.zsh"
 
 clean:
-	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl
+	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/verify.json $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build
