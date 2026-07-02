@@ -66,6 +66,70 @@ exec-stage: build
 	  if(bad.length){console.error("[exec-stage] FAIL: 요건에 군더더기 인라인",bad.length);process.exit(1)} \
 	  console.log("[exec-stage] 요건 군더더기(schema/directive/category/vars 인라인): 0 ✓ | 크기:",fs.statSync("$(OUT)/stage.jsonl").size,"B");'
 
+# exec-hunt — hunt stage 실측(LLM): 요건 badge=o 시뮬 원장 → 누락 발굴(additions 0 도 정답).
+exec-hunt: build
+	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "먼저 make e2e && make exec-stage"; exit 1; }
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
+	  const inp=JSON.parse(require("child_process").execSync("node $(SOKSAK)/tools/assemble-ledger.mjs hunt $(OUT)/stage.jsonl $(IDEA_FILE)").toString()); \
+	  inp.skeleton=doc; process.stdout.write(JSON.stringify(inp));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/hunt.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/hunt.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const adds=L.filter(e=>e.ev==="add"&&e.kind==="item"); \
+	  const bad=adds.filter(a=>!a.title||!a.prompt_role); \
+	  if(bad.length){console.error("[exec-hunt] FAIL: 추가항목 계약 위반(제목/정규화)",bad.length);process.exit(1)} \
+	  console.log("[exec-hunt] OK — additions:",adds.length,"(0=완결 원장 정답) | 정규화 위반 0");'
+
+# exec-audit — audit stage 실측(LLM): 요건 badge=o 시뮬 원장 → {verdict, complete} 인증 판정.
+exec-audit: build
+	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "먼저 make e2e && make exec-stage"; exit 1; }
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
+	  const inp=JSON.parse(require("child_process").execSync("node $(SOKSAK)/tools/assemble-ledger.mjs audit $(OUT)/stage.jsonl $(IDEA_FILE)").toString()); \
+	  inp.skeleton=doc; process.stdout.write(JSON.stringify(inp));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/audit.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/audit.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const r=L.find(e=>e.ev==="result"); \
+	  if(!r||!r.value){console.error("[exec-audit] FAIL: result 없음");process.exit(1)} \
+	  if(typeof r.value.complete!=="boolean"){console.error("[exec-audit] FAIL: complete 불리언 아님(인증 상태 기계 입력)");process.exit(1)} \
+	  if(!r.value.verdict){console.error("[exec-audit] FAIL: verdict 없음");process.exit(1)} \
+	  console.log("[exec-audit] OK — complete:",r.value.complete,"| verdict:",r.value.verdict.slice(0,120));'
+
+# exec-research — research stage 실측(LLM): 번들 정본(--workflow research) 로 기초지식 발굴 → fact+plan task.
+exec-research: build
+	@test -s $(OUT)/stage.jsonl || { echo "먼저 make exec-stage (요건 원장 필요)"; exit 1; }
+	$(BIN) --workflow research --emit --lang $(OUT_LANG) --args-json "{\"chunkRef\":\"chunk\",\"directive\":\"smoke\"}" > /dev/null
+	@node $(SOKSAK)/tools/assemble-ledger.mjs research $(OUT)/stage.jsonl $(IDEA_FILE) \
+	  | node -e 'const fs=require("fs");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const inp=JSON.parse(s);inp.workflow="research";process.stdout.write(JSON.stringify(inp))});' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/research.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/research.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const facts=L.filter(e=>e.ev==="add"&&e.kind==="fact"); const plan=L.find(e=>e.ev==="add"&&e.kind==="task"&&e.stage==="plan"); \
+	  if(!facts.length){console.error("[exec-research] FAIL: fact 0");process.exit(1)} \
+	  const noReg=facts[0].register_prompts?0:1; const inlined=facts.filter(f=>f.vars&&JSON.stringify(f.vars).length>500); \
+	  if(noReg){console.error("[exec-research] FAIL: 첫 fact 에 registerPrompts 없음(정규화)");process.exit(1)} \
+	  if(inlined.length){console.error("[exec-research] FAIL: vars 에 큰 값 인라인",inlined.length);process.exit(1)} \
+	  if(!plan){console.error("[exec-research] FAIL: plan task 없음");process.exit(1)} \
+	  if(!plan.blocked_by||plan.blocked_by.length!==facts.length){console.error("[exec-research] FAIL: plan.blockedBy ≠ 전 fact");process.exit(1)} \
+	  const areas=facts.reduce((a,f)=>{a[f.category||"?"]=(a[f.category||"?"]||0)+1;return a},{}); \
+	  console.log("[exec-research] OK — facts:",facts.length,"| areas:",JSON.stringify(areas),"| plan.blockedBy =",plan.blocked_by.length);'
+
+# exec-plan — plan stage 실측(LLM): 요건 원장 + research fact 원장 → 슈도코드 단위(plan-unit).
+exec-plan: build
+	@test -s $(OUT)/stage.jsonl && test -s $(OUT)/research.jsonl || { echo "먼저 make exec-stage && make exec-research"; exit 1; }
+	@node $(SOKSAK)/tools/assemble-ledger.mjs plan $(OUT)/stage.jsonl $(IDEA_FILE) $(OUT)/research.jsonl \
+	  | node -e 'const fs=require("fs");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const inp=JSON.parse(s);inp.workflow="research";process.stdout.write(JSON.stringify(inp))});' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/plan.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/plan.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const units=L.filter(e=>e.ev==="add"&&e.kind==="plan-unit"); \
+	  if(!units.length){console.error("[exec-plan] FAIL: plan-unit 0");process.exit(1)} \
+	  const empty=units.filter(u=>!u.description||u.description.length<40); \
+	  if(empty.length){console.error("[exec-plan] FAIL: 슈도코드 빈약(40자 미만)",empty.length);process.exit(1)} \
+	  const cited=units.filter(u=>/\[i\d+\]/.test(u.description)); \
+	  if(!cited.length){console.error("[exec-plan] FAIL: 요건 인용([iN]) 있는 unit 0 — self-contained 계약 위반");process.exit(1)} \
+	  console.log("[exec-plan] OK — units:",units.length,"| 요건 인용 unit:",cited.length+"/"+units.length);'
+
+# e2e-full — 전 체인 실측(LLM): 저작→발행→generate→hunt→classify→audit→research→plan.
+e2e-full: e2e exec-stage exec-hunt exec-classify exec-audit exec-research exec-plan
+	@echo "[e2e-full] 전 체인 통과 — 저작→발행→generate→hunt→classify→audit→research→plan"
+
 # emit-replay — 커밋 fixture 발행(결정적, LLM 0): doc(workflow-doc@0.0.1) + skeleton(레거시 AST 하위호환) 둘 다.
 emit-replay: build
 	@test -s $(SOKSAK)/fixtures/gen.$(SLUG).doc.json || { echo "fixtures/gen.$(SLUG).doc.json 없음"; exit 1; }
@@ -88,7 +152,7 @@ check:
 	@echo "self-contained: 추출기 런타임 불요. 인증 e2e = run-e2e.zsh"
 
 clean:
-	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl
+	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build

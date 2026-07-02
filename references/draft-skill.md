@@ -658,3 +658,5 @@ Do any needed search first. FINAL message = ONLY this JSON.
 ## 지시
 
 위 골격에 원문 블록을 그대로 넣고, 사용자 아이디어(아래 user 프롬프트)를 정련해 `args.directive.default` 에 임베드한 **workflow-doc@0.0.1 JSON 문서 하나**를 출력하라. 절차는 5개(generate → verify → hunt → classify → audit), generate 는 분류하지 않는다(평탄 — 분류는 classify). 순수 JSON 만.
+
+출력의 첫 문자는 `{`, 마지막 문자는 `}` 다 — 마크다운 펜스(```)·설명·주석이 하나라도 붙으면 저작 실패다.
