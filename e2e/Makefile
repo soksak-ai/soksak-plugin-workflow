@@ -4,6 +4,7 @@
 #   make build         cargo build --release (soksak-workflow 바이너리)
 #   make e2e           아이디어 → gen.js(LLM 저작) → skeleton → --emit 발행 스모크. (self-contained)
 #   make exec-stage    make e2e 의 skeleton 으로 generate stage 실행(LLM) → 평탄 DraftDoc(요건/hunt/classify/audit) 관찰.
+#   make exec-classify make exec-stage 의 요건으로 classify stage 실행(LLM) → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 #   make emit-replay   커밋 fixtures/gen.$(SLUG).skeleton.json → --emit → 노드 모양(결정적, LLM 0).
 #   make commit-fixture  make e2e 산출(out/gen.js·skeleton.json)을 fixtures/gen.$(SLUG).* 로 복사(검토 후 git add).
 #
@@ -24,7 +25,7 @@ MODEL     ?= glm-5.2
 OUT_LANG  ?= ko
 SLUG      ?= pharmacy
 
-.PHONY: test build e2e exec-stage emit-replay commit-fixture check clean
+.PHONY: test build e2e exec-stage exec-classify emit-replay commit-fixture check clean
 
 build:
 	cd $(SOKSAK) && cargo build --release --bin soksak-workflow
@@ -86,4 +87,10 @@ check:
 	@echo "self-contained: 추출기 런타임 불요. 인증 e2e = run-e2e.zsh"
 
 clean:
-	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/emit.jsonl $(OUT)/stage.jsonl
+	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl
+
+# exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
+exec-classify: build
+	@test -s $(OUT)/skeleton.json && test -s $(OUT)/stage.jsonl || { echo "run make exec-stage first"; exit 1; }
+	@node $(SOKSAK)/tools/classify-input.mjs $(OUT)/skeleton.json $(OUT)/stage.jsonl $(IDEA_FILE) | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/classify.jsonl
+	@node $(SOKSAK)/tools/verify-classify.mjs $(OUT)/classify.jsonl $(OUT)/stage.jsonl
