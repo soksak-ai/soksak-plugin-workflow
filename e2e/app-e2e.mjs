@@ -143,6 +143,7 @@ async function main() {
   while (Date.now() < DEADLINE) {
     if (!(await appReady())) {
       log("앱 대기(다운/재빌드/플러그인 부팅)");
+      envSeeded = false; // 앱이 내려갔다 오면 세션 env 휘발 — 복귀 시 재주입 필수
       await sleep(20_000);
       continue;
     }
