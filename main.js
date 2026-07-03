@@ -729,15 +729,16 @@ export function buildSecretEnvMap(keys) {
   return m;
 }
 
-/** buildSpawnCmd — soksak-workflow spawn 명령 조립. bin 명시(workflow.run 파라미터)면 직접 spawn,
+/** buildSpawnCmd — soksak-sidecar-workflow spawn 명령 조립. bin 명시(workflow.run 파라미터)면 직접 spawn,
  *  없으면 로그인셸 랩: 플러그인은 Blob 로 로드돼 자기 경로를 모른다 → 단일 폴더 플러그인 컨벤션 경로
- *  ($HOME/.soksak/plugins/…) 기본 + SOKSAK_WORKFLOW_BIN env 오버라이드. sh -l 이 GUI(Finder) 실행의
+ *  사이드카 표준($HOME/.soksak/sidecars/soksak-sidecar-workflow/dist/) 기본 + SOKSAK_SIDECAR_WORKFLOW_BIN
+ *  env 오버라이드. sh -l 이 GUI(Finder) 실행의
  *  PATH 미상속도 함께 해소한다(로그인셸이 rc 를 로드 — acp-core 선례). */
 export function buildSpawnCmd(bin, args) {
   if (bin) return { cmd: bin, args };
   const script =
-    'exec "${SOKSAK_WORKFLOW_BIN:-$HOME/.soksak/plugins/soksak-plugin-workflow/target/release/soksak-workflow}" "$@"';
-  return { cmd: "/bin/sh", args: ["-lc", script, "soksak-workflow", ...args] };
+    'exec "${SOKSAK_SIDECAR_WORKFLOW_BIN:-$HOME/.soksak/sidecars/soksak-sidecar-workflow/dist/soksak-sidecar-workflow}" "$@"';
+  return { cmd: "/bin/sh", args: ["-lc", script, "soksak-sidecar-workflow", ...args] };
 }
 
 /** execOpts — spawn 3종(generate-skeleton/exec-one/exec-stage)의 env 주입 옵션.

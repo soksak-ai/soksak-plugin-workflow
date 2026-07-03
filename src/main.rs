@@ -1,23 +1,23 @@
-//! soksak-workflow — 워크플로 CLI. **workflow-doc@0.0.1**(언어중립 JSON 문서, doc_exec) 단일 경로 — stage 별로
+//! soksak-sidecar-workflow — 워크플로 사이드카 CLI. **workflow-doc@0.0.1**(언어중립 JSON 문서, doc_exec) 단일 경로 — stage 별로
 //! 실행해 (a) 노드 DAG 를 *발행*(--emit)하거나 (b) stage/노드를 *실행*(exec-stage/exec-one)한다. agent 는
 //! claude -p. 실행 오케스트레이션은 코어 스케줄러(kanban reconcile). 런타임은 워크플로 로직을 모름 —
 //! 문서를 실행할 뿐. 레거시 skeleton(ESTree)/interp 경로는 backup/legacy-interp/ 에 보존(M5e).
 //!
-//!   soksak-workflow <doc.json|-> --emit [--args-json {...}] [--lang ko]     # 노드 DAG 발행(stdout JSON line, LLM 미호출)
-//!   soksak-workflow --workflow <name> --emit [--args-json {...}]            # 번들 정본(workflows/<name>.doc.json) 발행
-//!   soksak-workflow exec-one  [--lang ko] [--model m] [--allow-tools "..."] # stdin {prompt, schema?} 한 노드 실행 → {oxf, result} (스케줄러가 ready 노드에)
-//!   soksak-workflow exec-stage [--lang ko] [--model m]                      # stdin {skeleton, stage, args} stage 실행 → 자식 {ev:add} + {ev:result}
-//!   soksak-workflow synth --idea "..."                                      # ③파생 도메인 지시어만
+//!   soksak-sidecar-workflow <doc.json|-> --emit [--args-json {...}] [--lang ko]     # 노드 DAG 발행(stdout JSON line, LLM 미호출)
+//!   soksak-sidecar-workflow --workflow <name> --emit [--args-json {...}]            # 번들 정본(workflows/<name>.doc.json) 발행
+//!   soksak-sidecar-workflow exec-one  [--lang ko] [--model m] [--allow-tools "..."] # stdin {prompt, schema?} 한 노드 실행 → {oxf, result} (스케줄러가 ready 노드에)
+//!   soksak-sidecar-workflow exec-stage [--lang ko] [--model m]                      # stdin {skeleton, stage, args} stage 실행 → 자식 {ev:add} + {ev:result}
+//!   soksak-sidecar-workflow synth --idea "..."                                      # ③파생 도메인 지시어만
 //! 인증 env(ANTHROPIC_*)는 호출자가 export.
 
 use serde_json::{json, Map, Value};
-use soksak_plugin::derive_directive::synth_directives;
-use soksak_plugin::domain_lib::builtin_library;
-use soksak_plugin::exec_one;
-use soksak_plugin::generate_skeleton::build_user_prompt;
-use soksak_plugin::host::build_prompt_with_schema;
-use soksak_plugin::lang::Language;
-use soksak_plugin::provider::{run_agent, run_agent_text, AgentRequest};
+use soksak_sidecar_workflow::derive_directive::synth_directives;
+use soksak_sidecar_workflow::domain_lib::builtin_library;
+use soksak_sidecar_workflow::exec_one;
+use soksak_sidecar_workflow::generate_skeleton::build_user_prompt;
+use soksak_sidecar_workflow::host::build_prompt_with_schema;
+use soksak_sidecar_workflow::lang::Language;
+use soksak_sidecar_workflow::provider::{run_agent, run_agent_text, AgentRequest};
 use std::collections::HashSet;
 
 const DEFAULT_MODEL: &str = "opus"; // 실제 모델은 인증 프로필이 매핑
@@ -54,12 +54,12 @@ fn real_main() -> Result<(), String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.is_empty() || argv[0] == "-h" || argv[0] == "--help" {
         eprintln!("usage:");
-        eprintln!("  soksak-workflow <doc.json|-> --emit [--args-json {{...}}] [--lang ko]                                  # workflow-doc 발행(stdout JSON line, LLM 미호출)");
-        eprintln!("  soksak-workflow --workflow <name> --emit [--args-json {{...}}] [--lang ko]                             # 번들 정본(workflows/<name>.doc.json) 발행");
-        eprintln!("  soksak-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → workflow-doc(LLM 저작·검증) JSON stdout");
-        eprintln!("  soksak-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
-        eprintln!("  soksak-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
-        eprintln!("  soksak-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
+        eprintln!("  soksak-sidecar-workflow <doc.json|-> --emit [--args-json {{...}}] [--lang ko]                                  # workflow-doc 발행(stdout JSON line, LLM 미호출)");
+        eprintln!("  soksak-sidecar-workflow --workflow <name> --emit [--args-json {{...}}] [--lang ko]                             # 번들 정본(workflows/<name>.doc.json) 발행");
+        eprintln!("  soksak-sidecar-workflow generate-skeleton --idea \"...\" [--model m] [--lang ko] [--gen-out p] [--refs dir]    # 아이디어 → workflow-doc(LLM 저작·검증) JSON stdout");
+        eprintln!("  soksak-sidecar-workflow exec-one [--lang ko] [--model m] [--allow-tools \"...\"]                                # stdin {{prompt,schema?}} 한 노드 실행 → {{oxf,result}}");
+        eprintln!("  soksak-sidecar-workflow exec-stage [--lang ko] [--model m]                                                    # stdin {{skeleton,stage,args}} stage 실행 → 자식 {{ev:add}} + {{ev:result}}");
+        eprintln!("  soksak-sidecar-workflow synth --idea \"...\"                                                                    # ③파생 도메인 지시어");
         eprintln!("  --lang: 출력 언어 계약. 모든 agent 프롬프트에 주입 → 산출물이 그 언어로. args.lang 도 주입.");
         return Ok(());
     }
@@ -101,7 +101,7 @@ fn real_main() -> Result<(), String> {
         return run_generate_skeleton(&argv);
     }
 
-    // --workflow <name> — 번들 정본 워크플로(plugin_root/workflows/<name>.doc.json) 해석(경로 대신 이름).
+    // --workflow <name> — 번들 정본 워크플로(sidecar_root/workflows/<name>.doc.json) 해석(경로 대신 이름).
     // research/plan 처럼 저작 LLM 불참(PRINCIPLES §7) canonical doc 의 실행 통로.
     let (path, arg_start) = if argv[0] == "--workflow" {
         let name = argv.get(1).ok_or("--workflow 값(이름) 누락")?;
@@ -149,7 +149,7 @@ fn real_main() -> Result<(), String> {
     };
     let doc: Value = serde_json::from_slice(&raw).map_err(|e| format!("parse workflow-doc: {e}"))?;
     // doc 단일 경로(M5e) — 레거시 skeleton(ESTree)/interp 는 backup/legacy-interp/ 로 이동, 비-doc 입력은 명시 거부.
-    if !soksak_plugin::doc_exec::is_doc(&doc) {
+    if !soksak_sidecar_workflow::doc_exec::is_doc(&doc) {
         return Err("workflow-doc@0.0.1 필요(spec 필드) — 레거시 skeleton(ESTree AST) 경로는 제거됨(backup/legacy-interp/)".to_string());
     }
     if !emit {
@@ -169,7 +169,7 @@ fn real_main() -> Result<(), String> {
     let mut no_agent = |_p: &str, _s: Option<&Value>, _l: &str| -> Result<Value, String> {
         Err("발행(--emit)은 agent 를 호출하지 않는다".to_string())
     };
-    let (events, _result) = soksak_plugin::doc_exec::run(&doc, "", &args_json, &mut no_agent)?;
+    let (events, _result) = soksak_sidecar_workflow::doc_exec::run(&doc, "", &args_json, &mut no_agent)?;
     for ev in &events {
         if let Ok(s) = serde_json::to_string(ev) {
             println!("{s}");
@@ -262,13 +262,13 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
         let p = bundled_workflow_path(name)?;
         let raw = std::fs::read(&p).map_err(|e| format!("번들 워크플로 읽기 {p}: {e}"))?;
         let doc: Value = serde_json::from_slice(&raw).map_err(|e| format!("번들 워크플로 파싱 {p}: {e}"))?;
-        if !soksak_plugin::doc_exec::is_doc(&doc) {
+        if !soksak_sidecar_workflow::doc_exec::is_doc(&doc) {
             return Err(format!("번들 워크플로 {name:?} 가 workflow-doc@0.0.1 아님"));
         }
         return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
     }
     // workflow-doc@0.0.1 — task body 의 skeleton 슬롯에 doc 이 임베드돼 오면(main.js 는 무판별 relay) doc_exec 경로.
-    if let Some(doc) = input.get("skeleton").filter(|s| soksak_plugin::doc_exec::is_doc(s)).cloned() {
+    if let Some(doc) = input.get("skeleton").filter(|s| soksak_sidecar_workflow::doc_exec::is_doc(s)).cloned() {
         return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
     }
     // doc 단일 경로(M5e) — 레거시 skeleton(ESTree)/interp 는 backup/legacy-interp/ 로 이동, 비-doc 입력은 명시 거부.
@@ -320,16 +320,16 @@ fn run_exec_stage_doc(
             run_agent_text(&req, &env).map(Value::String).map_err(|e| format!("agent {label:?} 실패: {e}"))
         }
     };
-    let (events, result) = soksak_plugin::doc_exec::run(doc, stage, &args_json, &mut agent_fn)?;
+    let (events, result) = soksak_sidecar_workflow::doc_exec::run(doc, stage, &args_json, &mut agent_fn)?;
     if stage == "generate" {
         // interp 경로와 동일한 generate 배치 계약: 이벤트 → DraftDoc build → validate(위반=거부) → 1문서 stdout.
-        let mut ddoc = soksak_plugin::draft_doc::build(&events)?;
+        let mut ddoc = soksak_sidecar_workflow::draft_doc::build(&events)?;
         if let Some(Value::String(t)) = result.get("chunkTitle") {
             if !t.is_empty() {
                 ddoc.chunk_title = Some(t.clone());
             }
         }
-        if let Err(violations) = soksak_plugin::draft_doc::validate(&ddoc) {
+        if let Err(violations) = soksak_sidecar_workflow::draft_doc::validate(&ddoc) {
             eprintln!("[soksak] generate DraftDoc 검증 실패(발행 거부):");
             for x in &violations {
                 eprintln!("  - {x}");
@@ -349,13 +349,13 @@ fn run_exec_stage_doc(
     Ok(())
 }
 
-/// bundled_workflow_path — 번들 정본 워크플로 경로(plugin_root/workflows/<name>.doc.json).
+/// bundled_workflow_path — 번들 정본 워크플로 경로(sidecar_root/workflows/<name>.doc.json).
 /// 이름은 파일명 안전 문자만 허용(경로 탈출 차단 — 영숫자/-/_).
 fn bundled_workflow_path(name: &str) -> Result<String, String> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
         return Err(format!("--workflow 이름 부적합: {name:?} (영숫자/-/_ 만)"));
     }
-    let root = plugin_root().ok_or("--workflow: 플러그인 루트 해석 실패(references/draft-skill.md 기준)")?;
+    let root = sidecar_root().ok_or("--workflow: 플러그인 루트 해석 실패(references/draft-skill.md 기준)")?;
     let p = root.join("workflows").join(format!("{name}.doc.json"));
     if !p.is_file() {
         return Err(format!("번들 워크플로 없음: {}", p.display()));
@@ -363,10 +363,10 @@ fn bundled_workflow_path(name: &str) -> Result<String, String> {
     Ok(p.display().to_string())
 }
 
-/// plugin_root — 이 바이너리가 속한 플러그인 루트(self-contained references/·tools/ 소재).
-/// current_exe(<plugin>/target/<profile>/soksak-workflow)의 조상 중 `references/draft-skill.md` 를 가진 첫 디렉토리.
-/// generate-skeleton 이 외부 리포(추출기) 없이 자기 트리의 지시어·파서를 찾는 근거.
-fn plugin_root() -> Option<std::path::PathBuf> {
+/// sidecar_root — 이 바이너리가 속한 사이드카 루트(self-contained references/·workflows/ 소재).
+/// current_exe 의 조상 중 `references/draft-skill.md` 를 가진 첫 디렉토리.
+/// generate-skeleton 이 외부 리포 없이 자기 트리(사이드카 번들)의 지시어를 찾는 근거.
+fn sidecar_root() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let mut dir = exe.parent();
     while let Some(d) = dir {
@@ -418,10 +418,9 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     if idea.trim().is_empty() {
         return Err("generate-skeleton: --idea 필수".to_string());
     }
-    // refs dir 해석: ① --refs, ② env WORKFLOW_DIR/references(레거시 override), ③ **플러그인 번들**(self-contained 기본).
+    // refs dir 해석: ① --refs, ② **사이드카 번들**(self-contained 기본 — exe 상위 references/).
     let refs_dir = refs
-        .or_else(|| std::env::var("WORKFLOW_DIR").ok().filter(|d| !d.is_empty()).map(|d| format!("{d}/references")))
-        .or_else(|| plugin_root().map(|r| format!("{}/references", r.display())))
+        .or_else(|| sidecar_root().map(|r| format!("{}/references", r.display())))
         .ok_or("generate-skeleton: references 해석 실패 — --refs 또는 플러그인 번들(references/draft-skill.md) 확인")?;
     // system 층 = draft **정련** 역할 지시어. LLM 은 정련만 한다(PRINCIPLES §7) — 문서 골격·상수(COMMON·
     // 스키마·프롬프트)는 번들 정본(workflows/draft.doc.json)을 도구가 조립한다. 19KB verbatim 재타이핑은
@@ -486,8 +485,8 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
             last_err = "정련 directive 비어있음".to_string();
             continue;
         }
-        let doc = soksak_plugin::doc_exec::inject_refinement(&template, &directive, &description);
-        if let Err(violations) = soksak_plugin::doc_exec::validate(&doc) {
+        let doc = soksak_sidecar_workflow::doc_exec::inject_refinement(&template, &directive, &description);
+        if let Err(violations) = soksak_sidecar_workflow::doc_exec::validate(&doc) {
             last_err = format!("조립 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
             continue;
         }

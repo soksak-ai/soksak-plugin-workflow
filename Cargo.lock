@@ -82,7 +82,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "soksak-plugin"
+name = "soksak-sidecar-workflow"
 version = "0.0.1"
 dependencies = [
  "serde",

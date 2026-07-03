@@ -1,5 +1,5 @@
 //! exec_one — 단일 노드 실행기(stateless). 발행(interp)과 실행을 분리한다(규칙 C).
-//! interp 는 노드만 그리고, 실제 LLM 실행은 이 경로(soksak-workflow exec-one)뿐.
+//! interp 는 노드만 그리고, 실제 LLM 실행은 이 경로(soksak-sidecar-workflow exec-one)뿐.
 //! 코어 스케줄러가 칸반 ready 노드 하나의 {prompt, schema?} 를 stdin 으로 주면
 //! claude 로 실행 → {oxf, result} 를 stdout 으로 돌려준다. 무상태 — 칸반이 단일 진실.
 

@@ -5,7 +5,7 @@
 //!     예: ANTHROPIC_AUTH_TOKEN=… ANTHROPIC_BASE_URL=… ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2 \
 //!         ./target/release/directive-loop "산악회 금강산 등반 계획" --store stores/climb.json --rounds 6
 
-use soksak_plugin::directive_loop::{run_loop, Ledger, LoopConfig};
+use soksak_sidecar_workflow::directive_loop::{run_loop, Ledger, LoopConfig};
 use std::path::PathBuf;
 
 /// 부모 환경에서 claude 프로필 인증/설정 변수만 수집 → run_agent 에 격리 주입.

@@ -17,7 +17,7 @@
 SHELL     := /bin/bash
 HERE      := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
 SOKSAK    := $(abspath $(HERE)/..)
-BIN       := $(SOKSAK)/target/release/soksak-workflow
+BIN       := $(SOKSAK)/target/release/soksak-sidecar-workflow
 REFS      := $(SOKSAK)/references
 OUT       := $(HERE)/out
 IDEA_FILE ?= $(HERE)/idea.txt
