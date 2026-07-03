@@ -113,6 +113,7 @@ async function main() {
   let fires = 0;
   let lastFire = 0;
   let prev = "";
+  let envSeeded = false;
   while (Date.now() < DEADLINE) {
     if (!(await appReady())) {
       log("앱 대기(다운/재빌드/플러그인 부팅)");
@@ -149,6 +150,20 @@ async function main() {
       continue;
     }
 
+    if (!envSeeded && mode === "run") {
+      // 앱 재기동 시 세션 env 휘발 + 볼트 잠김이면 reconcile exec 가 인증 없이 공회전한다(실측:
+      // "프로필 인증 토큰 미설정"). ping 이 env 를 세션에 재주입하고, reconcile 1회로 재개를 민다.
+      log("env 재주입(ping) + reconcile poke");
+      try {
+        await call(`${WF}.workflow.ping`, { env: captureEnv() }, 900_000);
+        await call(`${WF}.workflow.reconcile`, {}, 3_600_000);
+      } catch (e) {
+        log("재주입/poke 실패(다음 사이클 재시도):", String(e).slice(0, 80));
+        await sleep(30_000);
+        continue;
+      }
+      envSeeded = true;
+    }
     const state = JSON.stringify([s.chunks.map((c) => c.badge || "-"), s.items.length, s.badges, s.tasks, s.facts, s.planUnits]);
     if (state !== prev) {
       log(`chunk ${s.chunks.length} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${s.facts} | plan-units ${s.planUnits}`);
