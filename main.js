@@ -846,7 +846,7 @@ function execOne(app, bin, opts, body) {
           });
         });
         await app.process.write(handle, body);
-        if (app.process.closeStdin) await app.process.closeStdin(handle);
+        await app.process.closeStdin(handle); // EOF 필수 — stdin read-to-end 자식은 이 호출 없이 영구 블록(실측)
       })
       .catch(reject);
   });
@@ -898,7 +898,7 @@ function execStage(app, bin, opts, body) {
           });
         });
         await app.process.write(handle, body);
-        if (app.process.closeStdin) await app.process.closeStdin(handle);
+        await app.process.closeStdin(handle); // EOF 필수 — stdin read-to-end 자식은 이 호출 없이 영구 블록(실측)
       })
       .catch(reject);
   });
@@ -992,7 +992,7 @@ export default {
 
       if (stdinContent) {
         await app.process.write(handle, stdinContent);
-        if (app.process.closeStdin) await app.process.closeStdin(handle);
+        await app.process.closeStdin(handle); // EOF 필수 — stdin read-to-end 자식은 이 호출 없이 영구 블록(실측)
       }
 
       // 발행 완결까지 대기 — exit code·relay 실패를 검사해 fail-loud 로 반환(선반환 {ok:true} 금지).
