@@ -5,6 +5,7 @@
 //   node e2e/app-e2e.mjs run     # 발사+완주 관찰(멱등 — 보드에 draft chunk 있으면 발사 생략)
 //   node e2e/app-e2e.mjs observe # 관찰만(발사 없음)
 //   node e2e/app-e2e.mjs ping    # provider 헬스 프로브(workflow.ping — 보드 무접촉)
+//   node e2e/app-e2e.mjs status  # 일회 진단: 앱/플러그인/볼트/보드 체인 요약(멱등·무변경)
 //
 // env: SOKSAK_SOCKET(기본 ~/.soksak/com.soksak.dev.sock), IDEA_FILE(기본 e2e/idea.txt),
 //      ANTHROPIC_*(run-e2e.zsh 가 캡처 주입 — run/ping 에 필요), APP_E2E_MAX_HOURS(기본 8).
@@ -104,9 +105,34 @@ async function fire(idea) {
   }
 }
 
+/** status — 일회 진단 스냅샷(멱등·무변경). 매 진단마다 임시 스크립트를 짜는 대신 이걸 쓴다. */
+async function cmdStatus() {
+  let plugins;
+  try {
+    plugins = await call("plugin.list");
+  } catch (e) {
+    log("앱: 다운 —", String(e).slice(0, 60));
+    process.exit(1);
+  }
+  for (const id of ["soksak-plugin-workflow", "soksak-plugin-kanban"]) {
+    const p = plugins.plugins.find((x) => x.id === id);
+    log(`${id}: ${p?.status}${p?.error ? " | " + p.error.slice(0, 60) : ""}`);
+  }
+  try {
+    await call("secret.keys", { ns: "soksak-plugin-workflow" });
+    log("볼트: unlocked");
+  } catch (e) {
+    log("볼트:", String(e).slice(0, 40), "(잠김이면 세션 env 폴백 — run 모드가 ping 재주입)");
+  }
+  const s = summarize(await board());
+  log(`chunk ${s.chunks.length} ${s.chunks.map((c) => c.badge || "검수전")} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${s.facts} | plan-units ${s.planUnits}`);
+  process.exit(0);
+}
+
 async function main() {
   const mode = process.argv[2] || "run";
   if (mode === "ping") return cmdPing();
+  if (mode === "status") return cmdStatus();
   const ideaFile = process.env.IDEA_FILE || new URL("./idea.txt", import.meta.url).pathname;
   const idea = mode === "run" ? fs.readFileSync(ideaFile, "utf8").trim() : null;
 

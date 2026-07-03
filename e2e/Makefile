@@ -181,3 +181,6 @@ app-observe:
 
 app-ping:
 	node $(HERE)/app-e2e.mjs ping
+
+app-status:
+	node $(HERE)/app-e2e.mjs status
