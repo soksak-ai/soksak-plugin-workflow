@@ -756,6 +756,33 @@ async function execOpts(app, runtime) {
   return runtime.env && typeof runtime.env === "object" ? { env: runtime.env } : {};
 }
 
+/** waitStdoutSettle — 프로세스 exit 후 stdout 잔여 도착 대기. 코어는 stdout EOF 후 exit 를 보내지만
+ *  stdout(onData)과 exit(onExit)는 **서로 다른 Tauri IPC 채널**이라 웹뷰 도착 순서가 미보장 — 종료 직전
+ *  대량 출력(20KB doc 등)이 exit 에 추월당해 유실된 실측 결함의 방어. 50ms 간격 길이 정지 2회(상한 3s) 확정. */
+function waitStdoutSettle(getLen) {
+  return new Promise((resolve) => {
+    let last = getLen();
+    let stable = 0;
+    const iv = setInterval(() => {
+      const cur = getLen();
+      if (cur === last) {
+        stable += 1;
+        if (stable >= 2) {
+          clearInterval(iv);
+          resolve();
+        }
+      } else {
+        stable = 0;
+        last = cur;
+      }
+    }, 50);
+    setTimeout(() => {
+      clearInterval(iv);
+      resolve();
+    }, 3000);
+  });
+}
+
 /** generate-skeleton spawn — 아이디어 → gen.js(LLM 저작) → skeleton JSON(stdout 문자열 resolve).
  *  claude 호출 → 인증 env 필요(발행 spawn 과 다름 — opts 는 execOpts 산출). lease=프로세스-생존(onExit 까지 대기). */
 function genSkeleton(app, bin, opts, spec) {
@@ -776,10 +803,12 @@ function genSkeleton(app, bin, opts, spec) {
           });
         }
         app.process.onExit(handle, (code) => {
-          if (code !== 0) return reject(new Error(`generate-skeleton exit ${code}: ${err.trim().slice(-500)}`));
-          const t = out.trim();
-          if (!t.startsWith("{")) return reject(new Error(`generate-skeleton 출력이 skeleton JSON 아님: ${t.slice(0, 200)}`));
-          resolve(t);
+          void waitStdoutSettle(() => out.length).then(() => {
+            if (code !== 0) return reject(new Error(`generate-skeleton exit ${code}: ${err.trim().slice(-500)}`));
+            const t = out.trim();
+            if (!t.startsWith("{")) return reject(new Error(`generate-skeleton 출력이 doc JSON 아님(${t.length}자): ${t.slice(0, 200)}`));
+            resolve(t);
+          });
         });
       })
       .catch(reject);
@@ -807,12 +836,14 @@ function execOne(app, bin, opts, body) {
           });
         }
         app.process.onExit(handle, (code) => {
-          if (code !== 0) return reject(new Error(`exec-one exit ${code}: ${err.trim().slice(-500)}`));
-          try {
-            resolve(JSON.parse(out.trim()));
-          } catch {
-            reject(new Error(`exec-one 출력 JSON 파싱 실패: ${out.slice(0, 200)}`));
-          }
+          void waitStdoutSettle(() => out.length).then(() => {
+            if (code !== 0) return reject(new Error(`exec-one exit ${code}: ${err.trim().slice(-500)}`));
+            try {
+              resolve(JSON.parse(out.trim()));
+            } catch {
+              reject(new Error(`exec-one 출력 JSON 파싱 실패: ${out.slice(0, 200)}`));
+            }
+          });
         });
         await app.process.write(handle, body);
         if (app.process.closeStdin) await app.process.closeStdin(handle);
@@ -841,6 +872,7 @@ function execStage(app, bin, opts, body) {
           });
         }
         app.process.onExit(handle, (code) => {
+          void waitStdoutSettle(() => out.length).then(() => {
           if (code !== 0) return reject(new Error(`exec-stage exit ${code}: ${err.trim().slice(-500)}`));
           // generate stage = DraftDoc(단일 JSON 문서, kind:"draft-chunk"). 그 외 = 줄단위 스트림({ev:add}+{ev:result}).
           const whole = out.trim();
@@ -863,6 +895,7 @@ function execStage(app, bin, opts, body) {
             else if (ev.ev === "result") result = ev.value;
           }
           resolve({ children, result });
+          });
         });
         await app.process.write(handle, body);
         if (app.process.closeStdin) await app.process.closeStdin(handle);
@@ -964,6 +997,7 @@ export default {
 
       // 발행 완결까지 대기 — exit code·relay 실패를 검사해 fail-loud 로 반환(선반환 {ok:true} 금지).
       const code = await exited;
+      await waitStdoutSettle(() => buf.length + queue.length); // 교차 채널 지연 도착 방어
       if (buf.trim()) queue.push(buf.trim());
       await drain();
       if (code !== 0) {
