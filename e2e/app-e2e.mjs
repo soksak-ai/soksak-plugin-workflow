@@ -114,6 +114,10 @@ async function cmdStatus() {
     log("앱: 다운 —", String(e).slice(0, 60));
     process.exit(1);
   }
+  if (!plugins.ok || !Array.isArray(plugins.plugins)) {
+    log("plugin.list 실패:", JSON.stringify(plugins).slice(0, 120));
+    process.exit(1);
+  }
   for (const id of ["soksak-plugin-workflow", "soksak-plugin-kanban"]) {
     const p = plugins.plugins.find((x) => x.id === id);
     log(`${id}: ${p?.status}${p?.error ? " | " + p.error.slice(0, 60) : ""}`);
