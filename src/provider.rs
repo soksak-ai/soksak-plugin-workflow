@@ -76,18 +76,18 @@ fn claude_args(req: &AgentRequest) -> Vec<String> {
     args
 }
 
-/// run_agent_text — claude -p 로 agent 실행, result 텍스트(raw) 반환. **529 과부하 backoff 재시도** 포함.
-/// 인증 프로필(제공자) 529 는 일시적 → 지수 backoff 로 복구(메모리 정책: 529 backoff 재시도). max 5회.
+/// run_agent_text — claude -p 로 agent 실행, result 텍스트(raw) 반환. **529 과부하 재시도** 포함.
+/// 제공자 529 과부하는 흔하고 일시적 → **고정 30초 간격 재실행**(사용자 확정 정책 — 지수 backoff 아님).
+/// max 10회(과부하 ~5분 창 커버). 최종 실패는 loud.
 pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
-    let max = 5u32;
-    let mut backoff_secs = 3.0f64;
-    for attempt in 0..max {
+    const MAX: u32 = 10;
+    const INTERVAL_SECS: u64 = 30;
+    for attempt in 0..MAX {
         match run_agent_text_once(req, env) {
             Ok(s) => return Ok(s),
-            Err(e) if is_529(&e) && attempt + 1 < max => {
-                eprintln!("[soksak] 529 과부하(인증 프로필) — {backoff_secs:.0}s 후 재시도 ({}/{})", attempt + 1, max);
-                std::thread::sleep(std::time::Duration::from_secs_f64(backoff_secs));
-                backoff_secs = (backoff_secs * 2.0).min(60.0);
+            Err(e) if is_529(&e) && attempt + 1 < MAX => {
+                eprintln!("[soksak] 529 과부하 — {INTERVAL_SECS}s 후 재실행 ({}/{MAX})", attempt + 1);
+                std::thread::sleep(std::time::Duration::from_secs(INTERVAL_SECS));
                 continue;
             }
             Err(e) => return Err(e),
@@ -96,9 +96,9 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
     unreachable!()
 }
 
-/// is_529 — 인증 프로필(제공자) 일시 과부하 에러(529/overloaded/temporarily) 판정.
+/// is_529 — 제공자 일시 과부하 에러 판정. "wait longer"는 과부하 안내 문구(앱 실측 2026-07-03).
 fn is_529(err: &str) -> bool {
-    err.contains("529") || err.contains("overloaded") || err.contains("temporarily")
+    err.contains("529") || err.contains("overloaded") || err.contains("temporarily") || err.contains("wait longer")
 }
 
 /// run_agent_text_once — claude -p 단일 실행(재시도 없음). 529 감지(stream text) 시 Err 를 529 로.

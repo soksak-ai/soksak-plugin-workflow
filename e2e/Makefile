@@ -170,3 +170,14 @@ exec-classify: build
 	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "run make exec-stage first"; exit 1; }
 	@node $(SOKSAK)/tools/classify-input.mjs $(OUT)/doc.json $(OUT)/stage.jsonl $(IDEA_FILE) | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/classify.jsonl
 	@node $(SOKSAK)/tools/verify-classify.mjs $(OUT)/classify.jsonl $(OUT)/stage.jsonl
+
+# ── 앱 실경로 e2e(PLUGIN-CONTRACT §5: 완결 판정은 레지스트리 커맨드 경유) ──
+# 사용: zsh e2e/run-e2e.zsh app-e2e|app-observe|app-ping (인증 env 캡처 포함)
+app-e2e:
+	node $(HERE)/app-e2e.mjs run
+
+app-observe:
+	node $(HERE)/app-e2e.mjs observe
+
+app-ping:
+	node $(HERE)/app-e2e.mjs ping

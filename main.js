@@ -1057,6 +1057,30 @@ export default {
       }),
     );
 
+    // ping — provider 헬스 프로브. exec-one 에 고정 미니 프롬프트를 **실경로**(spawn·sh랩·secretEnv)로
+    // 태워 왕복을 확인한다 — 외부 임시 스크립트 금지 원칙의 내재화. 멱등(보드 무접촉·상태 무변경).
+    ctx.subscriptions.push(
+      app.commands.register("workflow.ping", {
+        description: "provider 헬스 프로브 — exec-one 실경로로 고정 미니 프롬프트 왕복. 보드 무접촉(멱등).",
+        params: {
+          env: { type: "json", description: "claude -p 에 주입할 인증 env(ANTHROPIC_*). 없으면 볼트(env:*)/세션 캡처." },
+        },
+        returns: "{ ok, oxf?, ms?, error? }",
+        handler: async ({ env }) => {
+          if (env && typeof env === "object") runtime.env = env;
+          const t0 = Date.now();
+          try {
+            const out = await execOne(app, runtime.bin, await execOpts(app, runtime), {
+              prompt: '다음 항목을 판정하라: "1 더하기 1은 2다". 참이면 oxf=o.',
+            });
+            return { ok: true, oxf: out?.oxf ?? null, ms: Date.now() - t0 };
+          } catch (e) {
+            return { ok: false, ms: Date.now() - t0, error: String(e).slice(0, 500) };
+          }
+        },
+      }),
+    );
+
     // research — 인증 덩어리에 번들 정본 워크플로(workflows/research.doc.json)를 건다(저작 LLM 불참 — PRINCIPLES §7).
     ctx.subscriptions.push(
       app.commands.register("workflow.research", {
