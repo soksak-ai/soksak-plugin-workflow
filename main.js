@@ -820,6 +820,8 @@ function genSkeleton(app, bin, opts, spec) {
  *  lease=프로세스-생존: spawn → **onExit await → 그제야 resolve/reject**. 도는 중(검색 1시간이든)엔 reply 금지 —
  *  스케줄러가 lease 로 기다린다. heartbeat 발신 없음(폐기). 정상 exit+결과=resolve, 비정상/무결과=reject(→ok:false). */
 function execOne(app, bin, opts, body) {
+  // wire 경계 — 직렬화는 여기가 소유(호출자 stringify 중복·객체 오전달 차단). process_write 는 문자열 계약.
+  if (typeof body !== "string") body = JSON.stringify(body);
   return new Promise((resolve, reject) => {
     let out = "";
     let err = "";
