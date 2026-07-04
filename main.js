@@ -2,7 +2,7 @@
 // 코어 스케줄러(reconcile)로 ready 노드를 실행한다. 발행(--emit)과 실행(exec-one/exec-stage)은 분리(규칙 C).
 //
 // 발행: soksak-workflow --emit → stdout JSON line(노드 이벤트) → 칸반 node.add(locked, 드래프트 마커).
-// 실행: app.scheduler.register({trigger: reconcile}) → 'workflow.reconcile' 가 칸반 ready 노드 1개를 처리 —
+// 실행: app.scheduler.register({trigger: reconcile}) → 'reconcile' 가 칸반 ready 노드 1개를 처리 —
 //       item → exec-one(prompt/schema) 검증 → node.edit(badge=oxf, result) / task → exec-stage(stage 실행·자식 발행).
 //       트리거(폴링 0): ①발행 완료 poke ②완료 poke(handler 가 진척 시 self-poke) ③activate 가 register 직후
 //       poke 1회(부팅 스캔 — Reconcile 등록만으론 발화하지 않는다) ④kanban:changed(외부 변화).
@@ -10,7 +10,7 @@
 
 const KANBAN = "plugin.soksak-plugin-kanban";
 const SELF = "plugin.soksak-plugin-workflow";
-const RECONCILE_CMD = SELF + ".workflow.reconcile";
+const RECONCILE_CMD = SELF + ".reconcile";
 const RECONCILE_ID = "workflow-reconcile";
 
 // ── 순수 로직(테스트 가능 — app 의존 없음) ──
@@ -1019,7 +1019,7 @@ export default {
     }
 
     ctx.subscriptions.push(
-      app.commands.register("workflow.run", {
+      app.commands.register("run", {
         description: "아이디어(idea) 또는 워크플로 문서(workflow-doc@0.0.1) 를 받아 칸반에 노드 DAG 로 발행하고, reconcile 로 실행을 건다. idea 면 내부에서 generate-skeleton(LLM 저작→doc) 을 먼저 돈다.",
         params: {
           idea: { type: "string", description: "사용자 아이디어 — 내부 generate-skeleton(LLM 저작→workflow-doc)으로 발행. skeleton/skeletonPath 없을 때." },
@@ -1062,7 +1062,7 @@ export default {
     // ping — provider 헬스 프로브. exec-one 에 고정 미니 프롬프트를 **실경로**(spawn·sh랩·secretEnv)로
     // 태워 왕복을 확인한다 — 외부 임시 스크립트 금지 원칙의 내재화. 멱등(보드 무접촉·상태 무변경).
     ctx.subscriptions.push(
-      app.commands.register("workflow.ping", {
+      app.commands.register("ping", {
         description: "provider 헬스 프로브 — exec-one 실경로로 고정 미니 프롬프트 왕복. 보드 무접촉(멱등).",
         params: {
           env: { type: "json", description: "claude -p 에 주입할 인증 env(ANTHROPIC_*). 없으면 볼트(env:*)/세션 캡처." },
@@ -1085,7 +1085,7 @@ export default {
 
     // research — 인증 덩어리에 번들 정본 워크플로(workflows/research.doc.json)를 건다(저작 LLM 불참 — PRINCIPLES §7).
     ctx.subscriptions.push(
-      app.commands.register("workflow.research", {
+      app.commands.register("research", {
         description:
           "인증된 드래프트 덩어리(badge='o')에 research 워크플로를 발행 — 기초지식(fact: framework/methodology/directive) 발굴·검증 후 plan(한턴 슈도코드화)이 자동 연결된다. directive=덩어리 description(정련 정본, 단일 진실). 재호출 멱등 거부.",
         params: {
@@ -1115,7 +1115,7 @@ export default {
 
     // reconcile 명령 — 칸반 ready 노드 1개를 실행. 스케줄러가 발화(activate poke·완료 poke·kanban:changed).
     ctx.subscriptions.push(
-      app.commands.register("workflow.reconcile", {
+      app.commands.register("reconcile", {
         description:
           "칸반 ready 노드 1개를 실행 — item 은 exec-one 검증(badge o/x/f 기록), task 는 exec-stage(stage 실행·자식 노드 발행·classify category 기록·덩어리 result 갱신) → 다음 깨움.",
         params: {},
@@ -1160,7 +1160,7 @@ export default {
     // 이슈라이즈 — 인증(badge='o')·research(fact 검증 완료)·plan(plan-unit) 을 전부 경유한 덩어리의
     // 슈도코드 단위를 unlock 개발 이슈로 승격. 게이트·멱등은 issuerizeTick(순수)이 판정.
     ctx.subscriptions.push(
-      app.commands.register("workflow.issuerize", {
+      app.commands.register("issuerize", {
         description:
           "인증된 드래프트 덩어리(badge='o', research fact 검증 완료, plan-unit 존재)의 슈도코드 단위를 unlock 개발 이슈 노드로 승격 — parentDraftId 계보, 원본 드래프트는 잠긴 채 보존, 재호출 멱등 거부.",
         params: {
