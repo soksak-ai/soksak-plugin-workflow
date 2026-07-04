@@ -861,6 +861,7 @@ function execStage(app, bin, opts, body) {
   return new Promise((resolve, reject) => {
     let out = "";
     let err = "";
+    let seen = 0; // 진행 델타 증분 스캔 커서(축적 파싱과 별개 — 최종 판정은 exit 에서 그대로)
     const dec = new TextDecoder();
     const errDec = new TextDecoder();
     const { cmd, args } = buildSpawnCmd(bin, ["exec-stage", "--lang", "ko"]);
@@ -868,6 +869,22 @@ function execStage(app, bin, opts, body) {
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
           out += dec.decode(b, { stream: true });
+          // 사이드카 {ev:add} 라인 → 표준 진행 델타(MESSAGE-PROTOCOL §2) — 실행 중 "무엇이
+          // 만들어지는지"를 활동 스트림에 흘린다(A14: 변환은 소비 플러그인 책임).
+          const nl = out.lastIndexOf("\n");
+          if (nl > seen) {
+            for (const line of out.slice(seen, nl).split("\n")) {
+              const t = line.trim();
+              if (!t.startsWith("{")) continue;
+              let ev;
+              try { ev = JSON.parse(t); } catch { continue; }
+              if (ev.ev === "add" && app.events && app.events.progress) {
+                const label = ev.title || ev.stage || ev.kind || "node";
+                app.events.progress("reconcile", `+ ${String(label).slice(0, 120)}`);
+              }
+            }
+            seen = nl + 1;
+          }
         });
         if (app.process.onStderr) {
           app.process.onStderr(handle, (b) => {
