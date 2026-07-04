@@ -18,23 +18,38 @@
     "commands": [
       {
         "name": "run",
-        "title": "워크플로 발행 → 칸반(실행=reconcile 스케줄러)"
+        "title": {
+          "ko": "워크플로를 발행합니다",
+          "en": "Publishes the workflow"
+        }
       },
       {
         "name": "ping",
-        "title": "Provider 헬스 프로브 — exec-one 실경로 왕복(보드 무접촉)"
+        "title": {
+          "ko": "프로바이더 상태를 점검합니다",
+          "en": "Probes the provider"
+        }
       },
       {
         "name": "reconcile",
-        "title": "Reconcile — ready 노드 실행(item=exec-one 검증, task=exec-stage 발행/기록)"
+        "title": {
+          "ko": "준비된 워크플로 노드를 실행합니다",
+          "en": "Runs ready workflow nodes"
+        }
       },
       {
         "name": "research",
-        "title": "Research — 인증 덩어리에 기초지식 확정 워크플로 발행(fact→plan 자동 연결)"
+        "title": {
+          "ko": "조사 워크플로를 발행합니다",
+          "en": "Publishes the research workflow"
+        }
       },
       {
         "name": "issuerize",
-        "title": "이슈라이즈 — 인증 덩어리의 plan-unit 을 unlock 개발 이슈로 승격"
+        "title": {
+          "ko": "계획을 개발 이슈로 승격합니다",
+          "en": "Promotes plans to issues"
+        }
       }
     ]
   }
