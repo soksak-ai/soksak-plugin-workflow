@@ -8,6 +8,11 @@
 //       poke 1회(부팅 스캔 — Reconcile 등록만으론 발화하지 않는다) ④kanban:changed(외부 변화).
 //       concurrency·lease·backoff(529)는 코어가 처리 — handler 는 ready 1개만 처리하고 poke.
 
+// 명령 응답 봉투(MESSAGE-PROTOCOL §3) 데이터 접근 — 성공이면 data, 실패면 null.
+// 봉투 전환(M2) 후 반환값은 항상 {ok,code,message,data} — 톱레벨 필드 읽기는 조용한 불임을 만든다
+// (실측: listed.nodes=undefined 로 reconcile 이 영구 processed:0, relay 는 성공을 거부로 오판).
+const envData = (r) => (r && r.ok ? r.data || {} : null);
+
 const KANBAN = "plugin.soksak-plugin-kanban";
 const SELF = "plugin.soksak-plugin-workflow";
 const RECONCILE_CMD = SELF + ".reconcile";
@@ -119,7 +124,7 @@ const NO_VERDICT_MAX = 3;
 export async function reconcileTick(deps, state) {
   const st = state || makeReconcileState();
   const listed = await deps.listNodes();
-  const nodes = (listed && listed.nodes) || [];
+  const nodes = (envData(listed) || {}).nodes || [];
   const ready = pickReady(nodes);
   if (ready.length === 0) return { ok: true, processed: 0 };
   // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
@@ -137,7 +142,7 @@ export async function reconcileTick(deps, state) {
     }
   }
   const full = await deps.getNode(target.id);
-  const node = (full && full.node) || {};
+  const node = (envData(full) || {}).node || {};
   const body = node.body || "";
   // kind=task → exec-stage 로 stage 실행 후 자식 노드 동적 발행(generate→항목, hunt→추가항목).
   if (target.kind === "task") {
@@ -339,7 +344,7 @@ export async function applyDraftDoc(deps, doc, chunkKanbanId, taskCtx) {
   const put = async (value) => {
     if (value === undefined || value === null || value === "") return undefined;
     const r = await putPrompt(value);
-    return r && r.hash;
+    return (envData(r) || {}).hash;
   };
   const hT = await put(vc.template);
   const hD = await put(vc.directive);
@@ -396,7 +401,8 @@ export async function registerPromptTemplates(registerPrompts, putPrompt) {
   for (const [role, text] of Object.entries(registerPrompts || {})) {
     // 값 그대로 전달 — 문자열(템플릿/directive)·객체(schema) 모두 kanban 이 sha256·네이티브 저장.
     const r = await putPrompt(text); // kanban prompt.put(value) → {ok,hash}
-    if (r && r.hash) roleToHash.set(role, r.hash);
+    const rh = (envData(r) || {}).hash;
+    if (rh) roleToHash.set(role, rh);
   }
   return roleToHash;
 }
@@ -414,7 +420,8 @@ async function resolveBody(body, deps, extraVars) {
   // vars = body.vars(하위호환) + extraVars(노드 필드: title/description/category). extraVars 우선.
   const vars = { ...(p.vars || {}), ...(extraVars || {}) };
   const res = deps.resolvePrompt ? await deps.resolvePrompt(p.promptHash, vars, p.refs || {}) : null;
-  if (!res || !res.ok || res.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
+  const rp = envData(res);
+  if (!rp || rp.prompt == null) return body; // 템플릿 미발견 → 그대로 → exec-one "prompt 없음" → ok:false backoff(안전 실패)
   // schema: schemaHash(콘텐츠 주소) deref → 네이티브 객체(stringify/parse 왕복 없음). 없으면 인라인 p.schema(하위호환).
   let schema = p.schema;
   if (p.schemaHash) {
@@ -423,7 +430,7 @@ async function resolveBody(body, deps, extraVars) {
     if (value == null || typeof value !== "object") return body; // schema 미발견/비객체 → 안전 실패(backoff)
     schema = value;
   }
-  return JSON.stringify(schema ? { prompt: res.prompt, schema } : { prompt: res.prompt });
+  return JSON.stringify(schema ? { prompt: rp.prompt, schema } : { prompt: rp.prompt });
 }
 
 /** reconcileStage — kind=task 노드를 exec-stage 로 실행 → 자식 노드 발행 + 덩어리 갱신 + status=done(멱등) + poke.
@@ -607,7 +614,7 @@ async function reconcileStage(deps, target, body, nodes) {
  *  개발 실행 자체는 이슈 소비자(빌더 에이전트·사람) 몫 — 여기는 이슈화까지. deps: listNodes()·addNode(params). */
 export async function issuerizeTick(deps, chunkId) {
   const listed = await deps.listNodes();
-  const nodes = (listed && listed.nodes) || [];
+  const nodes = (envData(listed) || {}).nodes || [];
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const chunk = byId.get(chunkId);
   if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
@@ -657,7 +664,7 @@ export async function issuerizeTick(deps, chunkId) {
  *  통과 시 directive=덩어리 description(단일 진실 §1 — 표시 표면이 곧 검증 기준). */
 export async function researchGate(deps, chunkId) {
   const listed = await deps.listNodes();
-  const nodes = (listed && listed.nodes) || [];
+  const nodes = (envData(listed) || {}).nodes || [];
   const chunk = nodes.find((n) => n.id === chunkId);
   if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
   if (chunk.badge !== "o") {
@@ -683,7 +690,7 @@ export async function researchGate(deps, chunkId) {
     const full = await deps.getNode(t.id);
     let b;
     try {
-      b = JSON.parse(((full && full.node) || {}).body || "");
+      b = JSON.parse(((envData(full) || {}).node || {}).body || "");
     } catch {
       continue;
     }
@@ -970,8 +977,9 @@ export default {
                 : undefined;
             const params = buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash); // 발행 relay·exec-stage relay 공유
             const r = await app.commands.execute(KANBAN + ".node.add", params);
-            if (r && r.nodeId) keyOf.set(ev.id, r.nodeId);
-            else throw new Error(`node.add 거부: ${(r && r.error) || JSON.stringify(r)}`);
+            const rid = (envData(r) || {}).nodeId;
+            if (rid) keyOf.set(ev.id, rid);
+            else throw new Error(`node.add 거부: ${(r && r.message) || JSON.stringify(r)}`);
           }
         } catch (e) {
           relayErrors += 1;
@@ -1150,17 +1158,17 @@ export default {
             // exec-stage 자식 노드 발행 → 칸반 node.add, 칸반 id 반환(reconcileStage 가 배치 keyOf 로 부모 잇게).
             addNode: async (params) => {
               const r = await exec(KANBAN + ".node.add", params);
-              return r && r.nodeId;
+              return (envData(r) || {}).nodeId;
             },
             // hunt/classify/audit/plan 용 ledger — 덩어리 자손 요건+배지(node.list 로, limit 명시).
             materializeLedger: async (chunkId) => {
               const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
-              return buildLedger((listed && listed.nodes) || [], chunkId);
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId);
             },
             // plan 용 기초지식 원장 — research 가 발행한 kind=fact 자손(검증 배지 포함).
             materializeFacts: async (chunkId) => {
               const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
-              return buildLedger((listed && listed.nodes) || [], chunkId, "fact");
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId, "fact");
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
@@ -1190,7 +1198,7 @@ export default {
             listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
             addNode: async (params) => {
               const r = await app.commands.execute(KANBAN + ".node.add", params);
-              return r && r.nodeId;
+              return (envData(r) || {}).nodeId;
             },
           };
           return await issuerizeTick(deps, chunk);
