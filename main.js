@@ -151,6 +151,9 @@ export async function reconcileTick(deps, state) {
     else st.fails.set(target.id, (st.fails.get(target.id) || 0) + 1);
     return res;
   }
+  // 진행 델타(MESSAGE-PROTOCOL §2) — item 검증은 LLM 왕복(수십초)이라 무엇을 검증 중인지 흘린다.
+  // 델타 = 핵심 내용(노드 제목)만; 프레임 단어 없음(피드가 "reconcile: <제목>"로 렌더, 번역 불요=P0).
+  deps.progress?.("reconcile", String(node.title ?? target.id).slice(0, 120));
   // 항목 검증 — exec-one(verifyPrompt) → 배지.
   // 정규화 item: body={promptHash,refs,schemaHash} → kanban prompt.resolve 로 완성 prompt 조립(소비 시점).
   // vars 는 body 에 복붙하지 않고 **노드 필드(title/description)** 에서 조립 — 항목마다 중복 저장 제거(정규화).
@@ -884,7 +887,8 @@ function execStage(app, bin, opts, body) {
               try { ev = JSON.parse(t); } catch { continue; }
               if (ev.ev === "add" && app.events && app.events.progress) {
                 const label = ev.title || ev.stage || ev.kind || "node";
-                app.events.progress("reconcile", `+ ${String(label).slice(0, 120)}`);
+                // 델타 = 핵심 내용만(프레임 단어 없음 — 피드가 "reconcile: <내용>"로 렌더, 번역 불요=P0).
+                app.events.progress("reconcile", String(label).slice(0, 120));
               }
             }
             seen = nl + 1;
@@ -941,7 +945,7 @@ export default {
     /** emitAndRelay — --emit spawn + 발행 relay(workflow.run/workflow.research 공유).
      *  stdout JSON line → 칸반 node.add(keyOf 부모 해석·roleToHash 정규화·taskCtx 임베드), stderr 수집,
      *  exit code·relay 실패를 검사해 fail-loud 반환(선반환 {ok:true} 금지 — PRINCIPLES §2). */
-    async function emitAndRelay(emitArgs, stdinContent) {
+    async function emitAndRelay(emitArgs, stdinContent, progressCmd = "run") {
       const emitCmd = buildSpawnCmd(runtime.bin, emitArgs);
       const handle = await app.process.spawn(emitCmd.cmd, emitCmd.args, {}); // 발행은 LLM 미호출 → env 불필요
 
@@ -980,6 +984,9 @@ export default {
             const rid = (envData(r) || {}).nodeId;
             if (rid) keyOf.set(ev.id, rid);
             else throw new Error(`node.add 거부: ${(r && r.message) || JSON.stringify(r)}`);
+            // 진행 델타(§2) — DAG 발행은 노드마다 순차 relay 하는 장시간 경로다. 무엇이 발행 중인지
+            // 흘린다(내용=노드 제목, 프레임 없음 — 피드가 "<cmd>: <제목>"로 렌더, P0).
+            app.events?.progress?.(progressCmd, String(ev.title ?? params.title ?? ev.stage ?? "node").slice(0, 120));
           }
         } catch (e) {
           relayErrors += 1;
@@ -1076,7 +1083,7 @@ export default {
           // --emit 의 chunk description(doc default)과 여기서 임베드하는 검증 기준이 같은 문자열이 된다.
           runtime.directive = resolveDirective(directive, runtime.skeleton, idea);
           const input = skeletonPath || "-";
-          return await emitAndRelay([input, "--emit", "--lang", "ko"], !skeletonPath && skeleton ? skeleton : undefined);
+          return await emitAndRelay([input, "--emit", "--lang", "ko"], !skeletonPath && skeleton ? skeleton : undefined, "run");
         },
       }),
     );
@@ -1131,6 +1138,7 @@ export default {
           return await emitAndRelay(
             ["--workflow", "research", "--emit", "--lang", "ko", "--args-json", JSON.stringify({ chunkRef: chunk, directive: gate.directive })],
             undefined,
+            "research",
           );
         },
       }),
@@ -1155,6 +1163,7 @@ export default {
             // lease=프로세스-생존: exec-one/exec-stage 가 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 backstop 으로만 관리.
             execOne: async (body) => execOne(app, runtime.bin, await execOpts(app, runtime), body),
             execStage: async (body) => execStage(app, runtime.bin, await execOpts(app, runtime), body),
+            progress: (cmd, delta) => app.events?.progress?.(cmd, delta),
             // exec-stage 자식 노드 발행 → 칸반 node.add, 칸반 id 반환(reconcileStage 가 배치 keyOf 로 부모 잇게).
             addNode: async (params) => {
               const r = await exec(KANBAN + ".node.add", params);
