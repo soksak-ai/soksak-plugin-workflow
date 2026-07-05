@@ -730,15 +730,12 @@ export function buildSecretEnvMap(keys) {
 }
 
 /** buildSpawnCmd — soksak-sidecar-workflow spawn 명령 조립. bin 명시(workflow.run 파라미터)면 직접 spawn,
- *  없으면 로그인셸 랩: 플러그인은 Blob 로 로드돼 자기 경로를 모른다 → 단일 폴더 플러그인 컨벤션 경로
- *  사이드카 표준($SOKSAK_HOME/sidecars/soksak-sidecar-workflow/dist/) — SOKSAK_HOME 은 앱 주입
- *  컨텍스트(A17, 코어 process_spawn 이 identity 홈을 자식에 전파). sh -l 이 GUI(Finder) 실행의
- *  PATH 미상속도 함께 해소한다(로그인셸이 rc 를 로드 — acp-core 선례). */
+ *  기본은 "sidecar:workflow" 이름 참조 — 경로 해석은 코어 process_spawn 소유(identity 홈 단일진실,
+ *  A17/SIDECARS.md — 플러그인은 홈 규칙을 모른다). 사이드카 자신의 자식(claude)의 PATH 는
+ *  사이드카(provider)가 로그인셸 해석으로 스스로 보장한다. */
 export function buildSpawnCmd(bin, args) {
   if (bin) return { cmd: bin, args };
-  const script =
-    'exec "${SOKSAK_HOME:-$HOME/.soksak}/sidecars/soksak-sidecar-workflow/dist/soksak-sidecar-workflow" "$@"';
-  return { cmd: "/bin/sh", args: ["-lc", script, "soksak-sidecar-workflow", ...args] };
+  return { cmd: "sidecar:workflow", args };
 }
 
 /** execOpts — spawn 3종(generate-skeleton/exec-one/exec-stage)의 env 주입 옵션.

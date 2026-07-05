@@ -987,15 +987,13 @@ test("buildSecretEnvMap — env:* 키만 envVar→secretKey 매핑(그 외·빈 
   assert.deepEqual(buildSecretEnvMap([]), {});
 });
 
-test("buildSpawnCmd — bin 명시면 직접 spawn, 없으면 로그인셸 랩(사이드카 표준 경로, $SOKSAK_HOME 파생)", () => {
-  // 플러그인은 Blob 로드라 자기 경로 불명 + GUI(Finder) 실행은 셸 PATH 미상속 → sh -l 랩이 둘 다 해소.
+test("buildSpawnCmd — bin 명시면 직접 spawn, 기본은 sidecar: 이름 참조(경로 해석 = 코어 소유)", () => {
+  // 플러그인은 identity 홈 규칙을 모른다 — 코어 process_spawn 이 sidecar:{name} 을 해석(A17).
   assert.deepEqual(buildSpawnCmd("/x/bin/wf", ["exec-one"]), { cmd: "/x/bin/wf", args: ["exec-one"] });
-  const wrapped = buildSpawnCmd(null, ["exec-one", "--lang", "ko"]);
-  assert.equal(wrapped.cmd, "/bin/sh");
-  assert.equal(wrapped.args[0], "-lc");
-  assert.match(wrapped.args[1], /\$\{SOKSAK_HOME:-\$HOME\/\.soksak\}/, "identity 홈 = 앱 주입 컨텍스트(A17), release 폴백 ~/.soksak");
-  assert.match(wrapped.args[1], /sidecars\/soksak-sidecar-workflow\/dist\/soksak-sidecar-workflow/, "사이드카 표준 실행 진입점(dist/)");
-  assert.deepEqual(wrapped.args.slice(3), ["exec-one", "--lang", "ko"], '실제 인자는 "$@" 로 전달($0 자리 다음)');
+  assert.deepEqual(buildSpawnCmd(null, ["exec-one", "--lang", "ko"]), {
+    cmd: "sidecar:workflow",
+    args: ["exec-one", "--lang", "ko"],
+  });
 });
 
 test("validateDraftDoc — ⑧ 비enum badge 거부(칸반 드랍→영구 not-done 무음 정지 차단)", () => {

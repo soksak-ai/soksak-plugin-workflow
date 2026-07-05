@@ -105,7 +105,10 @@ fn is_529(err: &str) -> bool {
 /// timeout 하드캡(req.timeout_secs)은 **네이티브**(wait-timeout crate) — 외부 GNU `timeout` 바이너리에
 /// 의존하지 않는다(macOS 기본 미탑재; 부재 시 모든 호출이 "spawn claude" 오진 라벨로 죽던 결함 해소).
 fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
-    let mut cmd = Command::new("claude");
+    // claude 발견 = 로그인셸 해석(sh -lc) — GUI(Finder) 실행 앱의 자식은 셸 PATH 를 상속받지 못해
+    // PATH 의존 spawn 이 os error 2 로 죽는다(GUI PATH 함정). 사이드카 자신의 자식 발견은 사이드카 책임.
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-lc", r#"exec claude "$@""#, "claude"]);
     for a in claude_args(req) {
         cmd.arg(a);
     }
