@@ -1109,12 +1109,13 @@ export default {
           chunk: { type: "string", description: "대상 덩어리(칸반 노드 id) — audit 인증(badge='o') 필수" },
         },
         returns: "{ ok, published?, error? }",
-        handler: async ({ chunk }) => {
+        handler: async ({ chunk }, inv) => {
+          const exec = inv?.execute ?? ((n, q) => exec(n, q));
           if (!chunk) return { ok: false, error: "chunk(덩어리 id) 필수" };
           const gate = await researchGate(
             {
-              listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
-              getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
+              listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
+              getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
             },
             chunk,
           );
@@ -1137,36 +1138,38 @@ export default {
           "칸반 ready 노드 1개를 실행 — item 은 exec-one 검증(badge o/x/f 기록), task 는 exec-stage(stage 실행·자식 노드 발행·classify category 기록·덩어리 result 갱신) → 다음 깨움.",
         params: {},
         returns: "{ ok, processed, id?, badge? }",
-        handler: async () => {
+        handler: async (_p, inv) => {
+          // §5 상속: 스케줄 발화(origin=schedule)의 중첩 실행이 사람으로 위장되지 않게 inv.execute 로.
+          const exec = inv?.execute ?? ((n, q) => exec(n, q));
           const deps = {
             // limit 명시 — 칸반 node.list 기본 200 절단이 pickReady/멱등 마커/#6 게이트/ledger 를 부분 데이터로
             // 오판시킨다(무음). 칸반 store 는 인메모리 배열이라 전량 조회 비용 무시 가능.
-            listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
-            getNode: (id) => app.commands.execute(KANBAN + ".node.get", { node: id }),
-            editNode: (id, fields) => app.commands.execute(KANBAN + ".node.edit", { node: id, ...fields }),
+            listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
+            getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
+            editNode: (id, fields) => exec(KANBAN + ".node.edit", { node: id, ...fields }),
             // lease=프로세스-생존: exec-one/exec-stage 가 onExit 까지 reply 보류(도는 중 안 잘림). 코어가 backstop 으로만 관리.
             execOne: async (body) => execOne(app, runtime.bin, await execOpts(app, runtime), body),
             execStage: async (body) => execStage(app, runtime.bin, await execOpts(app, runtime), body),
             // exec-stage 자식 노드 발행 → 칸반 node.add, 칸반 id 반환(reconcileStage 가 배치 keyOf 로 부모 잇게).
             addNode: async (params) => {
-              const r = await app.commands.execute(KANBAN + ".node.add", params);
+              const r = await exec(KANBAN + ".node.add", params);
               return r && r.nodeId;
             },
             // hunt/classify/audit/plan 용 ledger — 덩어리 자손 요건+배지(node.list 로, limit 명시).
             materializeLedger: async (chunkId) => {
-              const listed = await app.commands.execute(KANBAN + ".node.list", { limit: 100000 });
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
               return buildLedger((listed && listed.nodes) || [], chunkId);
             },
             // plan 용 기초지식 원장 — research 가 발행한 kind=fact 자손(검증 배지 포함).
             materializeFacts: async (chunkId) => {
-              const listed = await app.commands.execute(KANBAN + ".node.list", { limit: 100000 });
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
               return buildLedger((listed && listed.nodes) || [], chunkId, "fact");
             },
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
             // 프롬프트 정규화(콘텐츠 주소화): 등록(sha256 dedup)·조립({{key}}→vars). 조립기 단일=kanban.
-            putPrompt: (value) => app.commands.execute(KANBAN + ".prompt.put", { value }),
-            resolvePrompt: (hash, vars, refs) => app.commands.execute(KANBAN + ".prompt.resolve", { hash, vars, refs }),
-            getPrompt: (hash) => app.commands.execute(KANBAN + ".prompt.get", { hash }),
+            putPrompt: (value) => exec(KANBAN + ".prompt.put", { value }),
+            resolvePrompt: (hash, vars, refs) => exec(KANBAN + ".prompt.resolve", { hash, vars, refs }),
+            getPrompt: (hash) => exec(KANBAN + ".prompt.get", { hash }),
           };
           // reconcileTick 이 ok 를 정한다 — exec 실패 시 ok:false → 코어 backoff 재시도(재시도 판정 ok!=true).
           return await reconcileTick(deps, reconcileState);
