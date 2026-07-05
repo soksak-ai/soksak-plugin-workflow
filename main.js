@@ -168,7 +168,7 @@ export async function reconcileTick(deps, state) {
   } catch (e) {
     // 529 과부하·timeout 등 일시 실패 → ok:false. 노드 미변경(badge=검수전 유지) → 코어 backoff 재시도가 자연 복구.
     st.fails.set(target.id, (st.fails.get(target.id) || 0) + 1);
-    return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+    return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: String((e && e.message) || e) };
   }
   st.fails.delete(target.id);
   const edit = execResultToEdit(execOut);
@@ -492,7 +492,7 @@ async function reconcileStage(deps, target, body, nodes) {
       // classify(배정 검증)·audit(f 집계=인증 계산)·research(발굴 근거=인증 원장)·plan(슈도코드 입력=원장)은
       // 원장이 필수 — 없으면 거부(backoff). hunt 만 ledger 없이 진행 가능(빈 원장='중복 회피 정보 없음'일 뿐).
       if (stageName !== "hunt") {
-        return { ok: false, processed: 0, id: target.id, error: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
+        return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
       }
     }
   }
@@ -500,7 +500,7 @@ async function reconcileStage(deps, target, body, nodes) {
   try {
     staged = await deps.execStage(stageBody);
   } catch (e) {
-    return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+    return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: String((e && e.message) || e) };
   }
   // 자식 stage 노드(hunt/classify/audit·plan)에 워크플로 전파 — 이 task 입력 body 에서 추출(같은 골격 재실행).
   // workflowRef(번들 정본 이름)가 있으면 그것을, 없으면 임베드 skeleton 을 전파.
@@ -518,13 +518,13 @@ async function reconcileStage(deps, target, body, nodes) {
     const violations = validateDraftDoc(staged.draftDoc);
     if (violations.length) {
       // 위반 문서 발행 거부 — 노드 미변경(status todo 유지) → 코어 backoff 재시도(안전 실패).
-      return { ok: false, processed: 0, id: target.id, error: `DraftDoc 검증 실패(${violations.length}건): ${violations[0]}` };
+      return { ok: false, processed: 0, id: target.id, code: "VALIDATION_FAILED", message: `DraftDoc 검증 실패(${violations.length}건): ${violations[0]}` };
     }
     let published;
     try {
       published = await applyDraftDoc(deps, staged.draftDoc, target.parentId, childCtx);
     } catch (e) {
-      return { ok: false, processed: 0, id: target.id, error: String((e && e.message) || e) };
+      return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: String((e && e.message) || e) };
     }
     await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
     await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
@@ -553,10 +553,10 @@ async function reconcileStage(deps, target, body, nodes) {
   if (stageName === "classify") {
     const assignments = res && typeof res === "object" && Array.isArray(res.assignments) ? res.assignments : null;
     if (!assignments) {
-      return { ok: false, processed: 0, id: target.id, error: "classify 결과에 assignments 배열 없음" };
+      return { ok: false, processed: 0, id: target.id, code: "INVALID_RESULT", message: "classify 결과에 assignments 배열 없음" };
     }
     if (!Array.isArray(ledger)) {
-      return { ok: false, processed: 0, id: target.id, error: "classify 원장 materialize 실패 — 배정 검증 불가" };
+      return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: "classify 원장 materialize 실패 — 배정 검증 불가" };
     }
     const ledgerIds = new Set(ledger.map((e) => e && e.id).filter(Boolean));
     const seen = new Set();
@@ -573,19 +573,19 @@ async function reconcileStage(deps, target, body, nodes) {
     for (const id of ledgerIds) if (!seen.has(id)) errs.push(`미배정: ${id}`);
     if (errs.length) {
       // 거부 → 노드 미변경(status todo 유지) → 코어 backoff 가 classify 재실행(LLM 재시도).
-      return { ok: false, processed: 0, id: target.id, error: `classify 배정 검증 실패(${errs.length}건): ${errs[0]}` };
+      return { ok: false, processed: 0, id: target.id, code: "VALIDATION_FAILED", message: `classify 배정 검증 실패(${errs.length}건): ${errs[0]}` };
     }
     for (const a of assignments) {
       const er = await deps.editNode(a.id, { category: a.category });
       if (er && er.ok === false) {
-        return { ok: false, processed: 0, id: target.id, error: `category 기록 실패(${a.id}): ${er.error || ""}` };
+        return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: `category 기록 실패(${a.id}): ${er.message || ""}` };
       }
       assigned += 1;
     }
   }
   // audit 는 결과가 곧 산출 — verdict/complete 없이 done 처리하면 '감사 없는 완결'이 된다(거부→재시도).
   if (stageName === "audit" && !(res && typeof res === "object")) {
-    return { ok: false, processed: 0, id: target.id, error: "audit 결과 없음(verdict/complete 미반환)" };
+    return { ok: false, processed: 0, id: target.id, code: "INVALID_RESULT", message: "audit 결과 없음(verdict/complete 미반환)" };
   }
   if (res && typeof res === "object" && target.parentId) {
     const chunkEdit = {};
@@ -620,9 +620,9 @@ export async function issuerizeTick(deps, chunkId) {
   const nodes = (envData(listed) || {}).nodes || [];
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const chunk = byId.get(chunkId);
-  if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
+  if (!chunk) return { ok: false, code: "NOT_FOUND", message: `덩어리 미존재: ${chunkId}` };
   if (chunk.badge !== "o") {
-    return { ok: false, error: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 이슈라이즈` };
+    return { ok: false, code: "GATE_REQUIRED", message: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 이슈라이즈` };
   }
   const descends = (n) => {
     let p = n.parentId;
@@ -634,14 +634,14 @@ export async function issuerizeTick(deps, chunkId) {
     return false;
   };
   if (nodes.some((n) => n.kind === "issue" && n.parentDraftId === chunkId)) {
-    return { ok: false, error: "이미 이슈라이즈된 덩어리(계보 issue 존재) — 멱등 거부" };
+    return { ok: false, code: "ALREADY_DONE", message: "이미 이슈라이즈된 덩어리(계보 issue 존재) — 멱등 거부" };
   }
   const facts = nodes.filter((n) => n.kind === "fact" && descends(n));
-  if (facts.length === 0) return { ok: false, error: "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" };
+  if (facts.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" };
   const unverified = facts.filter((n) => !(n.badge === "o" || n.badge === "x" || n.badge === "f"));
-  if (unverified.length) return { ok: false, error: `기초지식 미검증 ${unverified.length}건(검수전) — 검증 완료 후 이슈라이즈` };
+  if (unverified.length) return { ok: false, code: "GATE_REQUIRED", message: `기초지식 미검증 ${unverified.length}건(검수전) — 검증 완료 후 이슈라이즈` };
   const units = nodes.filter((n) => n.kind === "plan-unit" && descends(n));
-  if (units.length === 0) return { ok: false, error: "plan 미경유(plan-unit 없음) — plan(한턴 슈도코드화) 후에만 이슈라이즈" };
+  if (units.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "plan 미경유(plan-unit 없음) — plan(한턴 슈도코드화) 후에만 이슈라이즈" };
   // 배경지식(o 확정 fact)을 self-contained 로 이슈 본문에 동반 — 소비자가 덩어리를 다시 뒤지지 않게.
   const knowledge = facts.filter((n) => n.badge === "o").map((n) => `- ${n.title}`).join("\n");
   let issued = 0;
@@ -655,7 +655,7 @@ export async function issuerizeTick(deps, chunkId) {
       parentDraftId: chunkId, // 계보 — 드래프트 원본은 잠긴 채 보존, 이슈는 unlock(locked 미지정)
       blockedBy: [],
     });
-    if (!r) return { ok: false, error: `이슈 발행 실패(${u.id}) — 부분 승격 중단(발행 ${issued}건)`, issued };
+    if (!r) return { ok: false, code: "INTERNAL", message: `이슈 발행 실패(${u.id}) — 부분 승격 중단(발행 ${issued}건)`, issued };
     issued += 1;
   }
   return { ok: true, issued, chunk: chunkId };
@@ -669,12 +669,12 @@ export async function researchGate(deps, chunkId) {
   const listed = await deps.listNodes();
   const nodes = (envData(listed) || {}).nodes || [];
   const chunk = nodes.find((n) => n.id === chunkId);
-  if (!chunk) return { ok: false, error: `덩어리 미존재: ${chunkId}` };
+  if (!chunk) return { ok: false, code: "NOT_FOUND", message: `덩어리 미존재: ${chunkId}` };
   if (chunk.badge !== "o") {
-    return { ok: false, error: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 research` };
+    return { ok: false, code: "GATE_REQUIRED", message: `덩어리 미인증(badge=${JSON.stringify(chunk.badge ?? null)}) — audit 인증(badge='o') 후에만 research` };
   }
   if (!chunk.description || !String(chunk.description).trim()) {
-    return { ok: false, error: "덩어리 description(정련 directive) 비어있음 — 검증 기준 없이 research 불가" };
+    return { ok: false, code: "INVALID_INPUT", message: "덩어리 description(정련 directive) 비어있음 — 검증 기준 없이 research 불가" };
   }
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const descends = (n) => {
@@ -687,7 +687,7 @@ export async function researchGate(deps, chunkId) {
     return false;
   };
   if (nodes.some((n) => n.kind === "fact" && descends(n))) {
-    return { ok: false, error: "이미 research 진행/완료(fact 존재) — 멱등 거부" };
+    return { ok: false, code: "ALREADY_DONE", message: "이미 research 진행/완료(fact 존재) — 멱등 거부" };
   }
   for (const t of nodes.filter((n) => n.kind === "task" && n.parentId === chunkId)) {
     const full = await deps.getNode(t.id);
@@ -697,7 +697,7 @@ export async function researchGate(deps, chunkId) {
     } catch {
       continue;
     }
-    if (b && b.workflow === "research") return { ok: false, error: "이미 research task 발행됨 — 멱등 거부" };
+    if (b && b.workflow === "research") return { ok: false, code: "ALREADY_DONE", message: "이미 research task 발행됨 — 멱등 거부" };
   }
   return { ok: true, directive: chunk.description };
 }
@@ -1036,10 +1036,10 @@ export default {
         const tail = errBuf.trim().slice(-500);
         const error = `--emit exit ${code}${tail ? `: ${tail}` : ""}`;
         app.bus?.emit?.("workflow.error", { message: error });
-        return { ok: false, error, published: keyOf.size };
+        return { ok: false, code: "EMIT_FAILED", message: error, published: keyOf.size };
       }
       if (relayErrors > 0) {
-        return { ok: false, error: `발행 relay 실패 ${relayErrors}건(첫: ${firstRelayError})`, published: keyOf.size };
+        return { ok: false, code: "RELAY_FAILED", message: `발행 relay 실패 ${relayErrors}건(첫: ${firstRelayError})`, published: keyOf.size };
       }
       app.bus?.emit?.("workflow.done", {});
       // 발행 완료 → reconcile 깨워 새 ready 노드 처리.
@@ -1060,7 +1060,8 @@ export default {
           env: { type: "json", description: "generate-skeleton·exec-one(claude -p) 에 주입할 인증 env(ANTHROPIC_*). 순수 발행(--emit)은 토큰 불필요." },
           directive: { type: "string", description: "입력 지시어 — stage 작업 노드 body 에 임베드(exec-stage args.directive). 없으면 idea 로 승격." },
         },
-        returns: "{ ok, published?, error? }",
+        returns: "{ ok, published?, code?, message? }",
+        message: (d) => `${d.published ?? 0}개 노드를 발행했습니다`,
         handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive }) => {
           runtime.bin = bin || null; // null → buildSpawnCmd 로그인셸 랩 기본
           runtime.env = env; // 세션 캡처(폴백) — 영속은 아래 secrets
@@ -1096,7 +1097,8 @@ export default {
         params: {
           env: { type: "json", description: "claude -p 에 주입할 인증 env(ANTHROPIC_*). 없으면 볼트(env:*)/세션 캡처." },
         },
-        returns: "{ ok, oxf?, ms?, error? }",
+        returns: "{ ok, oxf?, ms?, code?, message? }",
+        message: (d) => `프로바이더 응답 ${d.oxf ?? "?"} (${d.ms ?? 0}ms)`,
         handler: async ({ env }) => {
           if (env && typeof env === "object") runtime.env = env;
           const t0 = Date.now();
@@ -1106,7 +1108,7 @@ export default {
             });
             return { ok: true, oxf: out?.oxf ?? null, ms: Date.now() - t0 };
           } catch (e) {
-            return { ok: false, ms: Date.now() - t0, error: String(e).slice(0, 500) };
+            return { ok: false, ms: Date.now() - t0, code: "INTERNAL", message: String(e).slice(0, 500) };
           }
         },
       }),
@@ -1120,10 +1122,11 @@ export default {
         params: {
           chunk: { type: "string", description: "대상 덩어리(칸반 노드 id) — audit 인증(badge='o') 필수" },
         },
-        returns: "{ ok, published?, error? }",
+        returns: "{ ok, published?, code?, message? }",
+        message: (d) => `${d.published ?? 0}개 노드로 조사 워크플로를 발행했습니다`,
         handler: async ({ chunk }, inv) => {
           const exec = inv?.execute ?? ((n, q) => exec(n, q));
-          if (!chunk) return { ok: false, error: "chunk(덩어리 id) 필수" };
+          if (!chunk) return { ok: false, code: "INVALID_INPUT", message: "chunk(덩어리 id) 필수" };
           const gate = await researchGate(
             {
               listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
@@ -1151,6 +1154,7 @@ export default {
           "칸반 ready 노드 1개를 실행 — item 은 exec-one 검증(badge o/x/f 기록), task 는 exec-stage(stage 실행·자식 노드 발행·classify category 기록·덩어리 result 갱신) → 다음 깨움.",
         params: {},
         returns: "{ ok, processed, id?, badge? }",
+        message: (d) => (d.processed ? `노드 ${d.id ?? "?"}을 처리했습니다` : "실행할 준비된 노드가 없습니다"),
         handler: async (_p, inv) => {
           // §5 상속: 스케줄 발화(origin=schedule)의 중첩 실행이 사람으로 위장되지 않게 inv.execute 로.
           const exec = inv?.execute ?? ((n, q) => exec(n, q));
@@ -1200,9 +1204,10 @@ export default {
         params: {
           chunk: { type: "string", description: "이슈라이즈할 덩어리(칸반 노드 id)" },
         },
-        returns: "{ ok, issued?, error? }",
+        returns: "{ ok, issued?, code?, message? }",
+        message: (d) => `${d.issued ?? 0}개를 개발 이슈로 승격했습니다`,
         handler: async ({ chunk }) => {
-          if (!chunk) return { ok: false, error: "chunk(덩어리 id) 필수" };
+          if (!chunk) return { ok: false, code: "INVALID_INPUT", message: "chunk(덩어리 id) 필수" };
           const deps = {
             listNodes: () => app.commands.execute(KANBAN + ".node.list", { limit: 100000 }),
             addNode: async (params) => {
