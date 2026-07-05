@@ -7,7 +7,7 @@
 //   node e2e/app-e2e.mjs ping    # provider 헬스 프로브(workflow.ping — 보드 무접촉)
 //   node e2e/app-e2e.mjs status  # 일회 진단: 앱/플러그인/볼트/보드 체인 요약(멱등·무변경)
 //
-// env: SOKSAK_SOCKET(기본 ~/.soksak/com.soksak.dev.sock), IDEA_FILE(기본 e2e/idea.txt),
+// env: SOKSAK_SOCKET(기본 ~/.soksak-dev/com.soksak.dev.sock — A17 identity 홈), IDEA_FILE(기본 e2e/idea.txt),
 //      ANTHROPIC_*(run-e2e.zsh 가 캡처 주입 — run/ping 에 필요), APP_E2E_MAX_HOURS(기본 8).
 // 멱등성: run 재실행은 안전 — 이미 발행됐으면 관찰만, 완주됐으면 즉시 판정 반환.
 import net from "node:net";
@@ -15,7 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const SOCK = process.env.SOKSAK_SOCKET || path.join(os.homedir(), ".soksak", "com.soksak.dev.sock");
+const SOCK = process.env.SOKSAK_SOCKET || path.join(os.homedir(), ".soksak-dev", "com.soksak.dev.sock");
 const WF = "plugin.soksak-plugin-workflow";
 const KB = "plugin.soksak-plugin-kanban";
 const DEADLINE = Date.now() + Number(process.env.APP_E2E_MAX_HOURS || 8) * 3600_000;
@@ -47,11 +47,17 @@ function call(method, params = {}, timeoutMs = 20_000) {
   });
 }
 
+/** 응답 언랩 — 신형 {code:"OK",data} 우선, 구형 {ok:true} 수용. 그 외 = 명시 실패. */
+function unwrap(r) {
+  if (r && r.code === "OK") return r.data ?? r;
+  if (r && r.ok === true) return r;
+  throw new Error(`응답 실패: ${JSON.stringify(r).slice(0, 200)}`);
+}
+
 async function appReady() {
   try {
-    const r = await call("plugin.list");
-    if (!r.ok) return null;
-    const st = (id) => r.plugins.find((p) => p.id === id)?.status;
+    const r = unwrap(await call("plugin.list"));
+    const st = (id) => (r.plugins || []).find((p) => p.id === id)?.status;
     return st("soksak-plugin-workflow") === "enabled" && st("soksak-plugin-kanban") === "enabled" ? r : null;
   } catch {
     return null;
@@ -59,7 +65,7 @@ async function appReady() {
 }
 
 async function board() {
-  const r = await call(`${KB}.node.list`, { limit: 100_000 });
+  const r = unwrap(await call(`${KB}.node.list`, { limit: 100_000 }));
   return r.nodes || [];
 }
 
@@ -88,17 +94,17 @@ function captureEnv() {
 }
 
 async function cmdPing() {
-  const r = await call(`${WF}.workflow.ping`, { env: captureEnv() }, 900_000);
+  const r = unwrap(await call(`${WF}.ping`, { env: captureEnv() }, 900_000));
   log("ping →", JSON.stringify(r));
-  process.exit(r.ok && r.oxf === "o" ? 0 : 1);
+  process.exit(r.oxf === "o" ? 0 : 1);
 }
 
 async function fire(idea) {
   log("workflow.run 발사");
   try {
-    const r = await call(`${WF}.workflow.run`, { idea, env: captureEnv() }, 3_600_000);
-    log("workflow.run →", JSON.stringify(r).slice(0, 300));
-    return r.ok;
+    const r = unwrap(await call(`${WF}.run`, { idea, env: captureEnv() }, 3_600_000));
+    log("run →", JSON.stringify(r).slice(0, 300));
+    return true;
   } catch (e) {
     log("run 응답 유실(핸들러 생존 가능):", String(e).slice(0, 80));
     return null;
@@ -109,13 +115,13 @@ async function fire(idea) {
 async function cmdStatus() {
   let plugins;
   try {
-    plugins = await call("plugin.list");
+    plugins = unwrap(await call("plugin.list"));
   } catch (e) {
-    log("앱: 다운 —", String(e).slice(0, 60));
+    log("앱: 다운/실패 —", String(e).slice(0, 100));
     process.exit(1);
   }
-  if (!plugins.ok || !Array.isArray(plugins.plugins)) {
-    log("plugin.list 실패:", JSON.stringify(plugins).slice(0, 120));
+  if (!Array.isArray(plugins.plugins)) {
+    log("plugin.list 형태 이상:", JSON.stringify(plugins).slice(0, 120));
     process.exit(1);
   }
   for (const id of ["soksak-plugin-workflow", "soksak-plugin-kanban"]) {
@@ -123,7 +129,7 @@ async function cmdStatus() {
     log(`${id}: ${p?.status}${p?.error ? " | " + p.error.slice(0, 60) : ""}`);
   }
   try {
-    await call("secret.keys", { ns: "soksak-plugin-workflow" });
+    unwrap(await call("secret.keys", { ns: "soksak-plugin-workflow" }));
     log("볼트: unlocked");
   } catch (e) {
     log("볼트:", String(e).slice(0, 40), "(잠김이면 세션 env 폴백 — run 모드가 ping 재주입)");
@@ -186,8 +192,8 @@ async function main() {
       // "프로필 인증 토큰 미설정"). ping 이 env 를 세션에 재주입하고, reconcile 1회로 재개를 민다.
       log("env 재주입(ping) + reconcile poke");
       try {
-        await call(`${WF}.workflow.ping`, { env: captureEnv() }, 900_000);
-        await call(`${WF}.workflow.reconcile`, {}, 3_600_000);
+        await call(`${WF}.ping`, { env: captureEnv() }, 900_000);
+        await call(`${WF}.reconcile`, {}, 3_600_000);
       } catch (e) {
         log("재주입/poke 실패(다음 사이클 재시도):", String(e).slice(0, 80));
         await sleep(30_000);
