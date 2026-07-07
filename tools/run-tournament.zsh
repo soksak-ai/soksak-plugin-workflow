@@ -16,12 +16,17 @@ export SOKSAK_SIDECAR_WORKFLOW_RUNS="$OUT/runs"
 
 run_stage() { # <doc> <stage> <out.jsonl> [extra-facts...]
   local doc=$1 stage=$2 out=$3; shift 3
-  local n=0
-  until node "$HERE/tools/assemble-ledger.mjs" design "$ST" "$IDEA" "$RS" "$@" \
+  local n=0 err
+  while true; do
+    err=$(node "$HERE/tools/assemble-ledger.mjs" design "$ST" "$IDEA" "$RS" "$@" \
       | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const i=JSON.parse(s);i.skeleton=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));i.stage=process.argv[2];process.stdout.write(JSON.stringify(i))});' "$doc" "$stage" \
-      | "$BIN" exec-stage --lang ko --model glm-5.2 > "$out"; do
-    n=$((n+1)); [ $n -ge 8 ] && echo "FAIL: $stage 8회 소진" && return 1
-    echo "── 529 — 5분 후 재시도($n/8): $stage"; sleep 300
+      | "$BIN" exec-stage --lang ko --model glm-5.2 2>&1 > "$out") && break
+    # fail-loud(§2): 재시도는 transient(529/overloaded/timeout)에만 — 결정적 실패는 즉시 중단.
+    if ! print -r -- "$err" | grep -qiE "529|overloaded|temporarily|wait longer|timeout"; then
+      echo "FAIL(결정적): $stage — ${err##*$'\n'}" && return 1
+    fi
+    n=$((n+1)); [ $n -ge 8 ] && echo "FAIL: $stage transient 8회 소진" && return 1
+    echo "── transient — 5분 후 재시도($n/8): $stage"; sleep 300
   done
   echo "OK: $stage → $out ($(grep -c '"ev":"add"' $out 2>/dev/null || echo 0) adds)"
 }
