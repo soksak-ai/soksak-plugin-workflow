@@ -18,12 +18,18 @@ explicit commit.
 
 ## 2. Definition of done — all of C1–C5, each with evidence
 
-- **C1 Live-board unattended run**: one `run` call (the pharmacy SaaS idea) on the real app
-  board, then zero human intervention: requirements discovered → all confirmed → hunt →
-  classify → audit **badge='o'** → research facts all confirmed → design facts all confirmed →
-  plan units all confirmed → issuerize → **every file's code node confirmed**. No simulated
-  ledgers, no harness-driven step execution (observation only). Evidence: full board snapshot
+- **C1a Standalone full-chain run** (correction 2026-07-08 — the standing instruction was
+  "run standalone first, connect to the app later"; binding the full run to the app caused
+  instance contention and is wrong): the committed standalone runner drives the whole chain
+  app-free on a file board — requirements verify (each item, real LLM) → hunt → additions
+  verified → classify → audit **certification** → research facts verified → design chain
+  verified → plan units verified → per-file body + body-verify — until every node is
+  confirmed. No simulated badges: every verdict is a real LLM oxf. Evidence: the file board
   + run catalog.
+- **C1b App attachment**: the same assets running as the plugin — already live-proven for
+  publish → generate → item verify → next/submit (C2); after C1a, one attachment check on the
+  live board suffices (scheduler advances at least one node end-to-end). Evidence: board
+  transitions.
 - **C2 CLI idempotency** ✅ (2026-07-08): a live-board pending item was confirmed through
   `next`→`submit` (badge o + full result recorded, same pipeline as spawn); resubmission
   rejected as ALREADY_DONE. Evidence: command replies + node.get transition in the work log.
