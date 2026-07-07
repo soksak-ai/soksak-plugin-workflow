@@ -3,14 +3,15 @@
 // hunt/audit/plan 입력을, --workflow research 로 research 입력을 만든다. 발행 없이 CLI 단에서 각 stage 를
 // 실측하기 위한 도구(런타임에선 reconcile 이 칸반에서 materialize).
 //
-//   node assemble-ledger.mjs <stage> <stage.jsonl> <idea-or-directive.txt> [facts.jsonl]
-//     stage ∈ hunt|audit|research|plan. badge 는 전부 o 로 시뮬(항목 검증 완료 상태 모사).
-//     plan 은 facts.jsonl(exec-research 산출 스트림)에서 fact 원장을 함께 조립.
+//   node assemble-ledger.mjs <stage> <stage.jsonl> <idea-or-directive.txt> [facts.jsonl ...]
+//     stage ∈ hunt|audit|research|design|plan. badge 는 전부 o 로 시뮬(항목 검증 완료 상태 모사).
+//     design/plan 은 facts.jsonl(exec-research/exec-design 산출 스트림, 복수 허용)에서 fact 원장을 함께
+//     조립 — plan 의 ground 는 research fact + design fact 합집합(같은 kind=fact 원장).
 import { readFileSync } from "node:fs";
 
-const [stage, stPath, dirPath, factsPath] = process.argv.slice(2);
+const [stage, stPath, dirPath, ...factsPaths] = process.argv.slice(2);
 if (!stage || !stPath || !dirPath) {
-  console.error("사용: node assemble-ledger.mjs <hunt|audit|research|plan> <stage.jsonl> <directive.txt> [facts.jsonl]");
+  console.error("사용: node assemble-ledger.mjs <hunt|audit|research|design|plan> <stage.jsonl> <directive.txt> [facts.jsonl ...]");
   process.exit(1);
 }
 const doc = JSON.parse(readFileSync(stPath, "utf8"));
@@ -19,24 +20,26 @@ const directive = readFileSync(dirPath, "utf8").trim();
 const ledger = (doc.requirements || []).map((r) => ({ id: r.id, title: r.title, badge: "o" }));
 
 const args = { directive, ledger, chunkRef: "chunk" };
-if (stage === "plan") {
-  if (!factsPath) {
-    console.error("plan 은 facts.jsonl(exec-research 산출) 필요");
+if (stage === "design" || stage === "plan") {
+  if (factsPaths.length === 0) {
+    console.error(`${stage} 은 facts.jsonl(exec-research/exec-design 산출) 필요`);
     process.exit(1);
   }
-  // exec-research 스트림({ev:add} fact 라인들)에서 fact 원장 조립 — 검증 완료(badge o) 시뮬.
+  // 산출 스트림({ev:add} fact 라인들, 복수 파일 합집합)에서 fact 원장 조립 — 검증 완료(badge o) 시뮬.
   const facts = [];
-  for (const line of readFileSync(factsPath, "utf8").split("\n")) {
-    const t = line.trim();
-    if (!t.startsWith("{")) continue;
-    let ev;
-    try {
-      ev = JSON.parse(t);
-    } catch {
-      continue;
-    }
-    if (ev.ev === "add" && ev.kind === "fact") {
-      facts.push({ id: ev.id, title: ev.title, badge: "o", category: ev.category });
+  for (const fp of factsPaths) {
+    for (const line of readFileSync(fp, "utf8").split("\n")) {
+      const t = line.trim();
+      if (!t.startsWith("{")) continue;
+      let ev;
+      try {
+        ev = JSON.parse(t);
+      } catch {
+        continue;
+      }
+      if (ev.ev === "add" && ev.kind === "fact") {
+        facts.push({ id: ev.id, title: ev.title, description: ev.description, badge: "o", category: ev.category });
+      }
     }
   }
   if (facts.length === 0) {

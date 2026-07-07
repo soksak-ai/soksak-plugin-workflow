@@ -28,7 +28,7 @@ SLUG      ?= pharmacy
 .PHONY: test build e2e exec-stage exec-classify emit-replay commit-fixture check clean
 
 build:
-	cd $(SOKSAK) && cargo build --release --bin soksak-workflow
+	cd $(SOKSAK) && cargo build --release --bin soksak-sidecar-workflow
 
 # test — 결정적 단위/통합(플러그인 self-contained). LLM 미호출.
 test:
@@ -125,9 +125,27 @@ exec-research: build
 	  console.log("[exec-research] OK — facts:",facts.length,"| areas:",JSON.stringify(areas),"| plan.blockedBy =",plan.blocked_by.length);'
 
 # exec-plan — plan stage 실측(LLM): 요건 원장 + research fact 원장 → 슈도코드 단위(plan-unit).
-exec-plan: build
+exec-design: build
 	@test -s $(OUT)/stage.jsonl && test -s $(OUT)/research.jsonl || { echo "먼저 make exec-stage && make exec-research"; exit 1; }
-	@node $(SOKSAK)/tools/assemble-ledger.mjs plan $(OUT)/stage.jsonl $(IDEA_FILE) $(OUT)/research.jsonl \
+	@node $(SOKSAK)/tools/assemble-ledger.mjs design $(OUT)/stage.jsonl $(IDEA_FILE) $(OUT)/research.jsonl \
+	  | node -e 'const fs=require("fs");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const inp=JSON.parse(s);inp.workflow="research";inp.stage="design";process.stdout.write(JSON.stringify(inp))});' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/design.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/design.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const facts=L.filter(e=>e.ev==="add"&&e.kind==="fact"); const plan=L.find(e=>e.ev==="add"&&e.kind==="task"&&e.stage==="plan"); \
+	  if(!facts.length){console.error("[exec-design] FAIL: design fact 0");process.exit(1)} \
+	  const KINDS=new Set(["domain-model","interface","criterion"]); const bad=facts.filter(f=>!KINDS.has(f.category)); \
+	  if(bad.length){console.error("[exec-design] FAIL: category 이탈",bad.map(f=>f.category));process.exit(1)} \
+	  if(!facts[0].register_prompts){console.error("[exec-design] FAIL: 첫 design fact 에 registerPrompts 없음(정규화)");process.exit(1)} \
+	  const inlined=facts.filter(f=>f.vars&&JSON.stringify(f.vars).length>4000); \
+	  if(inlined.length){console.error("[exec-design] FAIL: vars 과대 인라인",inlined.length);process.exit(1)} \
+	  if(!plan){console.error("[exec-design] FAIL: plan task 없음");process.exit(1)} \
+	  if(!plan.blocked_by||plan.blocked_by.length!==facts.length){console.error("[exec-design] FAIL: plan.blockedBy ≠ 전 design fact");process.exit(1)} \
+	  const cats=facts.reduce((a,f)=>{a[f.category]=(a[f.category]||0)+1;return a},{}); \
+	  console.log("[exec-design] OK — design facts:",facts.length,JSON.stringify(cats));'
+
+exec-plan: build
+	@test -s $(OUT)/stage.jsonl && test -s $(OUT)/research.jsonl && test -s $(OUT)/design.jsonl || { echo "먼저 make exec-stage && make exec-research && make exec-design"; exit 1; }
+	@node $(SOKSAK)/tools/assemble-ledger.mjs plan $(OUT)/stage.jsonl $(IDEA_FILE) $(OUT)/research.jsonl $(OUT)/design.jsonl \
 	  | node -e 'const fs=require("fs");let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const inp=JSON.parse(s);inp.workflow="research";process.stdout.write(JSON.stringify(inp))});' \
 	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/plan.jsonl
 	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/plan.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
@@ -135,9 +153,13 @@ exec-plan: build
 	  if(!units.length){console.error("[exec-plan] FAIL: plan-unit 0");process.exit(1)} \
 	  const empty=units.filter(u=>!u.description||u.description.length<40); \
 	  if(empty.length){console.error("[exec-plan] FAIL: 슈도코드 빈약(40자 미만)",empty.length);process.exit(1)} \
-	  const cited=units.filter(u=>/\[i\d+\]/.test(u.description)); \
-	  if(!cited.length){console.error("[exec-plan] FAIL: 요건 인용([iN]) 있는 unit 0 — self-contained 계약 위반");process.exit(1)} \
-	  console.log("[exec-plan] OK — units:",units.length,"| 요건 인용 unit:",cited.length+"/"+units.length);'
+	  const cited=units.filter(u=>/\[[^\]]+\]/.test(u.description)); \
+	  if(!cited.length){console.error("[exec-plan] FAIL: 원장 인용([id]) 있는 unit 0 — self-contained 계약 위반");process.exit(1)} \
+	  const noFile=units.filter(u=>!u.category||!u.category.includes("/")&&!u.category.includes(".")); \
+	  if(noFile.length){console.error("[exec-plan] FAIL: file_path(category) 없는 unit",noFile.length);process.exit(1)} \
+	  const noBadge=units.filter(u=>u.badge!=="검수전"); \
+	  if(noBadge.length){console.error("[exec-plan] FAIL: badge 검수전 아닌 unit(검증 파이프 이탈)",noBadge.length);process.exit(1)} \
+	  console.log("[exec-plan] OK — units:",units.length,"| 인용:",cited.length+"/"+units.length,"| files:",new Set(units.map(u=>u.category)).size);'
 
 # e2e-full — 전 체인 실측(LLM): 저작→발행→generate→hunt→classify→audit→research→plan.
 e2e-full: e2e exec-stage exec-verify exec-hunt exec-classify exec-audit exec-research exec-plan

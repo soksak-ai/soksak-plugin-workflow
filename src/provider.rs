@@ -96,6 +96,25 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
     unreachable!()
 }
 
+/// event_signals_529 — stream 이벤트에서 일시 과부하 신호 감지(순수). 텍스트는 톱레벨
+/// {type:"text"} 가 아니라 **assistant 이벤트의 message.content[] text 블록**으로 온다(실측:
+/// "API Error: 529 …" 가 assistant 블록 — 톱레벨만 보던 감지는 죽은 조건이라 재시도가 0이었다).
+fn event_signals_529(ev: &serde_json::Value) -> bool {
+    let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    if ty == "text" {
+        return ev.get("text").and_then(|x| x.as_str()).is_some_and(is_529);
+    }
+    if ty == "assistant" || ty == "user" {
+        if let Some(blocks) = ev.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+            return blocks.iter().any(|b| {
+                b.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && b.get("text").and_then(|t| t.as_str()).is_some_and(is_529)
+            });
+        }
+    }
+    false
+}
+
 /// is_529 — 제공자 일시 과부하 에러 판정. "wait longer"는 과부하 안내 문구(앱 실측 2026-07-03).
 fn is_529(err: &str) -> bool {
     err.contains("529") || err.contains("overloaded") || err.contains("temporarily") || err.contains("wait longer")
@@ -144,13 +163,10 @@ fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<S
             match serde_json::from_str::<Value>(t) {
                 Ok(ev) => {
                     print_event(&ev);
-                    let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
-                    if ty == "text" {
-                        let t = ev.get("text").and_then(|x| x.as_str()).unwrap_or("");
-                        if t.contains("529") || t.contains("overloaded") {
-                            transient_529 = true;
-                        }
-                    } else if ty == "result" {
+                    if event_signals_529(&ev) {
+                        transient_529 = true;
+                    }
+                    if ev.get("type").and_then(|x| x.as_str()) == Some("result") {
                         if let Some(s) = ev.get("result").and_then(|r| r.as_str()) {
                             result_text = s.to_string();
                         }
@@ -313,6 +329,31 @@ fn extract_balanced_object(t: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests_529 {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_529_in_assistant_content_block() {
+        // 실측 형태: assistant 이벤트의 content[] text 블록으로 과부하 안내가 온다.
+        let ev = json!({ "type": "assistant", "message": { "content": [
+            { "type": "text", "text": "API Error: 529 [1305][The service may be temporarily overloaded, please try again later]" }
+        ] } });
+        assert!(event_signals_529(&ev));
+        let ev2 = json!({ "type": "assistant", "message": { "content": [ { "type": "text", "text": "정상 응답" } ] } });
+        assert!(!event_signals_529(&ev2));
+    }
+
+    #[test]
+    fn detects_529_in_top_level_text_and_ignores_others() {
+        assert!(event_signals_529(&json!({ "type": "text", "text": "overloaded" })));
+        // result 는 산출 채널 — 본문에 "529" 가 있어도 과부하 신호가 아니다.
+        assert!(!event_signals_529(&json!({ "type": "result", "result": "요건 529 관련 서술" })));
+        assert!(!event_signals_529(&json!({ "type": "system", "subtype": "init" })));
+    }
 }
 
 #[cfg(test)]
