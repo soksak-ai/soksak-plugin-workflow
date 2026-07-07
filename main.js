@@ -173,6 +173,7 @@ export async function reconcileTick(deps, state) {
   const fieldVars = {};
   if (node.title != null) fieldVars.title = node.title;
   if (node.description != null) fieldVars.description = node.description;
+  if (node.category != null) fieldVars.category = node.category; // plan-unit/code = 파일경로, fact = 영역
   const execBody = await resolveBody(body, deps, fieldVars);
   let execOut;
   try {
@@ -655,6 +656,7 @@ export async function nextTick(deps, state, resolveBodyFn) {
   const fieldVars = {};
   if (node.title != null) fieldVars.title = node.title;
   if (node.description != null) fieldVars.description = node.description;
+  if (node.category != null) fieldVars.category = node.category;
   const resolved = await resolveBodyFn(node.body || "", deps, fieldVars);
   let pkg;
   try {

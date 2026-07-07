@@ -220,6 +220,44 @@ fn validate_ops(
                         v.push(format!("[{stage}] publish.node.schema {s:?} ∉ values(객체)"));
                     }
                 }
+                // 등록 템플릿 소비 계약 — registerPromptsOnce 로 등록되는 템플릿(문자열 값)의 {{ph}}는
+                // 소비 시점(exec-one, kanban prompt.resolve)에 vars(노드 필드 title/description/category
+                // ∪ publish vars 키) ∪ varRefs 키로만 치환된다. 그 밖(ledger/facts 등 stage 전용 빌트인)은
+                // 검증 프롬프트에 영구 미치환으로 샌다 — C4 실측이 잡은 결함의 재발 방지 lint.
+                {
+                    let mut allowed: std::collections::BTreeSet<String> =
+                        ["title", "description", "category"].iter().map(|s| s.to_string()).collect();
+                    if let Some(vars) = node.get("vars").and_then(|x| x.as_object()) {
+                        allowed.extend(vars.keys().cloned());
+                    }
+                    if let Some(refs) = node.get("varRefs").and_then(|x| x.as_object()) {
+                        allowed.extend(refs.keys().cloned());
+                    }
+                    if let Some(reg) = node.get("registerPromptsOnce").and_then(|x| x.as_object()) {
+                        for (role, tv) in reg {
+                            // 템플릿 값: 리터럴 문자열 | {"$":"values.X"} 참조(조성 완료본 조회).
+                            let text: Option<String> = match tv {
+                                Json::String(t) => Some(t.clone()),
+                                Json::Object(m) => m
+                                    .get("$")
+                                    .and_then(|p| p.as_str())
+                                    .and_then(|p| p.strip_prefix("values."))
+                                    .and_then(|name| values.and_then(|vm| vm.get(name)))
+                                    .and_then(|x| x.as_str().map(String::from)),
+                                _ => None,
+                            };
+                            if let Some(t) = text {
+                                for ph in placeholders(&t) {
+                                    if !allowed.contains(&ph) {
+                                        v.push(format!(
+                                            "[{stage}] registerPromptsOnce.{role} 템플릿 {{{{{ph}}}}} — 소비 시점 치환 불가(vars/varRefs/노드 필드 밖: 허용 {allowed:?})"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Some("return") => {
                 if !op.get("value").is_some_and(|x| x.is_object()) {
@@ -623,7 +661,7 @@ mod tests {
             "values": {
                 "PENDING": "검수전",
                 "COMMON": "SHARED CONCEPTS",
-                "VERIFY_TMPL": "{{COMMON}} verify {{title}} — {{directive}}",
+                "VERIFY_TMPL": { "concat": [ { "$": "values.COMMON" }, " verify {{title}} — {{directive}}" ] },
                 "GEN_SCHEMA": { "type": "object", "required": ["title", "requirements"] },
                 "VERIFY_SCHEMA": { "type": "object", "required": ["oxf", "origin"] },
                 "HUNT_SCHEMA": { "type": "object", "required": ["additions"] },
