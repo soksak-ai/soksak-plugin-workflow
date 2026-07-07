@@ -1125,7 +1125,7 @@ export default {
         returns: "{ ok, published?, code?, message? }",
         message: (d) => `${d.published ?? 0}개 노드로 조사 워크플로를 발행했습니다`,
         handler: async ({ chunk }, inv) => {
-          const exec = inv?.execute ?? ((n, q) => exec(n, q));
+          const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           if (!chunk) return { ok: false, code: "INVALID_INPUT", message: "chunk(덩어리 id) 필수" };
           const gate = await researchGate(
             {
@@ -1157,7 +1157,7 @@ export default {
         message: (d) => (d.processed ? `노드 ${d.id ?? "?"}을 처리했습니다` : "실행할 준비된 노드가 없습니다"),
         handler: async (_p, inv) => {
           // §5 상속: 스케줄 발화(origin=schedule)의 중첩 실행이 사람으로 위장되지 않게 inv.execute 로.
-          const exec = inv?.execute ?? ((n, q) => exec(n, q));
+          const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           const deps = {
             // limit 명시 — 칸반 node.list 기본 200 절단이 pickReady/멱등 마커/#6 게이트/ledger 를 부분 데이터로
             // 오판시킨다(무음). 칸반 store 는 인메모리 배열이라 전량 조회 비용 무시 가능.
