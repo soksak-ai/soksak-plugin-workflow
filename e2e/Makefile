@@ -226,6 +226,14 @@ app-observe:
 app-ping:
 	node $(HERE)/app-e2e.mjs ping
 
+# C4 — 검증 지시어 3종의 실 LLM 실측(각 산출 노드 1개에 oxf 판정).
+exec-verify-design exec-verify-plan exec-verify-body: exec-verify-%: build
+	@node $(SOKSAK)/tools/assemble-verify.mjs $* $(OUT)/$*.jsonl $(SOKSAK)/workflows/research.doc.json $(IDEA_FILE) \
+	  | $(BIN) exec-one --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/verify-$*.json
+	@node -e 'const r=JSON.parse(require("fs").readFileSync("$(OUT)/verify-$*.json","utf8")); \
+	  if(!["o","x","f"].includes(r.oxf)){console.error("[exec-verify-$*] FAIL: oxf 없음",JSON.stringify(r).slice(0,200));process.exit(1)} \
+	  console.log("[exec-verify-$*] OK — oxf:",r.oxf,"| origin:",r.result&&r.result.origin);'
+
 tournament:
 	zsh $(SOKSAK)/tools/run-tournament.zsh $(OUT)/tournament
 
