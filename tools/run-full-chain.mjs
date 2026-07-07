@@ -159,16 +159,31 @@ if (b.phase === "classify") {
   log(`classify — ${as.length}건 전수 배정(차원: ${b.chunk.dimension})`);
 }
 
-if (b.phase === "audit") {
+while (b.phase === "audit") {
   const ledger = ledgerOf(b, "item");
   const { result } = runStage(DRAFT_DOC, "audit", { directive: DIRECTIVE, chunkRef: "chunk", ledger });
   if (!result || typeof result !== "object") throw new Error("audit 결과 없음");
   const f = ledger.filter((e) => e.badge === "f").length;
-  b.chunk.badge = result.complete === true && f === 0 ? "o" : "f";
+  const pass = result.complete === true && f === 0;
   b.chunk.result = result.verdict || "";
-  b.phase = b.chunk.badge === "o" ? "research" : "discarded"; save(b);
-  log(`audit — complete=${result.complete}, f=${f} → chunk ${b.chunk.badge}`);
-  if (b.chunk.badge === "f") { log(`폐기 판정: ${b.chunk.result.slice(0, 200)}`); process.exit(2); }
+  b.auditRounds = (b.auditRounds || 0) + 1;
+  log(`audit(라운드 ${b.auditRounds}) — complete=${result.complete}, f=${f}`);
+  if (pass) { b.chunk.badge = "o"; b.phase = "research"; save(b); break; }
+  // 부결 보정 루프 — 감사의 gaps 를 요건 후보로 기계 투입(변환 LLM 0), 기존 verify 가 분별(가짜=x),
+  // 재감사. 상한 2회(수렴 강제 — §2 fail-loud: 상한 도달 시 폐기 확정). gaps 소비자 부재 공백의 해소.
+  const gaps = Array.isArray(result.gaps) ? result.gaps.filter((g) => typeof g === "string" && g.trim()) : [];
+  if (b.auditRounds >= 3 || gaps.length === 0) {
+    b.chunk.badge = "f"; b.phase = "discarded"; save(b);
+    log(`폐기 확정(라운드 ${b.auditRounds}, gaps ${gaps.length}): ${b.chunk.result.slice(0, 200)}`);
+    process.exit(2);
+  }
+  log(`부결 — gaps ${gaps.length}건을 요건 후보로 투입(검증이 분별)`);
+  for (const g of gaps) {
+    b.nodes.push({ id: `gap-${b.nodes.length}`, kind: "item", title: g.slice(0, 80), description: g, category: "", origin: "agent", badge: null });
+  }
+  save(b);
+  verifyAllPending(b, ["item"]);
+  save(b); // 재감사(같은 phase 루프)
 }
 
 if (b.phase === "research") {
