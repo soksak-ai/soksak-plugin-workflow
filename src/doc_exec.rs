@@ -941,39 +941,51 @@ mod tests {
         let NodeEvent::Add { register_prompts, .. } = &events[1];
         assert!(register_prompts.is_none(), "registerPromptsOnce 는 1회만");
         let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &events[2];
-        assert_eq!((id.as_str(), kind.as_str()), ("design", "task"));
-        assert_eq!(stage.as_deref(), Some("design"));
-        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "design 은 fact 전부 검증 후");
+        assert_eq!((id.as_str(), kind.as_str()), ("design-interface", "task"));
+        assert_eq!(stage.as_deref(), Some("design-interface"), "체인 머리 = interface(대회 채택 방법론)");
+        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "design 체인은 fact 전부 검증 후");
 
-        // design stage — 통합 한턴(§10 baseline): design fact 발행(같은 검증 파이프) + plan task(blockedBy=designIds).
+        // design 체인(M-B, 대회 실측 채택) — 각 스테이지: fact 발행 + 다음 task(blockedBy=자기 factIds).
+        // 뒤 스테이지는 앞 산출을 {{facts}} 원장으로 계승(칸반 materializeFacts 가 전 fact 를 주입).
         let mut design_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
-            assert!(prompt.contains("ARCHITECT"), "design 역할 프롬프트");
             assert!(prompt.contains("SHARED CONCEPTS (design)"), "DESIGN_COMMON 렌더(정본 concat)");
             assert!(prompt.contains("- [i0] [o] 요건A"), "{{{{ledger}}}} 렌더");
             assert!(prompt.contains("- [fact0] [o] (framework) 저장소: SQLite 채택"), "{{{{facts}}}} 렌더(고정 ground)");
             assert!(!prompt.contains("{{"), "미해석 마커 잔존 0");
             assert!(schema.is_some_and(|s| s["required"][0] == "facts"), "DESIGN_SCHEMA 전달");
             Ok(json!({ "facts": [
-                { "title": "canisters 엔티티", "description": "canisters(id PK, hospital_id FK->hospitals.id, ...) — realizes [i0] on [fact0]", "origin": "agent", "category": "domain-model" },
                 { "title": "재고 차감 API 계약", "description": "```ts\ninterface Deduct { ... }\n``` — realizes [i0]", "origin": "agent", "category": "interface" }
             ] }))
         };
-        let design_args = json!({ "stage": "design", "directive": "정련 지시", "chunkRef": "K-7",
+        let design_args = json!({ "stage": "design-interface", "directive": "정련 지시", "chunkRef": "K-7",
             "ledger": [{ "id": "i0", "title": "요건A", "badge": "o" }],
             "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
-        let (dev, _dr) = run(&doc, "design", &design_args, &mut design_agent).expect("design 실행");
-        assert_eq!(dev.len(), 3, "design fact 2 + plan task 1");
+        let (dev, _dr) = run(&doc, "design-interface", &design_args, &mut design_agent).expect("design-interface 실행");
+        assert_eq!(dev.len(), 2, "interface fact 1 + design-domain task 1");
         let NodeEvent::Add { id, kind, badge, category, prompt_role, register_prompts, .. } = &dev[0];
-        assert_eq!((id.as_str(), kind.as_str()), ("design0", "fact"));
+        assert_eq!(kind.as_str(), "fact");
+        assert!(id.starts_with("design-interface"), "auto id prefix: {id}");
         assert_eq!(badge.as_deref(), Some("검수전"), "design fact 도 같은 검증 파이프");
-        assert_eq!(category.as_deref(), Some("domain-model"));
+        assert_eq!(category.as_deref(), Some("interface"));
         assert_eq!(prompt_role.as_deref(), Some("design-verify"));
         let reg = register_prompts.as_ref().expect("첫 design fact 에 registerPromptsOnce");
         assert!(reg.get("design-verify").is_some_and(|t| t.as_str().is_some_and(|s| s.starts_with("SHARED CONCEPTS (design)"))),
             "DESIGN_VERIFY_TMPL = DESIGN_COMMON concat 조성");
-        let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &dev[2];
-        assert_eq!((id.as_str(), kind.as_str(), stage.as_deref()), ("plan", "task", Some("plan")));
-        assert_eq!(blocked_by, &vec!["design0".to_string(), "design1".to_string()], "plan 은 design fact 전부 검증 후");
+        let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &dev[1];
+        assert_eq!((id.as_str(), kind.as_str(), stage.as_deref()), ("design-domain", "task", Some("design-domain")));
+        assert_eq!(blocked_by.len(), 1, "domain 은 interface fact 전부 검증 후");
+
+        // 체인 말미(criteria) — plan task 로 이어진다 + 처방(1:1 커버리지) 문구가 프롬프트에 실재.
+        let mut crit_agent = |prompt: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> {
+            assert!(prompt.contains("COVERAGE IS A CONTRACT"), "커버리지 처방(대회 실측 교정) 렌더");
+            Ok(json!({ "facts": [
+                { "title": "차감 판정", "description": "관측: 차감 후 잔량 일치 — proves [i0]. SURFACE pure-logic, PROOF unit", "origin": "agent", "category": "criterion" }
+            ] }))
+        };
+        let (cev, _cr) = run(&doc, "design-criteria", &design_args, &mut crit_agent).expect("design-criteria 실행");
+        assert_eq!(cev.len(), 2, "criterion fact 1 + plan task 1");
+        let NodeEvent::Add { id, stage, .. } = &cev[1];
+        assert_eq!((id.as_str(), stage.as_deref()), ("plan", Some("plan")), "체인 말미 → plan");
 
         // plan stage — 요건 원장+fact 원장 렌더 → plan-unit 발행.
         let mut plan_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {

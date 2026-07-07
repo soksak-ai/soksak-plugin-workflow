@@ -29,10 +29,15 @@ explicit commit.
   rejected as ALREADY_DONE. Evidence: command replies + node.get transition in the work log.
 - **C2b Export**: confirmed code nodes of the C1 board written to a file tree; file count =
   code node count. Evidence: file listing.
-- **C3 Tournament verdict**: M-C (unified, twice — reproducibility) · M-A (parallel) ·
-  M-B (chain) measured on frozen input → metric table (file coverage / seam defects /
-  traceability / cost / stability) → rule-10 judgement (baseline passing deterministically
-  means no decomposition) → default methodology committed. Evidence: table + reasoning.
+- **C3 Tournament verdict** ✅ (2026-07-08): measured on frozen input — M-C failed
+  reproducibility decisively (58↔19 facts, run 2 emitted zero criteria and dropped legally
+  mandated entities; clean termination, so genuine variance, not truncation). M-A (parallel)
+  had the best coverage (67, 1:1 verdicts) but 6 CONFIRMED systemic seam contradictions
+  (UUID vs BIGINT joins, triple ledger definitions, RBAC enum split) — unbuildable, and
+  structural to parallelism. M-B (chain) had letter-exact seams with local, correctable
+  coverage gaps. **Adopted: M-B chain (interface→domain→criteria)** with two directive
+  prescriptions (1:1 criterion coverage; no dangling upstream references) — committed into
+  the canonical doc. Evidence: metric table + two-lens adversarial panel in the work log.
 - **C4 Verify steps measured**: design-verify, plan-verify, body-verify each produce an oxf
   verdict with a real LLM at least once — before C1. No completion claim while verify
   directives are unmeasured.
