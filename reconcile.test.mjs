@@ -148,15 +148,15 @@ test("buildAddParams — kind=task taskCtx 없으면 body 는 stage 만(skeleton
 test("buildLedger — 덩어리 자손 항목(kind=item)만, id 포함 + category=항목 자신 필드(평탄, classify 전엔 빈 값)", () => {
   const nodes = [
     { id: "chunk", kind: "chunk", parentId: null },
-    { id: "i1", kind: "item", parentId: "chunk", title: "재고 차감", badge: "o", category: "재고 관리" }, // classify 후(category 부여됨)
+    { id: "i1", kind: "item", parentId: "chunk", title: "재고 차감", description: "수량 확정 시 재고를 원자적으로 차감한다", badge: "o", category: "재고 관리" }, // classify 후(category 부여됨)
     { id: "i2", kind: "item", parentId: "chunk", title: "창고 연결", badge: "검수전" }, // classify 전(category 없음)
     { id: "other", kind: "item", parentId: "other-chunk", title: "남의 항목", badge: "o" }, // 다른 덩어리 — 제외
     { id: "gen", kind: "task", parentId: "chunk" }, // task — 제외
   ];
   const ledger = buildLedger(nodes, "chunk");
   assert.equal(ledger.length, 2, "이 덩어리 항목만");
-  assert.deepEqual(ledger[0], { id: "i1", title: "재고 차감", badge: "o", category: "재고 관리" }, "id 포함 + category=항목 자신 필드");
-  assert.deepEqual(ledger[1], { id: "i2", title: "창고 연결", badge: "검수전", category: undefined }, "classify 전엔 category 빈 값");
+  assert.deepEqual(ledger[0], { id: "i1", title: "재고 차감", description: "수량 확정 시 재고를 원자적으로 차감한다", badge: "o", category: "재고 관리" }, "id+description 포함 + category=항목 자신 필드");
+  assert.deepEqual(ledger[1], { id: "i2", title: "창고 연결", description: undefined, badge: "검수전", category: undefined }, "classify 전엔 category 빈 값");
 });
 
 test("reconcileTick — hunt task 는 ledger materialize 해 exec-stage args 주입", async () => {

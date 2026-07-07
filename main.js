@@ -88,7 +88,7 @@ export function buildLedger(nodes, chunkId, kind = "item") {
   };
   return list
     .filter((n) => n.kind === kind && descends(n))
-    .map((n) => ({ id: n.id, title: n.title, badge: n.badge, category: n.category }));
+    .map((n) => ({ id: n.id, title: n.title, description: n.description, badge: n.badge, category: n.category }));
 }
 
 /** exec-one {oxf, result} → node.edit 필드. oxf 유효(o/x/f)면 badge 갱신. result 는 항상 기록.

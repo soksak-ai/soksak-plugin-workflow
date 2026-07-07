@@ -343,12 +343,14 @@ fn ledger_view(args: &Json, key: &str) -> String {
             let badge = { let b = g("badge"); if b.is_empty() { "검수전" } else { b } };
             let cat = g("category");
             let vv = g("verified_value");
+            let desc = g("description");
             format!(
-                "- [{}] [{}]{} {}{}",
+                "- [{}] [{}]{} {}{}{}",
                 g("id"),
                 badge,
                 if cat.is_empty() { String::new() } else { format!(" ({cat})") },
                 g("title"),
+                if desc.is_empty() { String::new() } else { format!(" — {desc}") },
                 if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") }
             )
         })
