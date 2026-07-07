@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 const SOCK = process.env.SOKSAK_SOCKET || path.join(os.homedir(), ".soksak-dev", "com.soksak.dev.sock");
+let WINDOW = process.env.SOKSAK_WINDOW || null; // 워크스페이스 창(w-*) — 플러그인 호스트. 미지정 시 자동 발견.
 const WF = "plugin.soksak-plugin-workflow";
 const KB = "plugin.soksak-plugin-kanban";
 const DEADLINE = Date.now() + Number(process.env.APP_E2E_MAX_HOURS || 8) * 3600_000;
@@ -31,7 +32,7 @@ function call(method, params = {}, timeoutMs = 20_000) {
     const s = net.connect(SOCK);
     let buf = "";
     const t = setTimeout(() => { s.destroy(); reject(new Error("클라이언트 대기 초과")); }, timeoutMs + 60_000);
-    s.on("connect", () => s.write(JSON.stringify({ id: 1, method, params, timeoutMs }) + "\n"));
+    s.on("connect", () => s.write(JSON.stringify({ id: 1, method, params, timeoutMs, ...(WINDOW ? { window: WINDOW } : {}) }) + "\n"));
     s.on("data", (d) => {
       buf += d.toString();
       const nl = buf.indexOf("\n");
@@ -54,8 +55,24 @@ function unwrap(r) {
   throw new Error(`응답 실패: ${JSON.stringify(r).slice(0, 200)}`);
 }
 
+/** discoverWindow — 워크스페이스 창(w-*) 자동 발견(제어판 main 은 플러그인 미로드 — A17 창 분리). */
+async function discoverWindow() {
+  const saved = WINDOW;
+  WINDOW = null; // window.projects 는 제어판 대상
+  try {
+    const r = unwrap(await call("window.projects"));
+    const w = (r.projects || [])[0];
+    WINDOW = w ? w.window : saved;
+    return WINDOW;
+  } catch {
+    WINDOW = saved;
+    return null;
+  }
+}
+
 async function appReady() {
   try {
+    if (!WINDOW && !(await discoverWindow())) return null;
     const r = unwrap(await call("plugin.list"));
     const st = (id) => (r.plugins || []).find((p) => p.id === id)?.status;
     return st("soksak-plugin-workflow") === "enabled" && st("soksak-plugin-kanban") === "enabled" ? r : null;
@@ -102,6 +119,7 @@ function captureEnv() {
 }
 
 async function cmdPing() {
+  await discoverWindow();
   const r = unwrap(await call(`${WF}.ping`, { env: captureEnv() }, 900_000));
   log("ping →", JSON.stringify(r));
   process.exit(r.oxf === "o" ? 0 : 1);
@@ -121,6 +139,7 @@ async function fire(idea) {
 
 /** status — 일회 진단 스냅샷(멱등·무변경). 매 진단마다 임시 스크립트를 짜는 대신 이걸 쓴다. */
 async function cmdStatus() {
+  await discoverWindow();
   let plugins;
   try {
     plugins = unwrap(await call("plugin.list"));

@@ -24,9 +24,9 @@ explicit commit.
   plan units all confirmed → issuerize → **every file's code node confirmed**. No simulated
   ledgers, no harness-driven step execution (observation only). Evidence: full board snapshot
   + run catalog.
-- **C2 CLI idempotency**: on the C1 board, at least one pending node confirmed through
-  `next`→`submit` (same contract as the spawn path); resubmission of a confirmed node is
-  rejected as ALREADY_DONE. Evidence: command replies + board transitions.
+- **C2 CLI idempotency** ✅ (2026-07-08): a live-board pending item was confirmed through
+  `next`→`submit` (badge o + full result recorded, same pipeline as spawn); resubmission
+  rejected as ALREADY_DONE. Evidence: command replies + node.get transition in the work log.
 - **C2b Export**: confirmed code nodes of the C1 board written to a file tree; file count =
   code node count. Evidence: file listing.
 - **C3 Tournament verdict**: M-C (unified, twice — reproducibility) · M-A (parallel) ·
