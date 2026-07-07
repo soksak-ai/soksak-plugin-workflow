@@ -162,7 +162,7 @@ async function cmdStatus() {
     log("볼트:", String(e).slice(0, 40), "(잠김이면 세션 env 폴백 — run 모드가 ping 재주입)");
   }
   const s = summarize(await board());
-  log(`chunk ${s.chunks.length} ${s.chunks.map((c) => c.badge || "검수전")} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${s.facts} | plan-units ${s.planUnits}`);
+  log(`chunk ${s.chunks.length} ${s.chunks.map((c) => c.badge || "검수전")} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${JSON.stringify(s.factBadges)} | units ${JSON.stringify(s.unitBadges)} | code ${JSON.stringify(s.codeBadges)}`);
   process.exit(0);
 }
 
