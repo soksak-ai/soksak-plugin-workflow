@@ -1,83 +1,83 @@
-# soksak-plugin-workflow 개발 원칙
+# Development Principles
 
-이 문서의 규칙은 이 저장소의 모든 구현·변경을 구속한다. 규칙이 먼저고 코드는 규칙을 지킨다.
-규칙과 코드가 어긋나면 코드를 고친다. 규칙 자체가 틀렸으면 조용히 완화하지 말고 이 문서를 정정하는
-커밋으로 문제를 제기한다.
+These rules bind every implementation and change in this repository. Rules come first; code
+follows them. When code and a rule disagree, fix the code. When the rule itself is wrong, do
+not quietly relax it — correct this document in an explicit commit.
 
-## 1. directive 단일 진실
+## 1. Directive single source of truth
 
-저작 게이트(generate-skeleton validate)를 통과한 **정련본이 정본**이다. 사람이 보는 표면(칸반 덩어리
-description)과 기계가 쓰는 검증 기준(exec-one/exec-stage 에 주입되는 directive)은 **같은 문자열**이어야
-한다 — 의미가 바뀌면 결과가 바뀐다. 유일한 예외는 사용자가 명시로 준 `directive` 파라미터(직접 지정이
-최상위 정본). 구현: `resolveDirective` (main.js) — 명시 > doc 정련본 > raw 폴백.
+The refined directive that passed the authoring gate is canonical. The human-facing surface
+(kanban chunk description) and the machine-facing verification basis (the directive injected
+into exec) MUST be the same string. The only override is an explicit user-given `directive`.
 
-## 2. fail-loud
+## 2. Fail-loud
 
-게이트 실패는 발행/완료 거부다. 침묵 폴백·빈-성공(agent 실패를 빈 산출로 접어 done 처리) 금지.
-방어 파서(관용 JSON 파싱 등 흡수층)는 유지하되, 계약 위반은 stderr/에러 반환으로 관찰 가능해야 한다.
-검증 지점: 저작(validate) · --emit(validate) · exec-stage(validate + DraftDoc validate) · relay
-(validateDraftDoc·classify 원장 대조) — 어느 층도 제거하지 않는다.
+A gate failure refuses to publish or complete. No silent fallback, no empty-success. Defensive
+parsers may absorb noise, but every contract violation must be observable (stderr or an error
+reply). No validation layer is ever removed: authoring validate · --emit validate ·
+exec-stage validate · relay checks.
 
-## 3. 정규화 3수준
+## 3. Three-level normalization
 
-전역 템플릿(콘텐츠 주소 1행, byte-stable) / 청크 공유값(directive 1행, varRefs 참조) / 노드 고유값
-(title·description 등 작은 vars)만. 노드에 공유 텍스트 인라인 복붙 금지 — DraftDoc validator(④⑨)와
-doc 스키마가 강제한다. 템플릿·프롬프트 원문의 byte 안정성이 sha256 dedup 의 전제다: 원문을 "다듬는"
-변경은 전 드래프트의 dedup 을 깨는 변경이며, 의도적일 때만 한다.
+Global templates are content-addressed (one row, byte-stable). Chunk-shared values (the
+directive) are referenced, never inlined. Nodes carry only their own small vars. Byte
+stability of shared prompt text is the precondition for sha256 dedup — "polishing" shared
+text breaks dedup across every draft and is done only deliberately.
 
-## 4. 두 축 분리
+## 4. Two axes, never mixed
 
-**검증 축 = badge**(검수전 → o/x/f; badge 보유 노드의 done 판정은 badge), **완료 축 = status**
-(stage task·컨테이너). 혼용 금지. 새 검증 대상 kind(예: research 의 fact)는 badge 축을 재사용한다 —
-별도 완료 메커니즘을 만들지 않는다.
+Verification axis = badge (검수전 → o/x/f); completion axis = status. A node that carries a
+badge is done by badge alone. Any new verification-target kind reuses the badge axis — do not
+invent a separate completion mechanism.
 
-## 5. 이슈라이즈 게이트
+## 5. The issuerize gate
 
-드래프트는 이슈 분해가 아니다. 개별 개발 노드(unlock 이슈)는 오직 `workflow.issuerize` 를 통해서만
-생기고, 그 게이트는 **badge='o'(audit 인증) ∧ research fact 전부 검증 ∧ plan-unit 존재 ∧ 미승격(멱등)**
-이다. 우회 경로(수동 unlock, 게이트 생략 플래그)를 만들지 않는다.
+A draft is not an issue breakdown. Per-file codification tasks exist only through
+`issuerize`, and its gate is: chunk badge='o' AND every fact confirmed AND every plan-unit
+confirmed. No bypass path.
 
-## 6. 기준 약화 금지
+## 6. Never lower the bar
 
-테스트·검증 기준에 미달하면 구현·픽스처를 고친다 — 기준을 낮추지 않는다. 단언을 느슨하게 바꾸는
-diff, skip/ignore 추가, 임계값 완화는 전부 이 위반이다. 기준 자체가 잘못이라 판단되면 이 문서와
-해당 테스트를 함께 고치는 명시적 커밋으로 정정한다.
+When a test or verification bar is not met, fix the implementation or the fixture — never the
+bar. Loosened assertions, added skips, relaxed thresholds are all violations. If the bar
+itself is wrong, correct it together with this document in an explicit commit.
 
-## 7. 불필요한 LLM 단계 금지
+## 7. No unnecessary LLM step
 
-LLM 은 **정련(저작)·발굴(generate/hunt/research)·판정(verify/classify/audit)** 에만 쓴다. 이미 정련된
-입력을 재정련하는 저작 단계를 만들지 않는다 — research/plan 이 canonical doc(workflows/) 정적
-인스턴스화인 이유다. 결정적으로 계산 가능한 것(원장 조립, id 매핑, 게이트 판정)을 LLM 에 맡기지 않는다.
+LLMs do refinement, discovery, and judgement — nothing else. Never re-refine an already
+refined input. Anything deterministically computable (ledger assembly, id mapping, gate
+decisions) is code, not an LLM call.
 
-## 부록 — 확정 결정 기록
+## 8. Directives own quality
 
-- **표현 수단 = workflow-doc@0.0.1 단일 경로**: JS(gen.js)/ESTree interp 경로는 doc 경로의 전 체인 실측
-  GREEN 이후 backup/ 으로 이동(M5e). NodeEvent wire 가 경로 불변의 계약이다.
-- **research/plan 은 저작 LLM 불참**(원칙 7): 정본 = `workflows/research.doc.json`. references/ 의
-  role md 는 설명서이지 정본이 아니다.
-- **폴링 금지**: 트리거는 발행 poke·self-poke·kanban:changed·activate 부팅 poke. 주기 폴링을 추가하지
-  않는다.
+Result quality comes from injected directives, not from injection machinery — that machinery
+was server2's cause of death. New steps and methodologies are added as canonical docs
+(workflows/) plus directive text. The executor grows only when a live failure proves the
+need; speculative machinery is the same cheat as speculative decomposition.
 
-## 8. 지시어가 본체
+## 9. No echo
 
-결과 품질은 주입 기계가 아니라 **지시어**에서 나온다 — 주입 인프라의 완성도를 높여도 결과의
-완성도로 이어지지 않았다(server2 의 사인). 스텝/방법론의 추가는 canonical doc(workflows/)과
-지시어 원문으로 한다 — 실행기(doc_exec/reconcile) 확장은 실측으로 필요가 증명될 때만
-(사전 추측 기계화는 사전 추측 분해와 같은 꼼수다).
+Output schemas never carry copies of parent data. The executor composes parent information
+into the prompt; the output holds only that step's own decisions. Where there is no copy,
+there is no drift.
 
-## 9. 메아리 금지
+## 10. Decompose only after failure
 
-산출 스키마에 부모 데이터의 사본을 요구하지 않는다 — 부모 정보는 실행기가 프롬프트로 조성해
-주입하고, 산출은 그 스텝의 자기결정만 담는다. 사본이 없으면 drift 는 발생할 수 없다.
+The default is one unified turn. Splitting a step into perspective turns is adopted only when
+a unified turn's deterministic failure is proven by measurement. A turn is an ideal under
+constraints (time, tokens), and decomposition topology (parallel / chain / input selection)
+lives in methodology docs — data, not code.
 
-## 10. 사후분해
+## 11. Directives generate, machines verify
 
-default 는 통합 한턴이다. 스텝 분해(관점별 별도 턴)는 통합 한턴의 결정성 실패가 **실측으로
-증명될 때만** 채택한다 — 사전 추측 분해는 꼼수다. 한턴은 목적이 아니라 제약(시간·토큰) 하의
-이상이며, 분해 위상(병렬/체인/입력 선별)은 코드가 아니라 방법론 doc(데이터)이 정한다.
+Contracts (citation rules, completeness, prohibitions) are taught by directive text plus
+worked examples. Violations are rejected by deterministic post-checks (ledger id
+cross-checks, duplicate/unassigned detection). Schemas enforce structure only.
 
-## 11. 생성은 지시어, 검증은 기계
+## Appendix — settled decisions
 
-계약(인용 규칙·완전성·금지)은 지시어 문장+사례로 가르친다 — 드리프트가 사례 추가로 해결된
-실증이 근거다. 위반의 거부는 사후 결정적 대조(원장 id 대조·중복/미배정 검출)가 맡는다.
-스키마는 구조(required·타입)만 강제한다 — 계약을 스키마 기계로 과점유하지 않는다.
+- Representation = workflow-doc@0.0.1 single path. The legacy JS/ESTree interp path was removed
+  (git history is the archive). NodeEvent is the wire contract.
+- research/plan/design run with no authoring LLM (rule 7): canonical docs under `workflows/`
+  are instantiated statically. The role files under `references/` are explanations, not truth.
+- No polling. Triggers are: publish poke, self-poke, kanban:changed, activate boot poke.
