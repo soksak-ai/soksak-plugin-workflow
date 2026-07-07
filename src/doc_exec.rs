@@ -282,7 +282,10 @@ impl Scope<'_> {
         Some(cur)
     }
 
-    /// 필드 표현식 평가 — 리터럴 그대로 | {"$":path,"or"?:default} 참조(미해석/null → or, 없으면 Null).
+    /// 필드 표현식 평가 — 리터럴 그대로 | {"$":path,"or"?:default} 참조(미해석/null → or, 없으면 Null)
+    /// | {"concat":[원소…]} 문자열 조성(원소 = 리터럴|{"$"} — 비문자열 값은 JSON 문자열화).
+    /// concat 은 body stage 의 code 노드 표면(코드 전문+PROOF 블록) 실측 RED 가 증명한 확장(§8) —
+    /// 결정적 조성을 LLM 에 맡기지 않는다(§7/§11).
     fn eval(&self, v: &Json) -> Json {
         if let Some(m) = v.as_object() {
             if let Some(Json::String(path)) = m.get("$") {
@@ -290,6 +293,17 @@ impl Scope<'_> {
                     Some(x) if !x.is_null() => x,
                     _ => m.get("or").cloned().unwrap_or(Json::Null),
                 };
+            }
+            if let Some(Json::Array(parts)) = m.get("concat") {
+                let mut out = String::new();
+                for p in parts {
+                    match self.eval(p) {
+                        Json::String(s) => out.push_str(&s),
+                        Json::Null => {}
+                        other => out.push_str(&other.to_string()),
+                    }
+                }
+                return Json::String(out);
             }
         }
         v.clone()
@@ -944,6 +958,35 @@ mod tests {
         assert_eq!(badge.as_deref(), Some("검수전"), "plan-unit 도 badge 검증 파이프(plan-verify)");
         assert_eq!(category.as_deref(), Some("src/inventory/deduct.ts"), "category = file_path(원장에 파일경로 렌더)");
         assert_eq!(prompt_role.as_deref(), Some("plan-verify"));
+
+        // body stage — 유닛 1개 실코드화 → code 노드(코드 전문+PROOF 블록 한 표면, badge 검증 파이프).
+        let mut body_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
+            assert!(prompt.contains("File: src/inventory/deduct.ts") || prompt.contains("src/inventory/deduct.ts"), "file_path 주입: {prompt}");
+            assert!(prompt.contains("impl deduct"), "pseudocode 주입");
+            assert!(!prompt.contains("{{"), "미해석 마커 잔존 0");
+            assert!(schema.is_some_and(|s| s.get("required").is_some()), "BODY_SCHEMA 전달");
+            Ok(json!({
+                "status": "ok",
+                "source": { "content": "export function deduct(q: number) { return q - 1; }" },
+                "proof": { "commands": ["npx tsc --noEmit", "node --test deduct.test.ts"], "pass_condition": "exit 0" },
+                "implements": ["i0"]
+            }))
+        };
+        let body_args = json!({ "stage": "body", "directive": "정련 지시", "chunkRef": "K-7",
+            "title": "재고 차감 구현", "file_path": "src/inventory/deduct.ts",
+            "pseudocode": "impl deduct([i0], [fact0])\nacceptance: 차감 후 잔량 일치" });
+        let (bev, br) = run(&doc, "body", &body_args, &mut body_agent).expect("body 실행");
+        assert_eq!(bev.len(), 1);
+        let NodeEvent::Add { id, kind, title, description, badge, category, prompt_role, .. } = &bev[0];
+        assert_eq!((id.as_str(), kind.as_str()), ("code", "code"));
+        assert_eq!(title, "src/inventory/deduct.ts", "code 노드 title = 파일경로");
+        assert!(description.contains("export function deduct"), "코드 전문: {description}");
+        assert!(description.contains("---- PROOF ----"), "PROOF 블록 병기");
+        assert!(description.contains("npx tsc --noEmit"), "proof commands 렌더");
+        assert_eq!(badge.as_deref(), Some("검수전"), "code 도 badge 검증 파이프(body-verify)");
+        assert_eq!(category.as_deref(), Some("src/inventory/deduct.ts"));
+        assert_eq!(prompt_role.as_deref(), Some("body-verify"));
+        assert_eq!(br, json!({ "file": "src/inventory/deduct.ts" }));
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.

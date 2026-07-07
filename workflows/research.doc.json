@@ -609,6 +609,89 @@
         "op": "return",
         "value": {}
       }
+    ],
+    "body": [
+      {
+        "op": "agent",
+        "prompt": "body",
+        "schema": "BODY_SCHEMA",
+        "label": "실코드화",
+        "bind": "b"
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "code",
+          "kind": "code",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": {
+            "$": "args.file_path"
+          },
+          "description": {
+            "concat": [
+              {
+                "$": "b.source.content"
+              },
+              "\n\n---- PROOF ----\ncommands: ",
+              {
+                "$": "b.proof.commands",
+                "or": []
+              },
+              "\npass_condition: ",
+              {
+                "$": "b.proof.pass_condition",
+                "or": ""
+              },
+              "\nimplements: ",
+              {
+                "$": "b.implements",
+                "or": []
+              },
+              {
+                "$": "b.conflict",
+                "or": ""
+              }
+            ]
+          },
+          "category": {
+            "$": "args.file_path",
+            "or": ""
+          },
+          "badge": {
+            "$": "values.PENDING"
+          },
+          "schema": "VERIFY_SCHEMA",
+          "promptRole": "body-verify",
+          "vars": {
+            "title": {
+              "$": "args.file_path"
+            }
+          },
+          "varRefs": {
+            "directive": "directive"
+          },
+          "registerPromptsOnce": {
+            "body-verify": {
+              "$": "values.BODY_VERIFY_TMPL"
+            },
+            "directive": {
+              "$": "args.directive"
+            }
+          }
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "file": {
+            "$": "args.file_path",
+            "or": ""
+          }
+        }
+      }
     ]
   }
 }

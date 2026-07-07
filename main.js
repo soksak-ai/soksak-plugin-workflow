@@ -467,7 +467,14 @@ async function reconcileStage(deps, target, body, nodes) {
             : stageName === "plan"
               ? // plan 은 plan-unit 을 최초 발행하는 유일한 출처 — 동일 패턴.
                 nodes.some((n) => n && n.parentId === target.parentId && n.kind === "plan-unit")
-              : false;
+              : stageName === "body"
+                ? // body 는 자기 file_path 의 code 노드를 최초 발행 — 같은 경로 code 자손이 마커.
+                  (() => {
+                    let fp;
+                    try { fp = JSON.parse(body).args?.file_path; } catch { fp = undefined; }
+                    return !!fp && nodes.some((n) => n && n.parentId === target.parentId && n.kind === "code" && n.category === fp);
+                  })()
+                : false;
     if (published) {
       await deps.editNode(target.id, { status: "done" });
       await deps.poke();
@@ -607,14 +614,16 @@ async function reconcileStage(deps, target, body, nodes) {
   return { ok: true, processed: 1, id: target.id, stage: true, published: children.length, assigned };
 }
 
-/** issuerizeTick — 이슈라이즈(순수, deps 주입): 인증된 드래프트 덩어리의 plan-unit(슈도코드 단위)들을
- *  **unlock 된 개별 개발 이슈 노드**로 승격한다. 드래프트는 잠긴 채 보존, 이슈에 parentDraftId=덩어리 계보.
- *  게이트(전부 충족해야 승격 — fail-loud):
- *   ① 덩어리 badge==='o' (audit 인증 — M2 상태 기계)
- *   ② kind='fact'(research 기초지식) 자손이 ≥1 이고 전부 badge 확정(o/x/f) — research 경유 증명
- *   ③ kind='plan-unit'(plan 한턴 슈도코드) 자손 ≥1 — plan 경유 증명
- *  멱등: 이미 이 덩어리를 계보(parentDraftId)로 가진 kind='issue' 노드가 있으면 거부(중복 승격 차단).
- *  개발 실행 자체는 이슈 소비자(빌더 에이전트·사람) 몫 — 여기는 이슈화까지. deps: listNodes()·addNode(params). */
+/** issuerizeTick — 이슈라이즈(순수, deps 주입): 인증된 덩어리의 plan-unit(파일별 슈도코드, 검증 완료)을
+ *  **파일별 실코드화 body task** 로 승격한다 — issuerize = 계획을 파일별로 분할해 각 파일을 슈도 → 실제
+ *  동작 코드로 바꾸는 개발 실행 그 자체(사용자 확정 의미론). reconcile 이 body task 를 exec-stage 로 돌리면
+ *  doc body stage 가 code 노드(코드 전문+PROOF, badge 검증 파이프)를 발행한다.
+ *  게이트(전부 충족 — fail-loud):
+ *   ① 덩어리 badge==='o' (audit 인증)
+ *   ② kind='fact' 자손 ≥1 전부 badge 확정 — research/design 경유 증명
+ *   ③ kind='plan-unit' 자손 ≥1 전부 badge 확정 — plan 검증 경유 증명(badge='o' 유닛만 실코드화, x 는 제외)
+ *  멱등: kind='code' 자손 또는 body stage task 자손 존재 시 거부(중복 실코드화 차단).
+ *  directive = 덩어리 description(단일 진실 §1). deps: listNodes()·addNode(params). */
 export async function issuerizeTick(deps, chunkId) {
   const listed = await deps.listNodes();
   const nodes = (envData(listed) || {}).nodes || [];
@@ -633,29 +642,41 @@ export async function issuerizeTick(deps, chunkId) {
     }
     return false;
   };
-  if (nodes.some((n) => n.kind === "issue" && n.parentDraftId === chunkId)) {
-    return { ok: false, code: "ALREADY_DONE", message: "이미 이슈라이즈된 덩어리(계보 issue 존재) — 멱등 거부" };
+  const confirmed = (n) => n.badge === "o" || n.badge === "x" || n.badge === "f";
+  // 멱등 — 이미 실코드화 산출(code) 또는 실행(task stage=body)이 있으면 거부.
+  const bodyTask = (n) => {
+    if (n.kind !== "task" || !descends(n)) return false;
+    try { return JSON.parse(n.body || "").stage === "body"; } catch { return false; }
+  };
+  if (nodes.some((n) => (n.kind === "code" && descends(n)) || bodyTask(n))) {
+    return { ok: false, code: "ALREADY_DONE", message: "이미 이슈라이즈된 덩어리(실코드화 진행/완료) — 멱등 거부" };
   }
   const facts = nodes.filter((n) => n.kind === "fact" && descends(n));
   if (facts.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" };
-  const unverified = facts.filter((n) => !(n.badge === "o" || n.badge === "x" || n.badge === "f"));
-  if (unverified.length) return { ok: false, code: "GATE_REQUIRED", message: `기초지식 미검증 ${unverified.length}건(검수전) — 검증 완료 후 이슈라이즈` };
+  const unverifiedFacts = facts.filter((n) => !confirmed(n));
+  if (unverifiedFacts.length) return { ok: false, code: "GATE_REQUIRED", message: `기초지식 미검증 ${unverifiedFacts.length}건(검수전) — 검증 완료 후 이슈라이즈` };
   const units = nodes.filter((n) => n.kind === "plan-unit" && descends(n));
   if (units.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "plan 미경유(plan-unit 없음) — plan(한턴 슈도코드화) 후에만 이슈라이즈" };
-  // 배경지식(o 확정 fact)을 self-contained 로 이슈 본문에 동반 — 소비자가 덩어리를 다시 뒤지지 않게.
-  const knowledge = facts.filter((n) => n.badge === "o").map((n) => `- ${n.title}`).join("\n");
+  const unverifiedUnits = units.filter((n) => !confirmed(n));
+  if (unverifiedUnits.length) return { ok: false, code: "GATE_REQUIRED", message: `유닛 미검증 ${unverifiedUnits.length}건(검수전) — plan 검증 완료 후 이슈라이즈` };
+  const directive = chunk.description || "";
   let issued = 0;
-  for (const u of units) {
-    const description = [u.description || u.title, knowledge ? `\n## 배경지식(research 확정)\n${knowledge}` : ""].join("");
-    const r = await deps.addNode({
-      title: u.title,
-      description,
-      type: "task",
-      kind: "issue",
-      parentDraftId: chunkId, // 계보 — 드래프트 원본은 잠긴 채 보존, 이슈는 unlock(locked 미지정)
-      blockedBy: [],
+  for (const u of units.filter((n) => n.badge === "o")) {
+    const body = JSON.stringify({
+      workflow: "research",
+      stage: "body",
+      args: { title: u.title, file_path: u.category || "", pseudocode: u.description || "", chunkRef: chunkId, directive },
     });
-    if (!r) return { ok: false, code: "INTERNAL", message: `이슈 발행 실패(${u.id}) — 부분 승격 중단(발행 ${issued}건)`, issued };
+    const r = await deps.addNode({
+      title: `실코드화: ${u.category || u.title}`,
+      parentId: chunkId,
+      body,
+      blockedBy: [],
+      locked: true,
+      type: "task",
+      kind: "task",
+    });
+    if (!r) return { ok: false, code: "INTERNAL", message: `body task 발행 실패(${u.id}) — 부분 승격 중단(발행 ${issued}건)`, issued };
     issued += 1;
   }
   return { ok: true, issued, chunk: chunkId };
@@ -1224,7 +1245,7 @@ export default {
     ctx.subscriptions.push(
       app.commands.register("issuerize", {
         description:
-          "인증된 드래프트 덩어리(badge='o', research fact 검증 완료, plan-unit 존재)의 슈도코드 단위를 unlock 개발 이슈 노드로 승격 — parentDraftId 계보, 원본 드래프트는 잠긴 채 보존, 재호출 멱등 거부.",
+          "인증된 덩어리(badge='o', fact·plan-unit 전부 검증)의 o 유닛들을 파일별 실코드화 body task 로 승격 — reconcile 이 실행해 code 노드(코드 전문+PROOF, badge 검증)를 발행한다. 재호출 멱등 거부.",
         params: {
           chunk: { type: "string", description: "이슈라이즈할 덩어리(칸반 노드 id)" },
         },
