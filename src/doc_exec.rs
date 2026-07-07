@@ -889,9 +889,39 @@ mod tests {
         let NodeEvent::Add { register_prompts, .. } = &events[1];
         assert!(register_prompts.is_none(), "registerPromptsOnce 는 1회만");
         let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &events[2];
-        assert_eq!((id.as_str(), kind.as_str()), ("plan", "task"));
-        assert_eq!(stage.as_deref(), Some("plan"));
-        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "plan 은 fact 전부 검증 후");
+        assert_eq!((id.as_str(), kind.as_str()), ("design", "task"));
+        assert_eq!(stage.as_deref(), Some("design"));
+        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "design 은 fact 전부 검증 후");
+
+        // design stage — 통합 한턴(§10 baseline): design fact 발행(같은 검증 파이프) + plan task(blockedBy=designIds).
+        let mut design_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
+            assert!(prompt.contains("ARCHITECT"), "design 역할 프롬프트");
+            assert!(prompt.contains("SHARED CONCEPTS (design)"), "DESIGN_COMMON 렌더(정본 concat)");
+            assert!(prompt.contains("- [i0] [o] 요건A"), "{{{{ledger}}}} 렌더");
+            assert!(prompt.contains("- [fact0] [o] (framework) 저장소: SQLite 채택"), "{{{{facts}}}} 렌더(고정 ground)");
+            assert!(!prompt.contains("{{"), "미해석 마커 잔존 0");
+            assert!(schema.is_some_and(|s| s["required"][0] == "facts"), "DESIGN_SCHEMA 전달");
+            Ok(json!({ "facts": [
+                { "title": "canisters 엔티티", "description": "canisters(id PK, hospital_id FK->hospitals.id, ...) — realizes [i0] on [fact0]", "origin": "agent", "category": "domain-model" },
+                { "title": "재고 차감 API 계약", "description": "```ts\ninterface Deduct { ... }\n``` — realizes [i0]", "origin": "agent", "category": "interface" }
+            ] }))
+        };
+        let design_args = json!({ "stage": "design", "directive": "정련 지시", "chunkRef": "K-7",
+            "ledger": [{ "id": "i0", "title": "요건A", "badge": "o" }],
+            "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
+        let (dev, _dr) = run(&doc, "design", &design_args, &mut design_agent).expect("design 실행");
+        assert_eq!(dev.len(), 3, "design fact 2 + plan task 1");
+        let NodeEvent::Add { id, kind, badge, category, prompt_role, register_prompts, .. } = &dev[0];
+        assert_eq!((id.as_str(), kind.as_str()), ("design0", "fact"));
+        assert_eq!(badge.as_deref(), Some("검수전"), "design fact 도 같은 검증 파이프");
+        assert_eq!(category.as_deref(), Some("domain-model"));
+        assert_eq!(prompt_role.as_deref(), Some("design-verify"));
+        let reg = register_prompts.as_ref().expect("첫 design fact 에 registerPromptsOnce");
+        assert!(reg.get("design-verify").is_some_and(|t| t.as_str().is_some_and(|s| s.starts_with("SHARED CONCEPTS (design)"))),
+            "DESIGN_VERIFY_TMPL = DESIGN_COMMON concat 조성");
+        let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &dev[2];
+        assert_eq!((id.as_str(), kind.as_str(), stage.as_deref()), ("plan", "task", Some("plan")));
+        assert_eq!(blocked_by, &vec!["design0".to_string(), "design1".to_string()], "plan 은 design fact 전부 검증 후");
 
         // plan stage — 요건 원장+fact 원장 렌더 → plan-unit 발행.
         let mut plan_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
@@ -899,19 +929,21 @@ mod tests {
             assert!(prompt.contains("- [i0] [o] 요건A"), "{{{{ledger}}}} 렌더");
             assert!(prompt.contains("- [fact0] [o] (framework) 저장소: SQLite 채택"), "{{{{facts}}}} 렌더: {prompt}");
             assert!(schema.is_some_and(|s| s["required"][0] == "units"), "PLAN_SCHEMA 전달");
-            Ok(json!({ "units": [ { "title": "재고 차감 구현", "pseudocode": "impl deduct([i0], [fact0])\nacceptance: 차감 후 잔량 일치" } ] }))
+            Ok(json!({ "units": [ { "title": "재고 차감 구현", "file_path": "src/inventory/deduct.ts", "pseudocode": "impl deduct([i0], [fact0])\nacceptance: 차감 후 잔량 일치", "implements": ["i0"] } ] }))
         };
         let plan_args = json!({ "stage": "plan", "directive": "정련 지시", "chunkRef": "K-7",
             "ledger": [{ "id": "i0", "title": "요건A", "badge": "o" }],
             "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
         let (pev, _pr) = run(&doc, "plan", &plan_args, &mut plan_agent).expect("plan 실행");
         assert_eq!(pev.len(), 1);
-        let NodeEvent::Add { id, kind, parent, title, description, badge, .. } = &pev[0];
+        let NodeEvent::Add { id, kind, parent, title, description, badge, category, prompt_role, .. } = &pev[0];
         assert_eq!((id.as_str(), kind.as_str()), ("unit0", "plan-unit"));
         assert_eq!(parent.as_deref(), Some("K-7"));
         assert_eq!(title, "재고 차감 구현");
         assert!(description.contains("acceptance"), "슈도코드 전문(검증 방법 포함) = description");
-        assert!(badge.is_none(), "plan-unit 은 검증 파이프 비대상(badge 없음)");
+        assert_eq!(badge.as_deref(), Some("검수전"), "plan-unit 도 badge 검증 파이프(plan-verify)");
+        assert_eq!(category.as_deref(), Some("src/inventory/deduct.ts"), "category = file_path(원장에 파일경로 렌더)");
+        assert_eq!(prompt_role.as_deref(), Some("plan-verify"));
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
