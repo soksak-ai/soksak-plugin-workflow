@@ -25,9 +25,12 @@ Call as `sok plugin.soksak-plugin-workflow.<command>` or via MCP.
 
 | Command | Description |
 |---|---|
-| `run` | Author a workflow from an idea and publish it as a kanban node DAG |
-| `research` | Author and publish the research workflow for a question |
-| `issuerize` | Promote completed plan nodes to unlocked issues |
+| `run` | Refine an idea and publish it as a certified-draft node DAG |
+| `research` | Publish the research→design→plan chain for a certified chunk (badge 'o') |
+| `issuerize` | Turn confirmed plan units into per-file codification tasks (real code out) |
+| `next` | CLI executor pull — one ready verification node's execution package (leased) |
+| `submit` | CLI executor submit — verdict back into the same badge pipeline (idempotent) |
+| `export` | Write confirmed code nodes to a real file tree (PROOF stays on the node) |
 | `reconcile` | Execute ready workflow nodes (scheduler trigger — runs automatically) |
 | `ping` | Provider health probe — one fixed mini prompt through the real exec path |
 

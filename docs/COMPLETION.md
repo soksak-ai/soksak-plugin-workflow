@@ -57,6 +57,7 @@ deferral on audit and promoted into D4/D6, 2026-07-08.)
 
 - D1 assembled, units green; generation steps (design/plan/body) each passed one CLI
   measurement on simulated ledgers; **verify steps unmeasured (C4 open)**
-- D2 units green, unmeasured · D3 running (turn 1 of 7) · D4 in progress (core pure functions
-  written, commands/skill pending) · D5 done · D6 not started
+- D2 units green, unmeasured · D3 running · D4 implemented (next/submit/export commands,
+  leases, usage skill, units green) — live proof pending (C2) · D5 done · D6 implemented,
+  units green — live proof pending (C2b)
 - C1–C5 all open — not done.

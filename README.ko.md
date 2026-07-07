@@ -24,9 +24,12 @@ agent 실행은 `claude -p` 로 위임하며, 인증 env(`ANTHROPIC_*` 또는 OA
 
 | 명령 | 설명 |
 |---|---|
-| `run` | 아이디어에서 워크플로를 저작해 칸반 노드 DAG 로 발행 |
-| `research` | 질문에 대한 리서치 워크플로를 저작·발행 |
-| `issuerize` | 완료된 플랜 노드를 잠금 해제된 이슈로 승격 |
+| `run` | 아이디어를 정련해 인증 드래프트 노드 DAG 로 발행 |
+| `research` | 인증 덩어리(badge 'o')에 research→design→plan 체인 발행 |
+| `issuerize` | 확정 플랜 유닛을 파일별 실코드화 task 로 전환(실코드 산출) |
+| `next` | CLI 실행자 pull — ready 검증 노드의 실행 패키지 발급(lease) |
+| `submit` | CLI 실행자 제출 — 판정을 동일 badge 파이프로(멱등) |
+| `export` | 확정 code 노드를 실제 파일 트리로 기록(PROOF 는 노드에 유지) |
 | `reconcile` | ready 워크플로 노드 실행(스케줄러 트리거 — 자동 실행) |
 | `ping` | provider 헬스 프로브 — 고정 미니 프롬프트를 실경로로 왕복 |
 

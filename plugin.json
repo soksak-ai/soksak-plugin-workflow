@@ -50,7 +50,22 @@
           "ko": "계획을 개발 이슈로 승격합니다",
           "en": "Promotes plans to issues"
         }
+      },
+      {
+        "name": "next",
+        "title": "CLI 실행자 pull — ready 검증 노드의 실행 패키지 발급(lease)"
+      },
+      {
+        "name": "submit",
+        "title": "CLI 실행자 제출 — 검증 산출을 동일 badge 파이프로(멱등)"
+      },
+      {
+        "name": "export",
+        "title": "확정 code 노드를 실제 파일 트리로 기록"
       }
-    ]
+    ],
+    "skill": {
+      "path": "skill/SKILL.md"
+    }
   }
 }

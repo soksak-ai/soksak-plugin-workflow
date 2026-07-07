@@ -107,7 +107,18 @@ export function execResultToEdit(execOut) {
  *  noVerdict: 항목별 무판정 연속 횟수(상한 도달 시 badge=f 확정 — 무한 LLM 재실행 루프 차단).
  *  fails: 노드별 연속 실패 횟수(ready 선택에서 실패 최소 노드 우선 — head-of-line 기아 방지). */
 export function makeReconcileState() {
-  return { noVerdict: new Map(), fails: new Map() };
+  return { noVerdict: new Map(), fails: new Map(), leases: new Map() };
+}
+
+/** leaseActive — CLI 실행자(next)가 잡은 노드인가(만료 lease 는 지연 정리). */
+export function leaseActive(state, nodeId, now = Date.now()) {
+  const exp = state && state.leases ? state.leases.get(nodeId) : undefined;
+  if (exp === undefined) return false;
+  if (exp <= now) {
+    state.leases.delete(nodeId);
+    return false;
+  }
+  return true;
 }
 
 /** 무판정(oxf 없음) 연속 상한 — 도달 시 badge=f 확정(fail-loud).
@@ -125,7 +136,8 @@ export async function reconcileTick(deps, state) {
   const st = state || makeReconcileState();
   const listed = await deps.listNodes();
   const nodes = (envData(listed) || {}).nodes || [];
-  const ready = pickReady(nodes);
+  // CLI 실행자(next/submit)가 lease 로 잡은 노드는 spawn 대상에서 제외 — 두 실행자 경합 방지.
+  const ready = pickReady(nodes).filter((n) => !leaseActive(st, n.id));
   if (ready.length === 0) return { ok: true, processed: 0 };
   // 한 틱 1개 — 발화 시간 상한 안. 나머지는 poke 로 이어 처리.
   // 기아 방지: 연속 실패가 가장 적은 ready 선택 — 영구 실패 노드 1개가 ready[0] 을 점유해 나머지를 무기한
@@ -612,6 +624,113 @@ async function reconcileStage(deps, target, body, nodes) {
   await deps.editNode(target.id, { status: "done" }); // stage 작업 done → 재-pick 0(멱등)
   await deps.poke(); // 발행된 항목(검수전)·후속 stage 깨움
   return { ok: true, processed: 1, id: target.id, stage: true, published: children.length, assigned };
+}
+
+/** extractOxf — 검증 산출에서 oxf 판정 추출(exec_one::extract_oxf 의 JS 미러 — oxf|verdict, o/x/f, trim·소문자). */
+export function extractOxf(output) {
+  for (const key of ["oxf", "verdict"]) {
+    const v = output && typeof output === "object" ? output[key] : undefined;
+    if (typeof v === "string") {
+      const t = v.trim().toLowerCase();
+      if (t === "o" || t === "x" || t === "f") return t;
+    }
+  }
+  return null;
+}
+
+const NEXT_LEASE_MS = 30 * 60 * 1000; // CLI 실행자 수행 시간 상한 — 만료 시 spawn 경로가 회수
+
+/** nextTick — CLI 실행자(외부 LLM)의 pull: ready **검증 노드** 1개의 실행 패키지를 반환하고 lease 를 잡는다.
+ *  claude -p 호출 없음 — 시스템은 게이트 키퍼(검증·배지·전이는 submit 이 동일 파이프로). stage task 는
+ *  spawn 소유(1차 범위 밖 — COMPLETION D4). deps: listNodes·getNode + resolveBody 의존(resolvePrompt·getPrompt). */
+export async function nextTick(deps, state, resolveBodyFn) {
+  const st = state || makeReconcileState();
+  const listed = await deps.listNodes();
+  const nodes = (envData(listed) || {}).nodes || [];
+  const ready = pickReady(nodes).filter((n) => n.kind !== "task" && n.badge === "검수전" && !leaseActive(st, n.id));
+  if (ready.length === 0) return { ok: true, node: null, message: "실행할 준비된 검증 노드가 없습니다" };
+  const target = ready[0];
+  const full = await deps.getNode(target.id);
+  const node = (envData(full) || {}).node || {};
+  const fieldVars = {};
+  if (node.title != null) fieldVars.title = node.title;
+  if (node.description != null) fieldVars.description = node.description;
+  const resolved = await resolveBodyFn(node.body || "", deps, fieldVars);
+  let pkg;
+  try {
+    pkg = JSON.parse(resolved);
+  } catch {
+    return { ok: false, code: "INTERNAL", message: `실행 패키지 조립 실패(${target.id}) — 프롬프트 미해석` };
+  }
+  if (!pkg || !pkg.prompt) {
+    return { ok: false, code: "INTERNAL", message: `실행 패키지에 prompt 없음(${target.id})` };
+  }
+  st.leases.set(target.id, Date.now() + NEXT_LEASE_MS);
+  return {
+    ok: true,
+    node: { id: target.id, kind: target.kind, title: node.title || "" },
+    prompt: pkg.prompt,
+    schema: pkg.schema,
+    leaseMs: NEXT_LEASE_MS,
+  };
+}
+
+/** submitTick — CLI 실행자의 산출 제출 → spawn 경로와 **동일 파이프**(oxf 추출→badge/result→poke).
+ *  멱등: badge 확정 노드 재제출 = ALREADY_DONE 거부. 무판정(oxf 없음) 제출 = 즉시 거부(fail-loud —
+ *  제출은 명시 행위라 spawn 의 무판정 상한과 달리 재시도 여지를 주지 않는다). */
+export async function submitTick(deps, state, nodeId, output) {
+  const st = state || makeReconcileState();
+  if (!nodeId) return { ok: false, code: "INVALID_INPUT", message: "node(노드 id) 필수" };
+  const full = await deps.getNode(nodeId);
+  const node = (envData(full) || {}).node;
+  if (!node) return { ok: false, code: "NOT_FOUND", message: `노드 미존재: ${nodeId}` };
+  if (node.badge === "o" || node.badge === "x" || node.badge === "f") {
+    return { ok: false, code: "ALREADY_DONE", message: `이미 확정된 노드(badge=${node.badge}) — 멱등 거부` };
+  }
+  const oxf = extractOxf(output);
+  if (!oxf) return { ok: false, code: "INVALID_INPUT", message: "산출에 oxf(o/x/f) 판정 없음 — 무판정 제출 거부" };
+  const result = typeof output === "string" ? output : JSON.stringify(output ?? null);
+  await deps.editNode(nodeId, { badge: oxf, result });
+  st.leases.delete(nodeId);
+  await deps.poke();
+  return { ok: true, node: nodeId, badge: oxf };
+}
+
+/** exportTick — 인증 덩어리의 확정(badge='o') code 노드들을 파일로(순수, deps 주입: listNodes·getNode·writeFile).
+ *  파일 경로 = 노드 title. 내용 = description 의 코드 전문(PROOF 블록 제외 — 증명 명령은 파일이 아니라 노드 소유).
+ *  게이트: code 노드 ≥1 ∧ 전부 badge 확정(미확정 잔존 시 거부 — 미검증 코드를 내보내지 않는다).
+ *  경로 탈출 차단: 절대경로·'..' 세그먼트 거부. */
+export async function exportTick(deps, chunkId, dir) {
+  const listed = await deps.listNodes();
+  const nodes = (envData(listed) || {}).nodes || [];
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const descends = (n) => {
+    let p = n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === chunkId) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  const codes = nodes.filter((n) => n.kind === "code" && descends(n));
+  if (codes.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "확정할 code 노드 없음 — issuerize→실코드화 후에 export" };
+  const pending = codes.filter((n) => !(n.badge === "o" || n.badge === "x" || n.badge === "f"));
+  if (pending.length) return { ok: false, code: "GATE_REQUIRED", message: `미확정 code ${pending.length}건(검수전) — 검증 완료 후 export` };
+  const files = [];
+  for (const c of codes.filter((n) => n.badge === "o")) {
+    const rel = String(c.title || "").trim();
+    if (!rel || rel.startsWith("/") || rel.split("/").some((seg) => seg === "..")) {
+      return { ok: false, code: "INVALID_INPUT", message: `부적합 파일 경로(${JSON.stringify(rel)}) — 상대경로만, '..' 금지` };
+    }
+    const full = await deps.getNode(c.id);
+    const node = (envData(full) || {}).node || {};
+    const desc = node.description || c.description || "";
+    const content = desc.split("---- PROOF ----")[0].replace(/\s+$/, "") + "\n";
+    await deps.writeFile(rel, content);
+    files.push(rel);
+  }
+  return { ok: true, files, dir };
 }
 
 /** issuerizeTick — 이슈라이즈(순수, deps 주입): 인증된 덩어리의 plan-unit(파일별 슈도코드, 검증 완료)을
@@ -1182,6 +1301,81 @@ export default {
             undefined,
             "research",
           );
+        },
+      }),
+    );
+
+    // next/submit — CLI 실행자 표면(D4): claude -p 호출 없이 외부 LLM 이 pull-수행-제출.
+    // 시스템은 게이트 키퍼 — 검증·배지·전이는 spawn 경로와 동일 파이프. lease 로 두 실행자 경합 차단.
+    ctx.subscriptions.push(
+      app.commands.register("next", {
+        description:
+          "CLI 실행자의 pull — ready 검증 노드 1개의 실행 패키지(조립된 지시어 prompt + 산출 schema)를 반환하고 lease 를 잡는다(기본 30분, spawn 경로 제외). 수행 후 submit 으로 제출하라. 준비 노드가 없으면 node:null.",
+        params: {},
+        returns: "{ ok, node?: {id,kind,title}|null, prompt?, schema?, leaseMs?, message? }",
+        message: (d) => (d.node ? `검증 노드 ${d.node.id} 실행 패키지를 발급했습니다` : "실행할 준비된 검증 노드가 없습니다"),
+        handler: async (_p, inv) => {
+          const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
+          const deps = {
+            listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
+            getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
+            resolvePrompt: (hash, vars, refs) => exec(KANBAN + ".prompt.resolve", { hash, vars, refs }),
+            getPrompt: (hash) => exec(KANBAN + ".prompt.get", { hash }),
+          };
+          return await nextTick(deps, reconcileState, (body, d, vars) => resolveBody(body, deps, vars));
+        },
+      }),
+    );
+    ctx.subscriptions.push(
+      app.commands.register("submit", {
+        description:
+          "CLI 실행자의 제출 — next 로 받은 노드의 검증 산출(oxf 필수)을 제출하면 spawn 경로와 동일 파이프(badge/result 기록→전이)를 탄다. 확정 노드 재제출은 ALREADY_DONE 멱등 거부, 무판정 제출은 즉시 거부.",
+        params: {
+          node: { type: "string", description: "next 가 발급한 노드 id" },
+          output: { type: "json", description: "검증 산출 JSON — oxf(o/x/f) 필수, 나머지 필드는 result 로 전문 기록" },
+        },
+        returns: "{ ok, node?, badge?, code?, message? }",
+        message: (d) => (d.badge ? `노드 ${d.node}를 ${d.badge}로 확정했습니다` : "제출이 거부되었습니다"),
+        handler: async ({ node, output }, inv) => {
+          const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
+          const deps = {
+            getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
+            editNode: (id, fields) => exec(KANBAN + ".node.edit", { node: id, ...fields }),
+            poke: () => app.scheduler?.poke?.(RECONCILE_ID),
+          };
+          return await submitTick(deps, reconcileState, node, output);
+        },
+      }),
+    );
+
+    // export — 확정(badge 확정)된 code 노드들을 실제 파일 트리로(D6). PROOF 블록은 파일에서 제외(코드만).
+    ctx.subscriptions.push(
+      app.commands.register("export", {
+        description:
+          "인증 덩어리의 확정(badge='o') code 노드들을 대상 디렉토리에 실제 파일로 기록 — 파일 경로는 노드 title(파일경로), 내용은 코드 전문(PROOF 블록 제외). 미확정 code 노드가 남아 있으면 거부.",
+        params: {
+          chunk: { type: "string", description: "대상 덩어리(칸반 노드 id)" },
+          dir: { type: "string", description: "출력 루트 디렉토리(절대경로)" },
+        },
+        returns: "{ ok, files?, code?, message? }",
+        message: (d) => `${(d.files || []).length}개 파일을 내보냈습니다`,
+        handler: async ({ chunk, dir }, inv) => {
+          const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
+          if (!chunk || !dir) return { ok: false, code: "INVALID_INPUT", message: "chunk 와 dir(절대경로) 필수" };
+          const deps = {
+            listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
+            getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
+            writeFile: async (rel, content) => {
+              // 코어 fs capability 없이 — 사이드카가 아니라 앱 JS 에 fs 없음. spawn 으로 기록(sidecar 아님, /bin/sh).
+              const handle = await app.process.spawn("/bin/sh", ["-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", `${dir}/${rel}`], {});
+              await app.process.write(handle, content);
+              await app.process.closeStdin(handle);
+              return new Promise((resolve, reject) => {
+                app.process.onExit(handle, (code) => (code === 0 ? resolve() : reject(new Error(`write ${rel}: exit ${code}`))));
+              });
+            },
+          };
+          return await exportTick(deps, chunk, dir);
         },
       }),
     );

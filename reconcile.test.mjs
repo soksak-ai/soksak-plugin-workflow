@@ -2,7 +2,7 @@
 // app 의존(spawn/commands/scheduler)은 reconcileTick 에 주입해 fake 로 검증.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick, resolveDirective, researchGate } from "./main.js";
+import { isDone, pickReady, execResultToEdit, reconcileTick, makeReconcileState, leaseActive, nextTick, submitTick, extractOxf, exportTick, buildAddParams, buildLedger, registerPromptTemplates, genSkeletonArgs, validateDraftDoc, applyDraftDoc, buildSecretEnvMap, buildSpawnCmd, issuerizeTick, resolveDirective, researchGate } from "./main.js";
 
 test("isDone — status done 만 true, 미존재=false", () => {
   assert.equal(isDone({ status: "done" }), true);
@@ -1318,4 +1318,151 @@ test("researchGate — 멱등: 자손 fact 또는 research task 존재 시 거�
   // 다른 워크플로 task(draft 잔재)는 멱등 사유 아님.
   const g2 = await researchGate(gateDeps(withTask, { t1: '{"stage":"audit"}' }), "chunk");
   assert.equal(g2.ok, true);
+});
+
+
+// ── D4 CLI 실행 표면 — nextTick/submitTick(순수) : pull-수행-제출, 멱등, spawn 경합 방지 ──
+
+function cliDeps(nodes, fullBody) {
+  const calls = { edit: [], poke: 0 };
+  return {
+    calls,
+    listNodes: async () => ({ ok: true, data: { nodes } }),
+    getNode: async (id) => ({ ok: true, data: { node: { ...nodes.find((n) => n.id === id), body: fullBody } } }),
+    editNode: async (id, fields) => { calls.edit.push([id, fields]); return { ok: true }; },
+    poke: async () => { calls.poke += 1; },
+  };
+}
+const fakeResolve = async (body) => JSON.stringify({ prompt: "VERIFY: 항목을 판정하라", schema: { required: ["oxf"] } });
+
+test("extractOxf — oxf|verdict 키, o/x/f, trim·소문자(exec_one 미러)", () => {
+  assert.equal(extractOxf({ oxf: "o" }), "o");
+  assert.equal(extractOxf({ oxf: " X " }), "x");
+  assert.equal(extractOxf({ verdict: "f" }), "f");
+  assert.equal(extractOxf({ oxf: "pass" }), null);
+  assert.equal(extractOxf("문자열"), null);
+  assert.equal(extractOxf(null), null);
+});
+
+test("nextTick — ready 검증 노드의 실행 패키지 반환 + lease, task 는 제외(spawn 소유)", async () => {
+  const nodes = [
+    { id: "t1", kind: "task", status: "todo", blockedBy: [] },
+    { id: "v1", kind: "item", badge: "검수전", blockedBy: [], title: "요건 검증" },
+  ];
+  const st = makeReconcileState();
+  const r = await nextTick(cliDeps(nodes, '{"promptHash":"h"}'), st, fakeResolve);
+  assert.equal(r.ok, true);
+  assert.equal(r.node.id, "v1", "task 가 아니라 검증 노드");
+  assert.match(r.prompt, /VERIFY/, "조립된 프롬프트 동봉");
+  assert.ok(r.schema, "스키마 동봉");
+  assert.equal(leaseActive(st, "v1"), true, "lease 등록");
+});
+
+test("nextTick — lease 중인 노드는 재분배 안 함(ready 소진 시 node:null)", async () => {
+  const nodes = [{ id: "v1", kind: "item", badge: "검수전", blockedBy: [], title: "요건" }];
+  const st = makeReconcileState();
+  await nextTick(cliDeps(nodes, "{}"), st, fakeResolve);
+  const r2 = await nextTick(cliDeps(nodes, "{}"), st, fakeResolve);
+  assert.equal(r2.ok, true);
+  assert.equal(r2.node, null, "이미 lease 된 노드 — 없음 응답");
+});
+
+test("reconcileTick — CLI lease 노드는 spawn 대상에서 제외(두 실행자 경합 0)", async () => {
+  const nodes = [{ id: "v1", kind: "item", badge: "검수전", blockedBy: [], title: "요건", body: "" }];
+  const st = makeReconcileState();
+  st.leases.set("v1", Date.now() + 60000);
+  const deps = fakeDeps(nodes, { oxf: "o", result: "ok" });
+  const r = await reconcileTick(deps, st);
+  assert.equal(r.processed, 0, "lease 중 — spawn 경로가 잡지 않음");
+});
+
+test("submitTick — 산출 제출 → spawn 과 동일 파이프(badge+result+poke), lease 해제", async () => {
+  const nodes = [{ id: "v1", kind: "item", badge: "검수전", title: "요건" }];
+  const st = makeReconcileState();
+  st.leases.set("v1", Date.now() + 60000);
+  const deps = cliDeps(nodes, "{}");
+  const r = await submitTick(deps, st, "v1", { oxf: "o", origin: "agent", reason: "실재 요건" });
+  assert.equal(r.ok, true);
+  assert.equal(r.badge, "o");
+  assert.equal(deps.calls.edit[0][0], "v1");
+  assert.equal(deps.calls.edit[0][1].badge, "o");
+  assert.match(deps.calls.edit[0][1].result, /실재 요건/, "산출 전문 기록");
+  assert.equal(deps.calls.poke, 1, "확정 → 다음 깨움");
+  assert.equal(leaseActive(st, "v1"), false, "lease 해제");
+});
+
+test("submitTick — 확정 노드 재제출 = ALREADY_DONE 멱등 거부", async () => {
+  const nodes = [{ id: "v1", kind: "item", badge: "o", title: "요건" }];
+  const deps = cliDeps(nodes, "{}");
+  const r = await submitTick(deps, makeReconcileState(), "v1", { oxf: "x" });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "ALREADY_DONE");
+  assert.equal(deps.calls.edit.length, 0, "노드 무변경(멱등)");
+});
+
+test("submitTick — 무판정(oxf 없음) 제출 즉시 거부(fail-loud)", async () => {
+  const nodes = [{ id: "v1", kind: "item", badge: "검수전", title: "요건" }];
+  const deps = cliDeps(nodes, "{}");
+  const r = await submitTick(deps, makeReconcileState(), "v1", { reason: "판정 없이" });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, "INVALID_INPUT");
+  assert.equal(deps.calls.edit.length, 0);
+});
+
+
+// ── D6 export — 확정 code 노드의 실파일화(순수) ──
+
+function exportDeps(nodes) {
+  const written = [];
+  return {
+    written,
+    listNodes: async () => ({ ok: true, data: { nodes } }),
+    getNode: async (id) => ({ ok: true, data: { node: nodes.find((n) => n.id === id) } }),
+    writeFile: async (rel, content) => { written.push([rel, content]); },
+  };
+}
+
+test("exportTick — o 확정 code 만 파일로, PROOF 블록 제외", async () => {
+  const nodes = [
+    { id: "chunk", kind: "chunk", parentId: null, badge: "o" },
+    { id: "c1", kind: "code", parentId: "chunk", title: "src/a.ts", badge: "o", description: "export const a = 1;\n\n---- PROOF ----\ncommands: [\"tsc\"]" },
+    { id: "c2", kind: "code", parentId: "chunk", title: "src/b.ts", badge: "x", description: "버려진 코드" },
+  ];
+  const deps = exportDeps(nodes);
+  const r = await exportTick(deps, "chunk", "/tmp/out");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.files, ["src/a.ts"], "o 만 내보냄(x 제외)");
+  const [rel, content] = deps.written[0];
+  assert.equal(rel, "src/a.ts");
+  assert.ok(content.includes("export const a = 1;"));
+  assert.ok(!content.includes("PROOF"), "PROOF 블록은 파일에서 제외");
+});
+
+test("exportTick — 미확정 code 잔존 시 거부(미검증 코드 내보내기 금지)", async () => {
+  const nodes = [
+    { id: "chunk", kind: "chunk", parentId: null, badge: "o" },
+    { id: "c1", kind: "code", parentId: "chunk", title: "src/a.ts", badge: "검수전", description: "code" },
+  ];
+  const r = await exportTick(exportDeps(nodes), "chunk", "/tmp/out");
+  assert.equal(r.ok, false);
+  assert.match(r.message, /미확정 code 1건/);
+});
+
+test("exportTick — code 노드 0 이면 게이트 거부", async () => {
+  const nodes = [{ id: "chunk", kind: "chunk", parentId: null, badge: "o" }];
+  const r = await exportTick(exportDeps(nodes), "chunk", "/tmp/out");
+  assert.equal(r.ok, false);
+  assert.match(r.message, /code 노드 없음/);
+});
+
+test("exportTick — 경로 탈출(절대경로·..) 거부", async () => {
+  for (const bad of ["/etc/passwd", "../evil.ts", "a/../../evil.ts"]) {
+    const nodes = [
+      { id: "chunk", kind: "chunk", parentId: null, badge: "o" },
+      { id: "c1", kind: "code", parentId: "chunk", title: bad, badge: "o", description: "x" },
+    ];
+    const r = await exportTick(exportDeps(nodes), "chunk", "/tmp/out");
+    assert.equal(r.ok, false, bad);
+    assert.equal(r.code, "INVALID_INPUT", bad);
+  }
 });
