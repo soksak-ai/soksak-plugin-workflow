@@ -1466,3 +1466,21 @@ test("exportTick — 경로 탈출(절대경로·..) 거부", async () => {
     assert.equal(r.code, "INVALID_INPUT", bad);
   }
 });
+
+
+test("reconcileStage — plan/design 주입 원장은 o 확정만(ground 의미론), audit 은 전 badge", async () => {
+  const mixed = [
+    { id: "i1", title: "요건A", badge: "o" },
+    { id: "i2", title: "요건B", badge: "x" },
+    { id: "f1", title: "fact치명", badge: "f" },
+  ];
+  let captured;
+  const nodes = [{ id: "plan", kind: "task", status: "todo", blockedBy: [], parentId: "chunk", body: '{"workflow":"research","stage":"plan","args":{"directive":"d"}}' }];
+  const deps = fakeDeps(nodes, null, { children: [], result: null });
+  deps.materializeLedger = async () => mixed;
+  deps.materializeFacts = async () => mixed;
+  deps.execStage = async (body) => { captured = JSON.parse(body); return { children: [], result: null }; };
+  await reconcileTick(deps, makeReconcileState());
+  assert.deepEqual(captured.args.ledger.map((e) => e.id), ["i1"], "plan 요건 원장 = o 만");
+  assert.deepEqual(captured.args.facts.map((e) => e.id), ["i1"], "plan ground = o 만");
+});

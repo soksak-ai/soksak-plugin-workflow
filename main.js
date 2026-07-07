@@ -498,14 +498,18 @@ async function reconcileStage(deps, target, body, nodes) {
   // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
   // research(기초지식 발굴)는 인증 요건 원장이 발굴 근거. plan(한턴 슈도코드화)은 요건 원장 + fact 원장(args.facts) 둘 다.
   let ledger;
-  const LEDGER_STAGES = new Set(["hunt", "classify", "audit", "research", "plan"]);
+  const LEDGER_STAGES = new Set(["hunt", "classify", "audit", "research", "plan", "design-interface", "design-domain", "design-criteria"]);
+  // ground 의미론: plan·design 체인의 요건 원장·facts 는 **o 확정만**("verified facts" = o; f=치명, x=반려 유지).
+  // hunt(중복 회피)·classify(전수 배정)·audit(f 집계)·research 는 전 badge 원장이 필요해 필터하지 않는다.
+  const O_ONLY = new Set(["plan", "design-interface", "design-domain", "design-criteria"]);
   if (LEDGER_STAGES.has(stageName) && deps.materializeLedger && target.parentId) {
     try {
       ledger = await deps.materializeLedger(target.parentId);
       const inp = JSON.parse(body);
-      inp.args = { ...(inp.args || {}), ledger };
-      if (stageName === "plan" && deps.materializeFacts) {
-        inp.args.facts = await deps.materializeFacts(target.parentId);
+      inp.args = { ...(inp.args || {}), ledger: O_ONLY.has(stageName) ? ledger.filter((e) => e && e.badge === "o") : ledger };
+      if ((stageName === "plan" || O_ONLY.has(stageName)) && deps.materializeFacts) {
+        const facts = await deps.materializeFacts(target.parentId);
+        inp.args.facts = O_ONLY.has(stageName) ? facts.filter((e) => e && e.badge === "o") : facts;
       }
       stageBody = JSON.stringify(inp);
     } catch (e) {
