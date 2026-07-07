@@ -38,9 +38,12 @@ explicit commit.
   coverage gaps. **Adopted: M-B chain (interface→domain→criteria)** with two directive
   prescriptions (1:1 criterion coverage; no dangling upstream references) — committed into
   the canonical doc. Evidence: metric table + two-lens adversarial panel in the work log.
-- **C4 Verify steps measured**: design-verify, plan-verify, body-verify each produce an oxf
-  verdict with a real LLM at least once — before C1. No completion claim while verify
-  directives are unmeasured.
+- **C4 Verify steps measured** ✅ (2026-07-08): design-verify o · plan-verify o ·
+  body-verify **x** — the x matters: the verifier acknowledged the code implements the
+  pseudocode but rejected a defective PROOF command (conkey check), proving the verify
+  directives discriminate rather than rubber-stamp. (The round also caught and fixed two
+  harness defects: template consumption-contract violations, retry loops masking
+  deterministic failures.)
 - **C5 Deterministic gates all green**: full cargo + full node (`make test-unit`) + bundled
   doc validate.
 
