@@ -33,7 +33,8 @@ if (!node) {
   console.error(`${KINDS[kind]} 노드 없음: ${outPath}`);
   process.exit(1);
 }
-const vars = { title: node.title || "", description: node.description || "", directive };
+// 런타임 resolve 계약 미러: 노드 필드(title/description/category) ∪ 노드 body 의 publish vars ∪ directive.
+const vars = { ...(node.vars || {}), title: node.title || "", description: node.description || "", category: node.category || "", directive };
 const prompt = tmpl.replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] != null ? vars[k] : `{{${k}}}`));
 if (/\{\{\w+\}\}/.test(prompt)) {
   console.error("미해석 플레이스홀더 잔존:", prompt.match(/\{\{\w+\}\}/g));
