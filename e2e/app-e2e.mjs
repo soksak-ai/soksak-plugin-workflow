@@ -177,6 +177,8 @@ async function main() {
   let lastFire = 0;
   let prev = "";
   let envSeeded = false;
+  let lastChangeAt = Date.now();
+  const STALL_MS = 5 * 60_000; // 전이 없이 5분 — env 소실/스케줄러 잠듦 의심 → 재주입+poke 재사이클
   while (Date.now() < DEADLINE) {
     if (!(await appReady())) {
       log("앱 대기(다운/재빌드/플러그인 부팅)");
@@ -232,6 +234,11 @@ async function main() {
     if (state !== prev) {
       log(`chunk ${s.chunks.map((c) => c.badge || "검수전")} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${JSON.stringify(s.factBadges)} | units ${JSON.stringify(s.unitBadges)} | code ${JSON.stringify(s.codeBadges)}`);
       prev = state;
+      lastChangeAt = Date.now();
+    } else if (mode === "run" && envSeeded && Date.now() - lastChangeAt > STALL_MS) {
+      log("정체 감지(5분 무전이) — env 재주입+poke 재사이클");
+      envSeeded = false;
+      lastChangeAt = Date.now();
     }
     // 전체 파이프라인 오케스트레이션(C1) — 게이트 커맨드는 하네스가 자동 호출, 실행은 전부 스케줄러.
     const chunk = s.chunks[0];

@@ -1254,7 +1254,17 @@ export default {
           return [{ cmd: `sok ${SELF}.run`, why: "프로바이더가 정상이니 워크플로 발행을 진행할 수 있습니다" }];
         },
         handler: async ({ env }) => {
-          if (env && typeof env === "object") runtime.env = env;
+          if (env && typeof env === "object") {
+            runtime.env = env;
+            // run 과 동일하게 볼트에 봉인 — 앱 재시작 후 exec 이 secretEnv 로 자동 회복(세션 휘발 해소).
+            if (app.secrets) {
+              try {
+                for (const [k, v] of Object.entries(env)) await app.secrets.set("env:" + k, String(v));
+              } catch (e) {
+                app.bus?.emit?.("workflow.error", { message: `secrets.set(ping): ${String(e)}` });
+              }
+            }
+          }
           const t0 = Date.now();
           try {
             const out = await execOne(app, runtime.bin, await execOpts(app, runtime), {
