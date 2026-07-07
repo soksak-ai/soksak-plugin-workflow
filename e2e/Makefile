@@ -145,6 +145,26 @@ exec-design: build
 	  const cats=facts.reduce((a,f)=>{a[f.category]=(a[f.category]||0)+1;return a},{}); \
 	  console.log("[exec-design] OK — design facts:",facts.length,JSON.stringify(cats));'
 
+exec-body: build
+	@test -s $(OUT)/plan.jsonl || { echo "먼저 make exec-plan (유닛 필요)"; exit 1; }
+	@node -e 'const fs=require("fs"); \
+	  const L=fs.readFileSync("$(OUT)/plan.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const u=L.find(e=>e.ev==="add"&&e.kind==="plan-unit"); if(!u){console.error("plan-unit 없음");process.exit(1)} \
+	  const directive=fs.readFileSync("$(IDEA_FILE)","utf8").trim(); \
+	  process.stdout.write(JSON.stringify({workflow:"research",stage:"body",args:{title:u.title,file_path:u.category,pseudocode:u.description,chunkRef:"chunk",directive}}));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/body.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/body.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const code=L.filter(e=>e.ev==="add"&&e.kind==="code"); \
+	  if(code.length!==1){console.error("[exec-body] FAIL: code 노드",code.length);process.exit(1)} \
+	  const c=code[0]; const d=c.description||""; \
+	  if(!d.includes("---- PROOF ----")){console.error("[exec-body] FAIL: PROOF 블록 없음");process.exit(1)} \
+	  const src=d.split("---- PROOF ----")[0]; \
+	  if(src.trim().length<200){console.error("[exec-body] FAIL: 코드 빈약("+src.trim().length+"자)");process.exit(1)} \
+	  if(/\bTODO\b|\.\.\.[^)]|<생략|omitted/i.test(src)){console.error("[exec-body] FAIL: 슈도/생략 흔적");process.exit(1)} \
+	  if(c.badge!=="검수전"){console.error("[exec-body] FAIL: badge 검수전 아님");process.exit(1)} \
+	  if(c.title!==c.category){console.error("[exec-body] FAIL: title≠category(파일경로)");process.exit(1)} \
+	  console.log("[exec-body] OK — file:",c.title,"| 코드",src.trim().length+"자");'
+
 exec-plan: build
 	@test -s $(OUT)/stage.jsonl && test -s $(OUT)/research.jsonl && test -s $(OUT)/design.jsonl || { echo "먼저 make exec-stage && make exec-research && make exec-design"; exit 1; }
 	@node $(SOKSAK)/tools/assemble-ledger.mjs plan $(OUT)/stage.jsonl $(IDEA_FILE) $(OUT)/research.jsonl $(OUT)/design.jsonl \
@@ -205,6 +225,9 @@ app-observe:
 
 app-ping:
 	node $(HERE)/app-e2e.mjs ping
+
+tournament:
+	zsh $(SOKSAK)/tools/run-tournament.zsh $(OUT)/tournament
 
 app-status:
 	node $(HERE)/app-e2e.mjs status
