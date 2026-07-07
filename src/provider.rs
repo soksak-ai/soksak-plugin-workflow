@@ -96,6 +96,41 @@ pub fn run_agent_text(req: &AgentRequest, env: &[(String, String)]) -> Result<St
     unreachable!()
 }
 
+/// runs_dir — run catalog 위치 해석(상시 경로 = identity 홈, 진단 override = 사이드카 소유 env).
+/// ① SOKSAK_SIDECAR_WORKFLOW_RUNS(진단 — SIDECARS.md 의 SOKSAK_SIDECAR_{NAME}_* 채널)
+/// ② $SOKSAK_HOME/runs/soksak-sidecar-workflow(앱 주입 컨텍스트 — A17)
+/// ③ 없으면 None(기록 비활성 — 독립 CLI 는 하네스가 ① 로 지정한다).
+fn runs_dir() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("SOKSAK_SIDECAR_WORKFLOW_RUNS") {
+        if !p.is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+    if let Ok(h) = std::env::var("SOKSAK_HOME") {
+        if !h.is_empty() {
+            return Some(std::path::PathBuf::from(h).join("runs").join("soksak-sidecar-workflow"));
+        }
+    }
+    None
+}
+
+/// open_run_stream — run catalog 에 원시 stream 파일 생성 + `latest.jsonl` 심링크 갱신(mtime latest 헬퍼).
+/// 파일명 = <UTC epoch ms>-<pid>.jsonl (충돌 0, 자동삭제 금지 — server2 catalog 규율). 실패는 무해(None).
+fn open_run_stream() -> Option<std::fs::File> {
+    let dir = runs_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let name = format!("{ts}-{}.jsonl", std::process::id());
+    let path = dir.join(&name);
+    let f = std::fs::File::create(&path).ok()?;
+    let latest = dir.join("latest.jsonl");
+    let _ = std::fs::remove_file(&latest);
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(&name, &latest);
+    eprintln!("[soksak] run stream → {}", path.display());
+    Some(f)
+}
+
 /// event_signals_529 — stream 이벤트에서 일시 과부하 신호 감지(순수). 텍스트는 톱레벨
 /// {type:"text"} 가 아니라 **assistant 이벤트의 message.content[] text 블록**으로 온다(실측:
 /// "API Error: 529 …" 가 assistant 블록 — 톱레벨만 보던 감지는 죽은 조건이라 재시도가 0이었다).
@@ -147,6 +182,7 @@ fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<S
     // stream-json 소비는 리더 스레드에서 — 메인 스레드는 wait_timeout 으로 하드캡을 건다.
     // (종전 GNU timeout 이 하던 hung 방지: 캡 도달 시 kill → stdout EOF → 리더 종료.)
     let reader = std::thread::spawn(move || {
+        let mut run_stream = open_run_stream(); // run catalog — 원시 stream 보존(띵킹 포함, tail -f 모니터링)
         let mut transient_529 = false; // stream 중 [text] API Error 529/overloaded 감지.
         // stream-json: 한 줄 = 한 이벤트. 모두 stderr 로 흘려 관측(system·think·tool·subagent·task·…),
         // 최종 type=result 의 result 텍스트만 반환값으로 모은다.
@@ -159,6 +195,10 @@ fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<S
             let t = line.trim();
             if t.is_empty() {
                 continue;
+            }
+            if let Some(f) = run_stream.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{t}");
             }
             match serde_json::from_str::<Value>(t) {
                 Ok(ev) => {

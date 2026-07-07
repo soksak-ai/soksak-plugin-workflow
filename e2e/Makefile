@@ -20,6 +20,8 @@ SOKSAK    := $(abspath $(HERE)/..)
 BIN       := $(SOKSAK)/target/release/soksak-sidecar-workflow
 REFS      := $(SOKSAK)/references
 OUT       := $(HERE)/out
+# run catalog — 사이드카가 원시 stream(띵킹 포함)을 여기 보존(latest.jsonl 심링크로 tail -f 모니터링).
+export SOKSAK_SIDECAR_WORKFLOW_RUNS := $(OUT)/runs
 IDEA_FILE ?= $(HERE)/idea.txt
 MODEL     ?= glm-5.2
 OUT_LANG  ?= ko
