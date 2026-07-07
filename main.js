@@ -1062,6 +1062,12 @@ export default {
         },
         returns: "{ ok, published?, code?, message? }",
         message: (d) => `${d.published ?? 0}개 노드를 발행했습니다`,
+        // 다음 수 제시(가능성 — 강제 아님): 발행된 노드가 있으면 reconcile 로 지금 바로 처리를 이어갈 수 있다.
+        hint: (d) => {
+          if (d.code) return [];
+          if (!d.published) return [];
+          return [{ cmd: `sok ${RECONCILE_CMD}`, why: "지금 바로 준비된 노드를 실행할 수 있습니다" }];
+        },
         handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive }) => {
           runtime.bin = bin || null; // null → buildSpawnCmd 로그인셸 랩 기본
           runtime.env = env; // 세션 캡처(폴백) — 영속은 아래 secrets
@@ -1099,6 +1105,12 @@ export default {
         },
         returns: "{ ok, oxf?, ms?, code?, message? }",
         message: (d) => `프로바이더 응답 ${d.oxf ?? "?"} (${d.ms ?? 0}ms)`,
+        // 다음 수 제시: 프로바이더가 정상 판정(oxf=o)했으면 워크플로 발행으로 이어갈 수 있다.
+        hint: (d) => {
+          if (d.code) return [];
+          if (d.oxf !== "o") return [];
+          return [{ cmd: `sok ${SELF}.run`, why: "프로바이더가 정상이니 워크플로 발행을 진행할 수 있습니다" }];
+        },
         handler: async ({ env }) => {
           if (env && typeof env === "object") runtime.env = env;
           const t0 = Date.now();
@@ -1124,6 +1136,12 @@ export default {
         },
         returns: "{ ok, published?, code?, message? }",
         message: (d) => `${d.published ?? 0}개 노드로 조사 워크플로를 발행했습니다`,
+        // 다음 수 제시: 발행된 노드가 있으면 reconcile 로 지금 바로 처리를 이어갈 수 있다.
+        hint: (d) => {
+          if (d.code) return [];
+          if (!d.published) return [];
+          return [{ cmd: `sok ${RECONCILE_CMD}`, why: "지금 바로 준비된 노드를 실행할 수 있습니다" }];
+        },
         handler: async ({ chunk }, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           if (!chunk) return { ok: false, code: "INVALID_INPUT", message: "chunk(덩어리 id) 필수" };
@@ -1155,6 +1173,12 @@ export default {
         params: {},
         returns: "{ ok, processed, id?, badge? }",
         message: (d) => (d.processed ? `노드 ${d.id ?? "?"}을 처리했습니다` : "실행할 준비된 노드가 없습니다"),
+        // 다음 수 제시: 한 틱엔 ready 1개만 처리하므로, 진척이 있었으면 이어서 다음 준비된 노드를 처리할 수 있다.
+        hint: (d) => {
+          if (d.code) return [];
+          if (!d.processed) return [];
+          return [{ cmd: `sok ${RECONCILE_CMD}`, why: "다음 준비된 노드를 이어서 처리할 수 있습니다" }];
+        },
         handler: async (_p, inv) => {
           // §5 상속: 스케줄 발화(origin=schedule)의 중첩 실행이 사람으로 위장되지 않게 inv.execute 로.
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
@@ -1206,6 +1230,12 @@ export default {
         },
         returns: "{ ok, issued?, code?, message? }",
         message: (d) => `${d.issued ?? 0}개를 개발 이슈로 승격했습니다`,
+        // 다음 수 제시: 승격된 이슈가 있으면 칸반 보드에서 확인할 수 있다.
+        hint: (d) => {
+          if (d.code) return [];
+          if (!d.issued) return [];
+          return [{ cmd: `sok ${KANBAN}.node.list`, why: "생성된 이슈 노드를 확인할 수 있습니다" }];
+        },
         handler: async ({ chunk }) => {
           if (!chunk) return { ok: false, code: "INVALID_INPUT", message: "chunk(덩어리 id) 필수" };
           const deps = {
