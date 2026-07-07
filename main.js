@@ -1314,6 +1314,10 @@ export default {
         params: {},
         returns: "{ ok, node?: {id,kind,title}|null, prompt?, schema?, leaseMs?, message? }",
         message: (d) => (d.node ? `검증 노드 ${d.node.id} 실행 패키지를 발급했습니다` : "실행할 준비된 검증 노드가 없습니다"),
+        hint: (d) => {
+          if (!d.node) return [];
+          return [{ cmd: `sok plugin.soksak-plugin-workflow.submit node=${d.node.id} output='{"oxf":"o|x|f", …}'`, why: "prompt 를 직접 수행한 뒤 판정을 제출하면 spawn 경로와 같은 파이프를 탑니다" }];
+        },
         handler: async (_p, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           const deps = {
@@ -1336,6 +1340,10 @@ export default {
         },
         returns: "{ ok, node?, badge?, code?, message? }",
         message: (d) => (d.badge ? `노드 ${d.node}를 ${d.badge}로 확정했습니다` : "제출이 거부되었습니다"),
+        hint: (d) => {
+          if (!d.badge) return [];
+          return [{ cmd: "sok plugin.soksak-plugin-workflow.next", why: "다음 준비된 검증 노드를 이어서 수행할 수 있습니다" }];
+        },
         handler: async ({ node, output }, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           const deps = {
