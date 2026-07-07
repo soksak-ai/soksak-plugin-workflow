@@ -1,0 +1,221 @@
+#!/usr/bin/env node
+// run-full-chain — 독립(앱 0) 전 체인 러너. 파일-보드 위에서 reconcile 의 CLI 미러로
+// verify→hunt→classify→audit 인증→research→design 체인→plan→파일별 body 까지, 전 판정 = 실 LLM oxf.
+// 멱등: e2e/out/full-chain/board.json 이 단일 상태 — 재실행은 이어서 진행. 529 는 transient 텀 재시도,
+// 결정적 실패는 즉시 중단(§2). 산출 스트림은 사이드카 run catalog 가 보존.
+//
+//   SOKSAK_CLAUDE_WRAPPER=ccglm zsh e2e/run-e2e.zsh full-chain   (권장 — 인증 캡처 경유)
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { buildLedger, validateDraftDoc } from "../main.js";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(HERE, "..");
+const BIN = join(ROOT, "target/release/soksak-sidecar-workflow");
+const OUT = join(ROOT, "e2e/out/full-chain");
+const BOARD = join(OUT, "board.json");
+const RESEARCH_DOC = JSON.parse(readFileSync(join(ROOT, "workflows/research.doc.json"), "utf8"));
+const DRAFT_DOC = JSON.parse(readFileSync(join(ROOT, "workflows/draft.doc.json"), "utf8"));
+const DIRECTIVE = readFileSync(join(ROOT, "e2e/idea.txt"), "utf8").trim();
+mkdirSync(join(OUT), { recursive: true });
+process.env.SOKSAK_SIDECAR_WORKFLOW_RUNS = join(OUT, "runs");
+
+const log = (...a) => console.log(new Date().toTimeString().slice(0, 8), ...a);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ── doc values 조성(concat 접기 — doc_exec resolved_values 등가) ──
+function docValues(doc) {
+  const values = {};
+  for (const [k, v] of Object.entries(doc.values || {})) if (!(v && typeof v === "object" && v.concat)) values[k] = v;
+  for (const [k, v] of Object.entries(doc.values || {})) {
+    if (v && typeof v === "object" && Array.isArray(v.concat)) {
+      values[k] = v.concat.map((p) => (typeof p === "string" ? p : values[(p.$ || "").replace(/^values\./, "")] || "")).join("");
+    }
+  }
+  return values;
+}
+const RV = docValues(RESEARCH_DOC);
+const DV = docValues(DRAFT_DOC);
+
+// ── 보드(파일) ──
+function loadBoard() {
+  if (existsSync(BOARD)) return JSON.parse(readFileSync(BOARD, "utf8"));
+  return { phase: "init", nodes: [], chunk: { badge: null, result: null } };
+}
+function save(b) { writeFileSync(BOARD, JSON.stringify(b, null, 1)); }
+const confirmed = (n) => n.badge === "o" || n.badge === "x" || n.badge === "f";
+
+// ── 사이드카 호출(동기 spawn — 러너 자체가 순차) ──
+function callSidecar(args, stdinObj) {
+  for (let n = 0; ; n++) {
+    const r = spawnSync(BIN, args, { input: JSON.stringify(stdinObj), encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    if (r.status === 0) return r.stdout;
+    const err = (r.stderr || "").slice(-400);
+    if (!/529|overloaded|temporarily|wait longer|timeout/i.test(err)) {
+      throw new Error(`결정적 실패: ${args[0]} — ${err}`);
+    }
+    if (n >= 8) throw new Error(`transient 8회 소진: ${args[0]}`);
+    log(`transient — 5분 재시도(${n + 1}/8): ${args[0]}`);
+    spawnSync("sleep", ["300"]);
+  }
+}
+
+// ── 검증(exec-one) — kind→템플릿 매핑, vars 치환(런타임 resolve 계약 미러) ──
+function verifyTemplate(node) {
+  if (node.kind === "item") return DV.VERIFY_TMPL;
+  if (node.kind === "plan-unit") return RV.PLAN_VERIFY_TMPL;
+  if (node.kind === "code") return RV.BODY_VERIFY_TMPL;
+  if (node.kind === "fact") {
+    return ["interface", "domain-model", "criterion"].includes(node.category) ? RV.DESIGN_VERIFY_TMPL : RV.FACT_VERIFY_TMPL;
+  }
+  throw new Error(`검증 템플릿 미정의 kind: ${node.kind}`);
+}
+function verifyNode(node) {
+  const vars = { ...(node.vars || {}), title: node.title || "", description: node.description || "", category: node.category || "", directive: DIRECTIVE };
+  const prompt = verifyTemplate(node).replace(/\{\{(\w+)\}\}/g, (_, k) => (vars[k] != null ? vars[k] : `{{${k}}}`));
+  const leftover = prompt.match(/\{\{\w+\}\}/g);
+  if (leftover) throw new Error(`미해석 플레이스홀더 ${leftover} (kind=${node.kind})`);
+  const out = JSON.parse(callSidecar(["exec-one", "--lang", "ko", "--model", MODEL], { prompt, schema: RV.VERIFY_SCHEMA }));
+  if (!["o", "x", "f"].includes(out.oxf)) throw new Error(`무판정(oxf=${out.oxf}) — ${node.title}`);
+  node.badge = out.oxf;
+  node.result = JSON.stringify(out.result ?? null);
+  return out.oxf;
+}
+function verifyAllPending(b, kinds) {
+  const pending = b.nodes.filter((n) => kinds.includes(n.kind) && !confirmed(n));
+  for (let i = 0; i < pending.length; i++) {
+    const n = pending[i];
+    const oxf = verifyNode(n);
+    save(b);
+    log(`verify [${n.kind}] ${String(n.title).slice(0, 40)} → ${oxf} (${i + 1}/${pending.length})`);
+  }
+}
+
+// ── 스테이지 실행(exec-stage) → add 이벤트를 보드 노드로 ──
+function runStage(doc, stage, args) {
+  const raw = callSidecar(["exec-stage", "--lang", "ko", "--model", MODEL], { skeleton: doc, stage, args });
+  const lines = raw.split("\n").filter((l) => l.trim().startsWith("{"));
+  const evs = lines.map((l) => JSON.parse(l));
+  return { adds: evs.filter((e) => e.ev === "add"), result: (evs.find((e) => e.ev === "result") || {}).value };
+}
+function addNodes(b, adds, kinds) {
+  let added = 0;
+  for (const ev of adds) {
+    if (!kinds.includes(ev.kind)) continue; // task 이벤트는 파일-보드에선 러너가 오케스트레이션 — 미기록
+    b.nodes.push({ id: `${ev.kind}-${b.nodes.length}`, kind: ev.kind, title: ev.title, description: ev.description || "",
+      category: ev.category || "", origin: ev.origin || "", badge: null, vars: ev.vars || undefined });
+    added++;
+  }
+  save(b);
+  return added;
+}
+const ledgerOf = (b, kind) => buildLedger(b.nodes.map((n) => ({ ...n, parentId: "chunk" })).concat([{ id: "chunk", kind: "chunk" }]), "chunk", kind);
+
+const MODEL = process.env.MODEL || "glm-5.2";
+
+// ── 체인 ──
+const b = loadBoard();
+log(`시작 — phase=${b.phase}, nodes=${b.nodes.length}`);
+
+if (b.phase === "init") {
+  // 요건 60 — 동결 입력(stage.jsonl = generate 산출 DraftDoc) 재사용.
+  const ddoc = JSON.parse(readFileSync(join(ROOT, "e2e/out/stage.jsonl"), "utf8"));
+  const viol = validateDraftDoc(ddoc);
+  if (viol.length) throw new Error(`DraftDoc 검증 실패: ${viol[0]}`);
+  for (const r of ddoc.requirements) {
+    b.nodes.push({ id: r.id, kind: "item", title: r.title, description: r.description, category: "", origin: r.origin, badge: null });
+  }
+  b.phase = "verify";
+  save(b);
+  log(`init — 요건 ${ddoc.requirements.length}개 적재`);
+}
+
+if (b.phase === "verify") { verifyAllPending(b, ["item"]); b.phase = "hunt"; save(b); }
+
+if (b.phase === "hunt") {
+  const { adds } = runStage(DRAFT_DOC, "hunt", { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item") });
+  const n = addNodes(b, adds, ["item"]);
+  log(`hunt — 추가 ${n}건`);
+  verifyAllPending(b, ["item"]);
+  b.phase = "classify"; save(b);
+}
+
+if (b.phase === "classify") {
+  const ledger = ledgerOf(b, "item");
+  const { result } = runStage(DRAFT_DOC, "classify", { directive: DIRECTIVE, chunkRef: "chunk", ledger });
+  const as = result && Array.isArray(result.assignments) ? result.assignments : null;
+  if (!as) throw new Error("classify 결과에 assignments 없음");
+  const ids = new Set(ledger.map((e) => e.id)); const seen = new Set();
+  for (const a of as) {
+    if (!ids.has(a.id) || seen.has(a.id) || !a.category) throw new Error(`classify 배정 검증 실패: ${JSON.stringify(a)}`);
+    seen.add(a.id);
+  }
+  for (const id of ids) if (!seen.has(id)) throw new Error(`classify 미배정: ${id}`);
+  for (const a of as) { const n = b.nodes.find((x) => x.id === a.id); if (n) n.category = a.category; }
+  b.chunk.dimension = result.dimension || "";
+  b.phase = "audit"; save(b);
+  log(`classify — ${as.length}건 전수 배정(차원: ${b.chunk.dimension})`);
+}
+
+if (b.phase === "audit") {
+  const ledger = ledgerOf(b, "item");
+  const { result } = runStage(DRAFT_DOC, "audit", { directive: DIRECTIVE, chunkRef: "chunk", ledger });
+  if (!result || typeof result !== "object") throw new Error("audit 결과 없음");
+  const f = ledger.filter((e) => e.badge === "f").length;
+  b.chunk.badge = result.complete === true && f === 0 ? "o" : "f";
+  b.chunk.result = result.verdict || "";
+  b.phase = b.chunk.badge === "o" ? "research" : "discarded"; save(b);
+  log(`audit — complete=${result.complete}, f=${f} → chunk ${b.chunk.badge}`);
+  if (b.chunk.badge === "f") { log(`폐기 판정: ${b.chunk.result.slice(0, 200)}`); process.exit(2); }
+}
+
+if (b.phase === "research") {
+  const { adds } = runStage(RESEARCH_DOC, "research", { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item") });
+  log(`research — fact ${addNodes(b, adds, ["fact"])}건`);
+  verifyAllPending(b, ["fact"]);
+  b.phase = "design-interface"; save(b);
+}
+
+for (const stage of ["design-interface", "design-domain", "design-criteria"]) {
+  if (b.phase === stage) {
+    const { adds } = runStage(RESEARCH_DOC, stage, { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item"), facts: ledgerOf(b, "fact") });
+    log(`${stage} — design fact ${addNodes(b, adds, ["fact"])}건`);
+    verifyAllPending(b, ["fact"]); // 체인 계약: 다음 스테이지 전 확정
+    b.phase = stage === "design-criteria" ? "plan" : (stage === "design-interface" ? "design-domain" : "design-criteria");
+    save(b);
+  }
+}
+
+if (b.phase === "plan") {
+  const { adds } = runStage(RESEARCH_DOC, "plan", { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item"), facts: ledgerOf(b, "fact") });
+  log(`plan — 유닛 ${addNodes(b, adds, ["plan-unit"])}건`);
+  verifyAllPending(b, ["plan-unit"]);
+  b.phase = "body"; save(b);
+}
+
+if (b.phase === "body") {
+  const units = b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o");
+  const done = new Set(b.nodes.filter((n) => n.kind === "code").map((n) => n.category));
+  for (const u of units) {
+    if (done.has(u.category)) continue; // 멱등 — 같은 파일 code 존재 시 스킵
+    const { adds } = runStage(RESEARCH_DOC, "body", { directive: DIRECTIVE, chunkRef: "chunk",
+      title: u.title, file_path: u.category, pseudocode: u.description });
+    addNodes(b, adds, ["code"]);
+    log(`body — ${u.category}`);
+    verifyAllPending(b, ["code"]);
+  }
+  b.phase = "done"; save(b);
+}
+
+if (b.phase === "done") {
+  const stat = {};
+  for (const n of b.nodes) {
+    const k = `${n.kind}:${n.badge}`;
+    stat[k] = (stat[k] || 0) + 1;
+  }
+  const pending = b.nodes.filter((n) => !confirmed(n)).length;
+  log(`═══ 완주 — chunk=${b.chunk.badge} | 미확정 ${pending} | ${JSON.stringify(stat)}`);
+  process.exit(pending === 0 && b.chunk.badge === "o" ? 0 : 2);
+}

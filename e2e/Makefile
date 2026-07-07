@@ -234,6 +234,9 @@ exec-verify-design exec-verify-plan exec-verify-body: exec-verify-%: build
 	  if(!["o","x","f"].includes(r.oxf)){console.error("[exec-verify-$*] FAIL: oxf 없음",JSON.stringify(r).slice(0,200));process.exit(1)} \
 	  console.log("[exec-verify-$*] OK — oxf:",r.oxf,"| origin:",r.result&&r.result.origin);'
 
+full-chain: build
+	node $(SOKSAK)/tools/run-full-chain.mjs
+
 tournament:
 	zsh $(SOKSAK)/tools/run-tournament.zsh $(OUT)/tournament
 
