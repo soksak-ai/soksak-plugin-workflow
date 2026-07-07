@@ -71,17 +71,25 @@ async function board() {
 
 function summarize(ns) {
   const by = (k) => ns.filter((n) => n.kind === k);
+  const badgeDist = (list) => {
+    const d = {};
+    for (const n of list) d[n.badge || "-"] = (d[n.badge || "-"] || 0) + 1;
+    return d;
+  };
+  const confirmed = (n) => n.badge === "o" || n.badge === "x" || n.badge === "f";
   const chunks = by("chunk");
   const items = by("item");
-  const badges = {};
-  for (const n of items) badges[n.badge || "-"] = (badges[n.badge || "-"] || 0) + 1;
+  const facts = by("fact");
+  const units = by("plan-unit");
+  const codes = by("code");
   return {
-    chunks,
-    items,
-    badges,
+    chunks, items, facts, units, codes,
+    badges: badgeDist(items),
+    factBadges: badgeDist(facts),
+    unitBadges: badgeDist(units),
+    codeBadges: badgeDist(codes),
     tasks: Object.fromEntries(by("task").map((t) => [t.title || t.id, t.status])),
-    facts: by("fact").length,
-    planUnits: by("plan-unit").length,
+    allConfirmed: (list) => list.length > 0 && list.every(confirmed),
   };
 }
 
@@ -201,14 +209,39 @@ async function main() {
       }
       envSeeded = true;
     }
-    const state = JSON.stringify([s.chunks.map((c) => c.badge || "-"), s.items.length, s.badges, s.tasks, s.facts, s.planUnits]);
+    const state = JSON.stringify([s.chunks.map((c) => c.badge || "-"), s.items.length, s.badges, s.tasks, s.factBadges, s.unitBadges, s.codeBadges]);
     if (state !== prev) {
-      log(`chunk ${s.chunks.length} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${s.facts} | plan-units ${s.planUnits}`);
+      log(`chunk ${s.chunks.map((c) => c.badge || "검수전")} | items ${s.items.length} ${JSON.stringify(s.badges)} | tasks ${JSON.stringify(s.tasks)} | facts ${JSON.stringify(s.factBadges)} | units ${JSON.stringify(s.unitBadges)} | code ${JSON.stringify(s.codeBadges)}`);
       prev = state;
     }
-    if (s.chunks.every((c) => c.badge === "o" || c.badge === "f")) {
-      log("완주 — 덩어리 인증 확정:", s.chunks.map((c) => `${c.id}=${c.badge}`).join(", "));
-      process.exit(s.chunks.every((c) => c.badge === "o") ? 0 : 2);
+    // 전체 파이프라인 오케스트레이션(C1) — 게이트 커맨드는 하네스가 자동 호출, 실행은 전부 스케줄러.
+    const chunk = s.chunks[0];
+    if (mode === "run" && chunk && chunk.badge === "o") {
+      if (s.facts.length === 0) {
+        log("audit 인증 감지 → research 체인 발행");
+        try {
+          unwrap(await call(`${WF}.research`, { chunk: chunk.id }, 3_600_000));
+        } catch (e) {
+          const msg = String(e);
+          if (!msg.includes("ALREADY_DONE")) { log("research 발행 실패(재시도 예정):", msg.slice(0, 100)); await sleep(30_000); continue; }
+        }
+      } else if (s.allConfirmed(s.facts) && s.allConfirmed(s.units) && s.codes.length === 0) {
+        log("fact·unit 전부 확정 감지 → issuerize(파일별 실코드화)");
+        try {
+          const r = unwrap(await call(`${WF}.issuerize`, { chunk: chunk.id }, 3_600_000));
+          log("issuerize →", JSON.stringify(r).slice(0, 150));
+        } catch (e) {
+          const msg = String(e);
+          if (!msg.includes("ALREADY_DONE")) { log("issuerize 거부(게이트/재시도):", msg.slice(0, 120)); await sleep(30_000); continue; }
+        }
+      } else if (s.codes.length > 0 && s.allConfirmed(s.codes)) {
+        log("완주 — 전 파일 code 확정:", s.codes.map((c) => `${c.title}=${c.badge}`).join(", "));
+        process.exit(s.codes.every((c) => c.badge === "o") ? 0 : 2);
+      }
+    }
+    if (chunk && chunk.badge === "f") {
+      log("종료 — 덩어리 폐기(audit f)");
+      process.exit(2);
     }
     await sleep(60_000);
   }
