@@ -111,7 +111,8 @@ function addNodes(b, adds, kinds) {
   save(b);
   return added;
 }
-const ledgerOf = (b, kind) => buildLedger(b.nodes.map((n) => ({ ...n, parentId: "chunk" })).concat([{ id: "chunk", kind: "chunk" }]), "chunk", kind);
+const ledgerOf = (b, kind, onlyO = false) => buildLedger(b.nodes.map((n) => ({ ...n, parentId: "chunk" })).concat([{ id: "chunk", kind: "chunk" }]), "chunk", kind)
+  .filter((e) => !onlyO || e.badge === "o"); // ground("verified facts")·구현 원장의 의미 = o 확정만(f=치명, x=반려 유지)
 
 const MODEL = process.env.MODEL || "glm-5.2";
 
@@ -195,7 +196,7 @@ if (b.phase === "research") {
 
 for (const stage of ["design-interface", "design-domain", "design-criteria"]) {
   if (b.phase === stage) {
-    const { adds } = runStage(RESEARCH_DOC, stage, { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item"), facts: ledgerOf(b, "fact") });
+    const { adds } = runStage(RESEARCH_DOC, stage, { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item", true), facts: ledgerOf(b, "fact", true) });
     log(`${stage} — design fact ${addNodes(b, adds, ["fact"])}건`);
     verifyAllPending(b, ["fact"]); // 체인 계약: 다음 스테이지 전 확정
     b.phase = stage === "design-criteria" ? "plan" : (stage === "design-interface" ? "design-domain" : "design-criteria");
@@ -203,11 +204,21 @@ for (const stage of ["design-interface", "design-domain", "design-criteria"]) {
   }
 }
 
-if (b.phase === "plan") {
-  const { adds } = runStage(RESEARCH_DOC, "plan", { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item"), facts: ledgerOf(b, "fact") });
+while (b.phase === "plan") {
+  const { adds } = runStage(RESEARCH_DOC, "plan", { directive: DIRECTIVE, chunkRef: "chunk", ledger: ledgerOf(b, "item", true), facts: ledgerOf(b, "fact", true) });
   log(`plan — 유닛 ${addNodes(b, adds, ["plan-unit"])}건`);
   verifyAllPending(b, ["plan-unit"]);
-  b.phase = "body"; save(b);
+  // plan 산출 게이트(fail-loud): o 유닛 0 = 계획 실패 — 재시도 1회, 그래도면 명시 종료(완주 위장 금지).
+  const oUnits = b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o").length;
+  b.planRounds = (b.planRounds || 0) + 1;
+  if (oUnits === 0) {
+    if (b.planRounds >= 2) { log("FAIL: plan 2회 모두 o 유닛 0 — 계획 실패"); save(b); process.exit(2); }
+    log("plan 산출 부실(o 유닛 0) — 부실 유닛 제거 후 재시도");
+    b.nodes = b.nodes.filter((n) => n.kind !== "plan-unit");
+    save(b);
+  } else {
+    b.phase = "body"; save(b);
+  }
 }
 
 if (b.phase === "body") {
@@ -231,6 +242,9 @@ if (b.phase === "done") {
     stat[k] = (stat[k] || 0) + 1;
   }
   const pending = b.nodes.filter((n) => !confirmed(n)).length;
-  log(`═══ 완주 — chunk=${b.chunk.badge} | 미확정 ${pending} | ${JSON.stringify(stat)}`);
-  process.exit(pending === 0 && b.chunk.badge === "o" ? 0 : 2);
+  const oUnits = b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o").length;
+  const oCodes = b.nodes.filter((n) => n.kind === "code" && n.badge === "o").length;
+  const complete = pending === 0 && b.chunk.badge === "o" && oUnits > 0 && oCodes > 0;
+  log(`═══ ${complete ? "완주" : "미완(완주 위장 금지)"} — chunk=${b.chunk.badge} | 미확정 ${pending} | o유닛 ${oUnits} | o코드 ${oCodes} | ${JSON.stringify(stat)}`);
+  process.exit(complete ? 0 : 2);
 }
