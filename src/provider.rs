@@ -136,6 +136,10 @@ fn open_run_stream() -> Option<std::fs::File> {
 /// "API Error: 529 …" 가 assistant 블록 — 톱레벨만 보던 감지는 죽은 조건이라 재시도가 0이었다).
 fn event_signals_529(ev: &serde_json::Value) -> bool {
     let ty = ev.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    // 구조 신호 최우선 — result 이벤트가 api_error_status 를 명시(run catalog 실측: 529).
+    if ty == "result" {
+        return ev.get("api_error_status").and_then(|x| x.as_u64()).is_some_and(|c| (500..600).contains(&c));
+    }
     if ty == "text" {
         return ev.get("text").and_then(|x| x.as_str()).is_some_and(is_529);
     }
@@ -390,8 +394,10 @@ mod tests_529 {
     #[test]
     fn detects_529_in_top_level_text_and_ignores_others() {
         assert!(event_signals_529(&json!({ "type": "text", "text": "overloaded" })));
-        // result 는 산출 채널 — 본문에 "529" 가 있어도 과부하 신호가 아니다.
+        // result 는 산출 채널 — 본문에 "529" 가 있어도 과부하 신호가 아니다. 구조 필드만 신호.
         assert!(!event_signals_529(&json!({ "type": "result", "result": "요건 529 관련 서술" })));
+        assert!(event_signals_529(&json!({ "type": "result", "is_error": true, "api_error_status": 529, "result": "API Error: 529" })));
+        assert!(!event_signals_529(&json!({ "type": "result", "api_error_status": 200 })));
         assert!(!event_signals_529(&json!({ "type": "system", "subtype": "init" })));
     }
 }
