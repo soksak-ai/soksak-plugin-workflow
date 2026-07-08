@@ -217,8 +217,28 @@ while (b.phase === "plan") {
     b.nodes = b.nodes.filter((n) => n.kind !== "plan-unit");
     save(b);
   } else {
-    b.phase = "body"; save(b);
+    b.phase = "plan-audit"; save(b);
   }
+}
+
+while (b.phase === "plan-audit") {
+  const units = b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o");
+  const ledger = units.map((u) => ({ id: u.id, title: `${u.title} — file: ${u.category}`, badge: "o" }));
+  const { result } = runStage(RESEARCH_DOC, "plan-audit", { directive: DIRECTIVE, chunkRef: "chunk", ledger });
+  if (!result || typeof result !== "object") throw new Error("plan-audit 결과 없음");
+  b.planAuditRounds = (b.planAuditRounds || 0) + 1;
+  log(`plan-audit(라운드 ${b.planAuditRounds}) — complete=${result.complete} | ${String(result.verdict || "").slice(0, 150)}`);
+  if (result.complete === true) { b.phase = "body"; save(b); break; }
+  const gaps = Array.isArray(result.gaps) ? result.gaps.filter((g) => typeof g === "string" && g.trim()) : [];
+  if (b.planAuditRounds >= 3 || gaps.length === 0) { log("FAIL: plan-audit 수렴 실패"); save(b); process.exit(2); }
+  log(`부결 — 누락 표면 ${gaps.length}건을 파일 유닛 후보로 투입`);
+  for (const g of gaps) {
+    const file = (g.match(/^([\w./-]+)/) || [])[1] || "";
+    b.nodes.push({ id: `gapunit-${b.nodes.length}`, kind: "plan-unit", title: g.slice(0, 80), description: g, category: file, origin: "agent", badge: null });
+  }
+  save(b);
+  verifyAllPending(b, ["plan-unit"]);
+  save(b);
 }
 
 if (b.phase === "body") {
