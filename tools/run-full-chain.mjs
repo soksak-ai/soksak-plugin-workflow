@@ -21,6 +21,8 @@ const DRAFT_DOC = JSON.parse(readFileSync(join(ROOT, "workflows/draft.doc.json")
 const DIRECTIVE = readFileSync(join(ROOT, "e2e/idea.txt"), "utf8").trim();
 mkdirSync(join(OUT), { recursive: true });
 process.env.SOKSAK_SIDECAR_WORKFLOW_RUNS = join(OUT, "runs");
+// body 실코드는 큰 화면 파일에서 32K 출력 상한을 넘을 수 있다(실측) — 상한을 넉넉히.
+if (!process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS) process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = "64000";
 
 const log = (...a) => console.log(new Date().toTimeString().slice(0, 8), ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
