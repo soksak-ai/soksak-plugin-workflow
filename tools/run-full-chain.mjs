@@ -231,16 +231,12 @@ while (b.phase === "plan-audit") {
   if (result.complete === true) { b.phase = "body"; save(b); break; }
   const gaps = Array.isArray(result.gaps) ? result.gaps.filter((g) => typeof g === "string" && g.trim()) : [];
   if (b.planAuditRounds >= 3 || gaps.length === 0) { log("FAIL: plan-audit 수렴 실패"); save(b); process.exit(2); }
-  log(`부결 — 누락 표면 ${gaps.length}건을 파일 유닛 후보로 투입`);
-  for (const g of gaps) {
-    // 경로 추출: 백틱 안 파일 경로 전부 — 복수 파일 gap 은 파일별 유닛으로 기계 분할(유닛 1=파일 1).
-    const files = [...g.matchAll(/`([\w][\w./-]*\.[\w]+)`/g)].map((m) => m[1]);
-    for (const file of files.length ? files : [""]) {
-      if (!file) { log(`경로 없는 gap 폐기(fail-loud): ${g.slice(0, 60)}`); continue; }
-      b.nodes.push({ id: `gapunit-${b.nodes.length}`, kind: "plan-unit", title: `${file} — ${g.replace(/`/g, "").slice(0, 60)}`, description: g, category: file, origin: "agent", badge: null });
-    }
-  }
-  save(b);
+  log(`부결 — 누락 표면 ${gaps.length}건을 plan-patch(증분 저작)에 위임`);
+  // gap 산문은 슈도코드가 아니다(실측: 기계 투입 유닛이 ONE FILE·자족성 위반 f) — 저작은 LLM 몫(§11).
+  const { adds } = runStage(RESEARCH_DOC, "plan-patch", { directive: DIRECTIVE, chunkRef: "chunk",
+    gaps: gaps.map((g) => `- ${g}`).join("\n"),
+    ledger: b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o").map((u) => ({ id: u.id, title: `${u.title} — file: ${u.category}`, badge: "o" })) });
+  log(`plan-patch — 유닛 ${addNodes(b, adds, ["plan-unit"])}건`);
   verifyAllPending(b, ["plan-unit"]);
   save(b);
 }
