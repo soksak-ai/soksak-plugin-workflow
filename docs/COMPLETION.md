@@ -26,10 +26,12 @@ explicit commit.
   verified → plan units verified → per-file body + body-verify — until every node is
   confirmed. No simulated badges: every verdict is a real LLM oxf. Evidence: the file board
   + run catalog.
-- **C1b App attachment**: the same assets running as the plugin — already live-proven for
-  publish → generate → item verify → next/submit (C2); after C1a, one attachment check on the
-  live board suffices (scheduler advances at least one node end-to-end). Evidence: board
-  transitions.
+- **C1b App attachment** ✅ (2026-07-08): attach sequence (window discovery → ping env
+  re-seed → reconcile poke) produced a live transition observed as it happened (o 6→7), the
+  confirmed node carrying a full verdict (oxf=o, origin, concrete reason) — the scheduler
+  spawn path advanced end-to-end. Four more nodes had advanced autonomously between
+  observations (2→6), evidencing unattended persistence. Evidence: board counts + node.get
+  verdict in the work log.
 - **C2 CLI idempotency** ✅ (2026-07-08): a live-board pending item was confirmed through
   `next`→`submit` (badge o + full result recorded, same pipeline as spawn); resubmission
   rejected as ALREADY_DONE. Evidence: command replies + node.get transition in the work log.
