@@ -156,7 +156,10 @@ fn event_signals_529(ev: &serde_json::Value) -> bool {
 
 /// is_529 — 제공자 일시 과부하 에러 판정. "wait longer"는 과부하 안내 문구(앱 실측 2026-07-03).
 fn is_529(err: &str) -> bool {
-    err.contains("529") || err.contains("overloaded") || err.contains("temporarily") || err.contains("wait longer")
+    // transient 사전(§15): API 혼잡 + 연결단절 부류 — 재시도 대상. 결정적 실패는 여기 넣지 않는다.
+    let e = err.to_ascii_lowercase();
+    ["529", "overloaded", "temporarily", "wait longer", "econnreset", "econnrefused", "unable to connect", "socket hang up"]
+        .iter().any(|p| e.contains(p))
 }
 
 /// run_agent_text_once — claude -p 단일 실행(재시도 없음). 529 감지(stream text) 시 Err 를 529 로.
