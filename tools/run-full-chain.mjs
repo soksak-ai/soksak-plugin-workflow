@@ -52,10 +52,12 @@ const confirmed = (n) => n.badge === "o" || n.badge === "x" || n.badge === "f";
 // ── 사이드카 호출(동기 spawn — 러너 자체가 순차) ──
 function callSidecar(args, stdinObj) {
   for (let n = 0; ; n++) {
-    const r = spawnSync(BIN, args, { input: JSON.stringify(stdinObj), encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    // timeout: spawnSync stdin 전달이 드물게 닫히지 않아 자식이 read_to_string 에서 영구 행(8h 실측) —
+    // 30분 하드캡으로 행을 실패로 전환(재시도 루프가 이어받는다).
+    const r = spawnSync(BIN, args, { input: JSON.stringify(stdinObj), encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000, killSignal: "SIGKILL" });
     if (r.status === 0) return r.stdout;
-    const err = (r.stderr || "").slice(-400);
-    if (!/529|overloaded|temporarily|wait longer|timeout|ECONNRESET|ECONNREFUSED|Unable to connect|socket hang up|Connection closed/i.test(err)) {
+    const err = (r.signal ? `timeout/${r.signal} ` : "") + (r.stderr || "").slice(-400);
+    if (!/529|overloaded|temporarily|wait longer|timeout|SIGKILL|ECONNRESET|ECONNREFUSED|Unable to connect|socket hang up|Connection closed/i.test(err)) {
       throw new Error(`결정적 실패: ${args[0]} — ${err}`);
     }
     if (n >= 8) throw new Error(`transient 8회 소진: ${args[0]}`);
