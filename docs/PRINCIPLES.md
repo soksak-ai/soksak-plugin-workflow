@@ -74,6 +74,38 @@ Contracts (citation rules, completeness, prohibitions) are taught by directive t
 worked examples. Violations are rejected by deterministic post-checks (ledger id
 cross-checks, duplicate/unassigned detection). Schemas enforce structure only.
 
+## 12. Ground means o-confirmed only
+
+An injected ledger or `{{facts}}` ground carries **o-confirmed entries only** when a stage
+BUILDS on it (design chain, plan, body). f (fatal) and x (rejected) entries are not ground —
+injecting them hands the model a contradictory foundation (measured: a plan turn fed 111
+mixed-badge facts emitted one garbage unit; the same turn on o-only ground emitted 39 real
+file units). Stages that need the full ledger for their own duty keep it: hunt (duplicate
+avoidance), classify (assign everything), audit (f tally).
+
+## 13. Two-axis certification at every layer
+
+Per-node verification (parts) never substitutes for whole-set certification (assembly).
+The draft layer has verify + audit; the plan layer has unit-verify + plan-audit (does the
+file set assemble into a system someone can build, deploy, and OPERATE — auth, admin,
+review surfaces, jobs, boot wiring?). Formal coverage (every requirement cited by some
+unit) can be 100% while the assembled system is unbuildable — measured: 60/60 cited, yet
+no console, no auth surface. A layer without its assembly check is an unfinished layer.
+
+## 14. Rejection feeds a correction loop
+
+A certification verdict of "incomplete" with concrete gaps is not a discard — the gaps are
+fed back mechanically (no authoring LLM) as candidate entries, the existing verify pipe
+screens them (fake gaps die as x), and the certification re-runs. Bounded rounds (2); on
+exhaustion, fail loud and discard. A gaps field with no consumer is a defect.
+
+## 15. Retries are for transient errors only
+
+A retry loop may swallow 529/overloaded/timeout — never a deterministic failure (parse
+error, unresolved placeholder, contract violation). Retrying a deterministic failure
+masks it as flakiness and burns the budget (measured: 8 rounds spent on a template
+defect). Classify the error first; fail loud on the deterministic class.
+
 ## Appendix — settled decisions
 
 - Representation = workflow-doc@0.0.1 single path. The legacy JS/ESTree interp path was removed
