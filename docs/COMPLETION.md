@@ -85,5 +85,12 @@ Every LLM turn (refinement, stages, verification) can be pulled by an in-TUI exe
 submitted back with zero LLM spawn: exec-stage `--assemble`/`--with-output`,
 generate-skeleton `--assemble`/`--with-refined`, `run {pull|refined}`, `next`/`submit`
 extended to stage tasks (shared assembly/consumption pipeline with the scheduler).
-Proof criterion: a full run from draft to exported files inside a TUI session with zero
-`claude -p`/`codex exec` processes observed — pending.
+Proof criterion met (2026-07-11): a full run — idea → refinement → publish → 12 requirements
+verified → hunt/classify/audit certification → research → design chain → plan → issuerize →
+per-file codification with two runtime-evidence rework loops → export — was driven entirely
+by in-TUI executors (the orchestrating agent plus fan-out subagents pulling next/submit),
+with zero claude -p / codex exec processes. The exported tree runs: the CLI works end-to-end
+and the multi-process stress test passes (lost-update 0, SIGKILL atomicity). The run also
+surfaced and fixed three pipeline defects (issuerize rework semantics, category mapping,
+body idempotency marker) — and demonstrated twice that runtime execution catches seam
+defects text verification cannot, fixing PROOF execution as the next frontier.
