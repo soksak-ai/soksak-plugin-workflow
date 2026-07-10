@@ -261,6 +261,7 @@ export function buildAddParams(ev, parentId, blockedBy, taskCtx, roleToHash) {
     type: "task",
   };
   if (ev.kind) params.kind = ev.kind; // free-form — reconcile 가 stage 작업 식별에 씀
+  if (ev.category) params.category = ev.category; // 파일 경로/영역 — 재작업 매칭·export 의 축(러너 addNodes 와 대칭)
   if (ev.description) params.description = ev.description; // 규칙 B: 요건 설명(사람용 칸반 표시, body 와 별개 축)
   if (ev.origin) params.origin = ev.origin; // 규칙 D: 요건 출처(user/agent/search) 추적 — item 본질 메타
   if (ev.badge) params.badge = ev.badge;
