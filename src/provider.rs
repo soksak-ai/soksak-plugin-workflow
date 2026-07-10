@@ -158,14 +158,175 @@ fn event_signals_529(ev: &serde_json::Value) -> bool {
 fn is_529(err: &str) -> bool {
     // transient 사전(§15): API 혼잡 + 연결단절 부류 — 재시도 대상. 결정적 실패는 여기 넣지 않는다.
     let e = err.to_ascii_lowercase();
-    ["529", "overloaded", "temporarily", "wait longer", "econnreset", "econnrefused", "unable to connect", "socket hang up", "connection closed"]
+    ["529", "overloaded", "temporarily", "wait longer", "econnreset", "econnrefused", "unable to connect", "socket hang up", "connection closed", "429", "rate limit"]
         .iter().any(|p| e.contains(p))
 }
 
 /// run_agent_text_once — claude -p 단일 실행(재시도 없음). 529 감지(stream text) 시 Err 를 529 로.
 /// timeout 하드캡(req.timeout_secs)은 **네이티브**(wait-timeout crate) — 외부 GNU `timeout` 바이너리에
 /// 의존하지 않는다(macOS 기본 미탑재; 부재 시 모든 호출이 "spawn claude" 오진 라벨로 죽던 결함 해소).
+/// provider_kind — 실행 LLM CLI 선택. env SOKSAK_WORKFLOW_PROVIDER=codex 면 codex exec 어댑터,
+/// 그 외(기본) claude -p. doc·보드·badge 파이프는 실행자 중립 — 여기 한 곳만 갈린다.
+fn provider_kind() -> &'static str {
+    match std::env::var("SOKSAK_WORKFLOW_PROVIDER").ok().as_deref() {
+        Some("codex") => "codex",
+        _ => "claude",
+    }
+}
+
+/// normalize_schema_for_openai — OpenAI strict structured-output 방언으로 결정적 정규화(의미 보존):
+/// 모든 object 에 additionalProperties=false, properties 전 키를 required 로(원래 선택이던 키는
+/// type 에 "null" 을 더해 nullable 로 — 선택성의 등가 표현). Anthropic 스키마는 관대해 이 변환의
+/// 역은 불필요. 재귀(중첩 object/array items).
+fn normalize_schema_for_openai(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            let is_object_schema = m.get("type").and_then(|t| t.as_str()) == Some("object") || m.contains_key("properties");
+            if is_object_schema {
+                m.entry("additionalProperties").or_insert(Value::Bool(false));
+                let prop_keys: Vec<String> = m
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .map(|p| p.keys().cloned().collect())
+                    .unwrap_or_default();
+                let required: Vec<String> = m
+                    .get("required")
+                    .and_then(|r| r.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let optional: Vec<String> = prop_keys.iter().filter(|k| !required.contains(k)).cloned().collect();
+                if let Some(props) = m.get_mut("properties").and_then(|p| p.as_object_mut()) {
+                    for k in &optional {
+                        if let Some(ps) = props.get_mut(k).and_then(|x| x.as_object_mut()) {
+                            match ps.get_mut("type") {
+                                Some(Value::String(t)) => {
+                                    let t2 = t.clone();
+                                    ps.insert("type".into(), serde_json::json!([t2, "null"]));
+                                }
+                                Some(Value::Array(a)) => {
+                                    if !a.iter().any(|x| x.as_str() == Some("null")) {
+                                        a.push(Value::String("null".into()));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if !prop_keys.is_empty() {
+                    m.insert("required".into(), Value::Array(prop_keys.into_iter().map(Value::String).collect()));
+                }
+            }
+            for (_, child) in m.iter_mut() {
+                normalize_schema_for_openai(child);
+            }
+        }
+        Value::Array(a) => {
+            for child in a.iter_mut() {
+                normalize_schema_for_openai(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// run_codex_once — codex exec 어댑터(claude -p 등가): 프롬프트=stdin, 스키마=--output-schema(파일),
+/// 스트림=--json(run catalog 보존), 결과=-o(최종 메시지 파일). 인증은 codex 자체 로그인(~/.codex) —
+/// ANTHROPIC env 불요. 하드캡·transient 계약은 claude 경로와 동일.
+fn run_codex_once(req: &AgentRequest) -> Result<String, String> {
+    let tmp = std::env::temp_dir().join(format!("soksak-codex-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("codex tmp: {e}"))?;
+    let out_file = tmp.join(format!("last-{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-lc", r#"exec codex "$@""#, "codex"]);
+    cmd.arg("exec").arg("--json").arg("--skip-git-repo-check").arg("--ephemeral");
+    cmd.arg("-o").arg(&out_file);
+    if !req.model.is_empty() && req.model != "default" {
+        // "default" = codex 자체 기본 모델(config) 사용 — -m 생략.
+        cmd.arg("-m").arg(req.model);
+    }
+    let schema_file = if let Some(sc) = &req.schema {
+        let f = tmp.join(format!("schema-{}.json", std::process::id()));
+        let mut sc2 = sc.clone();
+        normalize_schema_for_openai(&mut sc2);
+        std::fs::write(&f, sc2.to_string()).map_err(|e| format!("codex schema 기록: {e}"))?;
+        cmd.arg("--output-schema").arg(&f);
+        Some(f)
+    } else {
+        None
+    };
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+    {
+        use std::io::Write;
+        let mut si = child.stdin.take().ok_or("codex stdin 없음")?;
+        // 프롬프트는 stdin — 인자 길이 한계 회피(수십 KB 프롬프트).
+        let mut full = String::new();
+        if let Some(sp) = &req.system_prompt {
+            full.push_str(sp);
+            full.push_str("\n\n");
+        }
+        full.push_str(&req.prompt);
+        si.write_all(full.as_bytes()).map_err(|e| format!("codex stdin 쓰기: {e}"))?;
+    } // drop = EOF
+    let stdout = child.stdout.take().ok_or("codex stdout 없음")?;
+    let reader = std::thread::spawn(move || {
+        let mut run_stream = open_run_stream();
+        let mut tail: Vec<String> = Vec::new(); // 실패 진단용 꼬리(transient 사전 매칭 재료)
+        for line in BufReader::new(stdout).lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => break,
+            };
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if let Some(f) = run_stream.as_mut() {
+                use std::io::Write;
+                let _ = writeln!(f, "{t}");
+            }
+            eprintln!("  [codex] {}", t.chars().take(160).collect::<String>());
+            tail.push(t.chars().take(300).collect());
+            if tail.len() > 8 {
+                tail.remove(0);
+            }
+        }
+        tail.join(" | ")
+    });
+    use wait_timeout::ChildExt;
+    let status = match child
+        .wait_timeout(std::time::Duration::from_secs(req.timeout_secs))
+        .map_err(|e| format!("wait codex: {e}"))?
+    {
+        Some(st) => st,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(format!("codex 타임아웃({}s) — 강제 종료", req.timeout_secs));
+        }
+    };
+    let tail = reader.join().map_err(|_| "codex stream 리더 panic".to_string())?;
+    if let Some(f) = schema_file {
+        let _ = std::fs::remove_file(f);
+    }
+    if !status.success() {
+        return Err(format!("codex 비정상 종료: {status} — {tail}"));
+    }
+    let text = std::fs::read_to_string(&out_file).map_err(|e| format!("codex 결과 파일 없음({e}) — {tail}"))?;
+    let _ = std::fs::remove_file(&out_file);
+    if text.trim().is_empty() {
+        return Err(format!("codex 결과 비어 있음 — {tail}"));
+    }
+    Ok(text.trim().to_string())
+}
+
 fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<String, String> {
+    if provider_kind() == "codex" {
+        return run_codex_once(req);
+    }
     // claude 발견 = 로그인셸 해석(sh -lc) — GUI(Finder) 실행 앱의 자식은 셸 PATH 를 상속받지 못해
     // PATH 의존 spawn 이 os error 2 로 죽는다(GUI PATH 함정). 사이드카 자신의 자식 발견은 사이드카 책임.
     let mut cmd = Command::new("/bin/sh");
@@ -402,6 +563,30 @@ mod tests_529 {
         assert!(event_signals_529(&json!({ "type": "result", "is_error": true, "api_error_status": 529, "result": "API Error: 529" })));
         assert!(!event_signals_529(&json!({ "type": "result", "api_error_status": 200 })));
         assert!(!event_signals_529(&json!({ "type": "system", "subtype": "init" })));
+    }
+}
+
+#[cfg(test)]
+mod tests_codex_schema {
+    use super::*;
+
+    #[test]
+    fn openai_normalize_makes_strict_and_nullable() {
+        let mut v: Value = serde_json::json!({
+            "type": "object", "required": ["a"],
+            "properties": {
+                "a": {"type": "string"},
+                "b": {"type": "number"},
+                "c": {"type": "object", "properties": {"d": {"type": "string"}}}
+            }
+        });
+        normalize_schema_for_openai(&mut v);
+        assert_eq!(v["additionalProperties"], serde_json::json!(false));
+        let req: Vec<&str> = v["required"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        assert!(req.contains(&"a") && req.contains(&"b") && req.contains(&"c"), "전 키 required");
+        assert_eq!(v["properties"]["b"]["type"], serde_json::json!(["number", "null"]), "선택 키는 nullable");
+        assert_eq!(v["properties"]["a"]["type"], serde_json::json!("string"), "원래 필수는 그대로");
+        assert_eq!(v["properties"]["c"]["additionalProperties"], serde_json::json!(false), "중첩 object 도");
     }
 }
 

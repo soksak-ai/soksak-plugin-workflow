@@ -38,7 +38,9 @@ fn auth_env() -> Result<(Vec<(String, String)>, &'static str), String> {
         .collect();
     let has_token = all.iter().any(|(k, _)| k == "ANTHROPIC_AUTH_TOKEN");
     let has_oauth = all.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN");
-    if !has_token && !has_oauth {
+    // codex provider 는 자체 로그인(~/.codex)을 쓴다 — ANTHROPIC 계열 토큰을 요구하지 않는다.
+    let is_codex = std::env::var("SOKSAK_WORKFLOW_PROVIDER").ok().as_deref() == Some("codex");
+    if !has_token && !has_oauth && !is_codex {
         return Err("프로필 인증 토큰 미설정 — ANTHROPIC_AUTH_TOKEN 또는 CLAUDE_CODE_OAUTH_TOKEN export 후 실행하라".to_string());
     }
     // 토큰 프로필 우선: ANTHROPIC_AUTH_TOKEN 있으면 그 env 만. OAUTH 가 잔류해도 제외(혼합 방지).

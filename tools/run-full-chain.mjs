@@ -14,7 +14,7 @@ import { buildLedger, validateDraftDoc } from "../main.js";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
 const BIN = join(ROOT, "target/release/soksak-sidecar-workflow");
-const OUT = join(ROOT, "e2e/out/full-chain");
+const OUT = process.env.SOKSAK_FULL_CHAIN_OUT ? join(ROOT, process.env.SOKSAK_FULL_CHAIN_OUT) : join(ROOT, "e2e/out/full-chain");
 const BOARD = join(OUT, "board.json");
 const RESEARCH_DOC = JSON.parse(readFileSync(join(ROOT, "workflows/research.doc.json"), "utf8"));
 const DRAFT_DOC = JSON.parse(readFileSync(join(ROOT, "workflows/draft.doc.json"), "utf8"));
@@ -125,8 +125,17 @@ const b = loadBoard();
 log(`시작 — phase=${b.phase}, nodes=${b.nodes.length}`);
 
 if (b.phase === "init") {
-  // 요건 60 — 동결 입력(stage.jsonl = generate 산출 DraftDoc) 재사용.
-  const ddoc = JSON.parse(readFileSync(join(ROOT, "e2e/out/stage.jsonl"), "utf8"));
+  // 이 보드 전용 generate 산출이 있으면 재사용(멱등), 없으면 idea 원문에서 요건 발굴부터(진짜 처음).
+  const stagePath = join(OUT, "stage.jsonl");
+  if (!existsSync(stagePath)) {
+    log("generate — idea 원문에서 요건 발굴");
+    const raw = callSidecar(["exec-stage", "--lang", "ko", "--model", MODEL],
+      { skeleton: DRAFT_DOC, stage: "generate", args: { directive: DIRECTIVE } });
+    const dd = JSON.parse(raw);
+    if (dd.kind !== "draft-chunk") throw new Error("generate 산출이 DraftDoc 아님");
+    writeFileSync(stagePath, raw);
+  }
+  const ddoc = JSON.parse(readFileSync(stagePath, "utf8"));
   const viol = validateDraftDoc(ddoc);
   if (viol.length) throw new Error(`DraftDoc 검증 실패: ${viol[0]}`);
   for (const r of ddoc.requirements) {
