@@ -106,6 +106,17 @@ error, unresolved placeholder, contract violation). Retrying a deterministic fai
 masks it as flakiness and burns the budget (measured: 8 rounds spent on a template
 defect). Classify the error first; fail loud on the deterministic class.
 
+## 16. Scope is necessity, not mention
+
+A surface the directive never names is still in scope when the result cannot genuinely
+operate, or cannot be held to account, without it — the make-or-break test decides, not
+the wording of the request. That reach covers every actor the result implies: its on-stage
+actors who use it, and its off-stage actors who run it (by domain, the platform operator,
+live-ops, the deployer, or the administrator — every built thing implies its own operating
+layer). Only what is merely nice to have stays out. Measured: a full pipeline run covered
+60/60 stated requirements yet produced no operator layer at all, because the directives
+bounded discovery by mention (2026-07-10).
+
 ## Appendix — settled decisions
 
 - Representation = workflow-doc@0.0.1 single path. The legacy JS/ESTree interp path was removed
