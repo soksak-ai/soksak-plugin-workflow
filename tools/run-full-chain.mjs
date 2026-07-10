@@ -245,18 +245,32 @@ while (b.phase === "plan-audit") {
   save(b);
 }
 
-if (b.phase === "body") {
+while (b.phase === "body") {
   const units = b.nodes.filter((n) => n.kind === "plan-unit" && n.badge === "o");
-  const done = new Set(b.nodes.filter((n) => n.kind === "code").map((n) => n.category));
+  // done = o 코드 보유 파일만 — x/f 반려 코드는 재생성 대상(이력은 노드로 보존).
+  const done = new Set(b.nodes.filter((n) => n.kind === "code" && n.badge === "o").map((n) => n.category));
+  b.bodyRounds = (b.bodyRounds || 0) + 1;
+  let attempted = 0;
   for (const u of units) {
-    if (done.has(u.category)) continue; // 멱등 — 같은 파일 code 존재 시 스킵
+    if (done.has(u.category)) continue;
+    attempted++;
+    // 반려 이력이 있으면 사유를 재작업 지시로 부기 — 같은 실패의 재생산 방지.
+    const rejected = b.nodes.filter((n) => n.kind === "code" && n.category === u.category && (n.badge === "x" || n.badge === "f"));
+    const rework = rejected.map((r) => {
+      try { return JSON.parse(r.result || "{}").reason || ""; } catch { return ""; }
+    }).filter(Boolean);
+    const pseudo = u.description + (rework.length
+      ? "\n\nPRIOR ATTEMPT REJECTED — the verifier's findings, every one of which THIS attempt must fix:\n- " + rework.join("\n- ")
+      : "");
     const { adds } = runStage(RESEARCH_DOC, "body", { directive: DIRECTIVE, chunkRef: "chunk",
-      title: u.title, file_path: u.category, pseudocode: u.description });
+      title: u.title, file_path: u.category, pseudocode: pseudo });
     addNodes(b, adds, ["code"]);
-    log(`body — ${u.category}`);
+    log(`body — ${u.category}${rework.length ? " (재작업)" : ""}`);
     verifyAllPending(b, ["code"]);
   }
-  b.phase = "done"; save(b);
+  if (attempted === 0) { b.phase = "done"; save(b); break; }
+  if (b.bodyRounds >= 3) { log("FAIL: body 재작업 상한 — 반려 잔존"); save(b); process.exit(2); }
+  save(b); // 같은 phase 재진입 — 이번 라운드 반려분 재생성
 }
 
 if (b.phase === "done") {
