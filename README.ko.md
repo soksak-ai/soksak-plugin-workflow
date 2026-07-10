@@ -50,3 +50,7 @@ agent 실행은 `claude -p` 로 위임하며, 인증 env(`ANTHROPIC_*` 또는 OA
 ---
 
 English guide: [README.md](README.md).
+
+## Pull 모드 (LLM spawn 0)
+
+저작 턴도 pull 가능: `run {idea, pull:true}` → 수행 → `run {idea, refined}`; 이후 `next`/`submit` 루프 — stage task 는 패키지로 발급되고 산출은 동일 발행 파이프로 재생된다. `skill/SKILL.md` 참조.

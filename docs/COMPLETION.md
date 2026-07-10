@@ -78,3 +78,12 @@ deferral on audit and promoted into D4/D6, 2026-07-08.)
   leases, usage skill, units green) — live proof pending (C2) · D5 done · D6 implemented,
   units green — live proof pending (C2b)
 - C1–C5 all open — not done.
+
+## Axis 2 — pull execution (implemented 2026-07-10, proof pending)
+
+Every LLM turn (refinement, stages, verification) can be pulled by an in-TUI executor and
+submitted back with zero LLM spawn: exec-stage `--assemble`/`--with-output`,
+generate-skeleton `--assemble`/`--with-refined`, `run {pull|refined}`, `next`/`submit`
+extended to stage tasks (shared assembly/consumption pipeline with the scheduler).
+Proof criterion: a full run from draft to exported files inside a TUI session with zero
+`claude -p`/`codex exec` processes observed — pending.

@@ -51,3 +51,7 @@ Call as `sok plugin.soksak-plugin-workflow.<command>` or via MCP.
 ---
 
 한국어 안내는 [README.ko.md](README.ko.md).
+
+## Pull mode (zero LLM spawn)
+
+All authoring turns can also be pulled: `run {idea, pull:true}` → perform → `run {idea, refined}`; then loop `next`/`submit` — stage tasks are issued as packages and outputs are replayed through the same publish pipeline. See `skill/SKILL.md`.
