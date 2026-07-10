@@ -82,6 +82,17 @@ exec-verify: build
 	  console.log("[exec-verify] OK — oxf:",o.oxf,"| origin:",(o.result&&o.result.origin)||"?");'
 
 # exec-hunt — hunt stage 실측(LLM): 요건 badge=o 시뮬 원장 → 누락 발굴(additions 0 도 정답).
+# exec-hunt-canon — 번들 정본(draft.doc.json)의 hunt 지시어를 인증 원장에 단발 실측(지시어 개정 검증용).
+exec-hunt-canon: build
+	@test -s $(OUT)/stage.jsonl || { echo "먼저 make e2e && make exec-stage"; exit 1; }
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(SOKSAK)/workflows/draft.doc.json","utf8")); \
+	  const inp=JSON.parse(require("child_process").execSync("node $(SOKSAK)/tools/assemble-ledger.mjs hunt $(OUT)/stage.jsonl $(IDEA_FILE)").toString()); \
+	  inp.skeleton=doc; process.stdout.write(JSON.stringify(inp));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --model $(MODEL) > $(OUT)/hunt-canon.jsonl
+	@node -e 'const fs=require("fs");const L=fs.readFileSync("$(OUT)/hunt-canon.jsonl","utf8").trim().split("\n").filter(Boolean).map(s=>JSON.parse(s)); \
+	  const adds=L.filter(e=>e.ev==="add"&&e.kind==="item"); \
+	  console.log(`[exec-hunt-canon] additions ${adds.length}:`); for(const a of adds) console.log("  -", a.title);'
+
 exec-hunt: build
 	@test -s $(OUT)/doc.json && test -s $(OUT)/stage.jsonl || { echo "먼저 make e2e && make exec-stage"; exit 1; }
 	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
