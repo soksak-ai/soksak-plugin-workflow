@@ -642,11 +642,24 @@ const NEXT_LEASE_MS = 30 * 60 * 1000; // CLI 실행자 수행 시간 상한 — 
 /** nextTick — CLI 실행자(외부 LLM)의 pull: ready **검증 노드** 1개의 실행 패키지를 반환하고 lease 를 잡는다.
  *  claude -p 호출 없음 — 시스템은 게이트 키퍼(검증·배지·전이는 submit 이 동일 파이프로). stage task 는
  *  spawn 소유(1차 범위 밖 — COMPLETION D4). deps: listNodes·getNode + resolveBody 의존(resolvePrompt·getPrompt). */
-export async function nextTick(deps, state, resolveBodyFn) {
+export async function nextTick(deps, state, resolveBodyFn, opts) {
   const st = state || makeReconcileState();
   const listed = await deps.listNodes();
   const nodes = (envData(listed) || {}).nodes || [];
-  const readyAll = pickReady(nodes).filter((n) => !leaseActive(st, n.id));
+  // chunk 스코프 — 멀티 덩어리 보드에서 실행자를 한 덩어리에 묶는다(팬아웃 스코핑).
+  const scope = opts && opts.chunk;
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const inScope = (n) => {
+    if (!scope) return true;
+    let p = n.id === scope ? undefined : n.parentId;
+    let guard = 0;
+    while (p && guard++ < 100) {
+      if (p === scope) return true;
+      p = (byId.get(p) || {}).parentId;
+    }
+    return false;
+  };
+  const readyAll = pickReady(nodes).filter((n) => !leaseActive(st, n.id) && inScope(n));
   const ready = readyAll.filter((n) => n.kind !== "task" && n.badge === "검수전");
   // 검증 노드가 없으면 stage task 도 pull 대상(v2) — 저작 턴까지 외부 실행자가 수행(LLM spawn 0).
   if (ready.length === 0 && deps.assembleStage) {
@@ -1404,15 +1417,17 @@ export default {
     ctx.subscriptions.push(
       app.commands.register("next", {
         description:
-          "CLI 실행자의 pull — ready 검증 노드 1개의 실행 패키지(조립된 지시어 prompt + 산출 schema)를 반환하고 lease 를 잡는다(기본 30분, spawn 경로 제외). 수행 후 submit 으로 제출하라. 준비 노드가 없으면 node:null.",
-        params: {},
+          "CLI 실행자의 pull — ready 노드 1개(검증 노드 우선, 없으면 stage task)의 실행 패키지(조립된 prompt + 산출 schema)를 반환하고 lease 를 잡는다(기본 30분, spawn 경로 제외). 수행 후 submit 으로 제출하라. 준비 노드가 없으면 node:null.",
+        params: {
+          chunk: { type: "string", description: "스코프 덩어리(칸반 노드 id) — 지정 시 그 자손만 발급(멀티 덩어리 보드의 팬아웃 스코핑)." },
+        },
         returns: "{ ok, node?: {id,kind,title}|null, prompt?, schema?, leaseMs?, message? }",
         message: (d) => (d.node ? `검증 노드 ${d.node.id} 실행 패키지를 발급했습니다` : "실행할 준비된 검증 노드가 없습니다"),
         hint: (d) => {
           if (!d.node) return [];
           return [{ cmd: `sok plugin.soksak-plugin-workflow.submit '{"node":"${d.node.id}","output":{"oxf":"o|x|f"}}'`, why: "prompt 를 직접 수행한 뒤 판정을 제출하면 spawn 경로와 같은 파이프를 탑니다" }];
         },
-        handler: async (_p, inv) => {
+        handler: async ({ chunk } = {}, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           const deps = {
             listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
@@ -1432,7 +1447,7 @@ export default {
             assembleStage: async (body) => execStage(app, runtime.bin, await execOpts(app, runtime), body, ["--assemble"]),
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
-          return await nextTick(deps, reconcileState, (body, d, vars) => resolveBody(body, deps, vars));
+          return await nextTick(deps, reconcileState, (body, d, vars) => resolveBody(body, deps, vars), { chunk });
         },
       }),
     );
