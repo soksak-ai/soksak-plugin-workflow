@@ -843,14 +843,19 @@ export async function issuerizeTick(deps, chunkId) {
     return false;
   };
   const confirmed = (n) => n.badge === "o" || n.badge === "x" || n.badge === "f";
-  // 멱등 — 이미 실코드화 산출(code) 또는 실행(task stage=body)이 있으면 거부.
-  const bodyTask = (n) => {
+  // 멱등·재작업(러너 동형) — 파일의 done = **o 코드**. 유닛별로: 진행 중 body task(todo) 또는 o 코드가
+  // 있으면 커버, f/x 코드뿐이면 재작업 대상(반려 사유를 지시로 부기해 재발행). 전 유닛 커버 시에만 거부.
+  const bodyTasks = nodes.filter((n) => {
     if (n.kind !== "task" || !descends(n)) return false;
     try { return JSON.parse(n.body || "").stage === "body"; } catch { return false; }
-  };
-  if (nodes.some((n) => (n.kind === "code" && descends(n)) || bodyTask(n))) {
-    return { ok: false, code: "ALREADY_DONE", message: "이미 이슈라이즈된 덩어리(실코드화 진행/완료) — 멱등 거부" };
-  }
+  });
+  const codes = nodes.filter((n) => n.kind === "code" && descends(n));
+  const coveredFile = (file) =>
+    codes.some((c) => c.category === file && c.badge === "o") ||
+    bodyTasks.some((t) => {
+      try { return JSON.parse(t.body || "").args?.file_path === file && t.status !== "done"; } catch { return false; }
+    }) ||
+    codes.some((c) => c.category === file && !confirmed(c)); // 검수전 코드 = 검증 대기(재발행 금지)
   const facts = nodes.filter((n) => n.kind === "fact" && descends(n));
   if (facts.length === 0) return { ok: false, code: "GATE_REQUIRED", message: "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" };
   const unverifiedFacts = facts.filter((n) => !confirmed(n));
@@ -860,12 +865,24 @@ export async function issuerizeTick(deps, chunkId) {
   const unverifiedUnits = units.filter((n) => !confirmed(n));
   if (unverifiedUnits.length) return { ok: false, code: "GATE_REQUIRED", message: `유닛 미검증 ${unverifiedUnits.length}건(검수전) — plan 검증 완료 후 이슈라이즈` };
   const directive = chunk.description || "";
+  const pending = units.filter((n) => n.badge === "o" && !coveredFile(n.category || ""));
+  if (pending.length === 0) {
+    return { ok: false, code: "ALREADY_DONE", message: "이미 이슈라이즈된 덩어리(전 유닛 실코드화 진행/완료) — 멱등 거부" };
+  }
   let issued = 0;
-  for (const u of units.filter((n) => n.badge === "o")) {
+  for (const u of pending) {
+    // 반려 이력(f/x 코드)이 있으면 사유를 재작업 지시로 부기 — 같은 실패의 재생산 방지(러너 동형).
+    const rejected = codes.filter((c) => c.category === (u.category || "") && (c.badge === "f" || c.badge === "x"));
+    const rework = rejected
+      .map((c) => { try { return JSON.parse(c.result || "{}").reason || ""; } catch { return ""; } })
+      .filter(Boolean);
+    const pseudo = (u.description || "") + (rework.length
+      ? "\n\nPRIOR ATTEMPT REJECTED — the verifier's findings, every one of which THIS attempt must fix:\n- " + rework.join("\n- ")
+      : "");
     const body = JSON.stringify({
       workflow: "research",
       stage: "body",
-      args: { title: u.title, file_path: u.category || "", pseudocode: u.description || "", chunkRef: chunkId, directive },
+      args: { title: u.title, file_path: u.category || "", pseudocode: pseudo, chunkRef: chunkId, directive },
     });
     const r = await deps.addNode({
       title: `실코드화: ${u.category || u.title}`,
