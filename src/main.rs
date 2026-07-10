@@ -235,6 +235,8 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     let mut lang: Option<Language> = None;
     let mut allow_tools: Vec<String> = vec![];
     let mut model_override: Option<String> = None;
+    let mut assemble = false; // --assemble: LLM 0 — agent 턴의 {prompt, schema} 패키지만 stdout(pull 실행자용)
+    let mut with_output: Option<Value> = None; // --with-output: LLM 0 — 외부 실행자 산출을 agent 턴에 주입해 발행 시퀀스 재생
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
@@ -250,6 +252,12 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
             "--model" => {
                 i += 1;
                 model_override = Some(argv.get(i).ok_or("--model 값 누락")?.clone());
+            }
+            "--assemble" => assemble = true,
+            "--with-output" => {
+                i += 1;
+                let raw = argv.get(i).ok_or("--with-output 값(JSON) 누락")?;
+                with_output = Some(serde_json::from_str(raw).map_err(|e| format!("--with-output JSON 파싱: {e}"))?);
             }
             other => return Err(format!("exec-stage: 미지 인자 {other:?}")),
         }
@@ -267,11 +275,11 @@ fn run_exec_stage(argv: &[String]) -> Result<(), String> {
         if !soksak_sidecar_workflow::doc_exec::is_doc(&doc) {
             return Err(format!("번들 워크플로 {name:?} 가 workflow-doc@0.0.1 아님"));
         }
-        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
+        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override, assemble, with_output.clone());
     }
     // workflow-doc@0.0.1 — task body 의 skeleton 슬롯에 doc 이 임베드돼 오면(main.js 는 무판별 relay) doc_exec 경로.
     if let Some(doc) = input.get("skeleton").filter(|s| soksak_sidecar_workflow::doc_exec::is_doc(s)).cloned() {
-        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override);
+        return run_exec_stage_doc(&doc, &stage, &input, lang, allow_tools, model_override, assemble, with_output.clone());
     }
     // doc 단일 경로(M5e) — 레거시 skeleton(ESTree)/interp 는 backup/legacy-interp/ 로 이동, 비-doc 입력은 명시 거부.
     Err("exec-stage 입력에 workflow(번들 이름) 또는 skeleton(workflow-doc@0.0.1) 필요 — 레거시 program(ESTree AST) 경로는 제거됨(backup/legacy-interp/)".to_string())
@@ -286,6 +294,8 @@ fn run_exec_stage_doc(
     lang: Option<Language>,
     allow_tools: Vec<String>,
     model_override: Option<String>,
+    assemble: bool,
+    with_output: Option<Value>,
 ) -> Result<(), String> {
     // args = input.args + stage + lang 주입(interp 경로와 동일 조립 — 워크플로가 args.ledger/chunkRef 를 읽는다).
     let mut args_obj = match input.get("args") {
@@ -297,6 +307,47 @@ fn run_exec_stage_doc(
         args_obj.insert("lang".to_string(), Value::String(l.code.clone()));
     }
     let args_json = Value::Object(args_obj);
+    // --assemble: agent 턴의 {prompt, schema} 패키지만 산출(LLM 0, 인증 불요) — pull 실행자가 자기 턴에 수행.
+    if assemble {
+        let mut captured: Option<Value> = None;
+        let mut cap_fn = |prompt: &str, schema: Option<&Value>, label: &str| -> Result<Value, String> {
+            captured = Some(serde_json::json!({ "prompt": build_prompt_with_schema(prompt, None, lang.as_ref()), "schema": schema, "label": label }));
+            Err("__ASSEMBLE_STOP__".into())
+        };
+        match soksak_sidecar_workflow::doc_exec::run(doc, stage, &{
+            let mut a = match input.get("args") { Some(Value::Object(m)) => m.clone(), _ => Map::new() };
+            a.insert("stage".to_string(), Value::String(stage.to_string()));
+            if let Some(l) = &lang { a.insert("lang".to_string(), Value::String(l.code.clone())); }
+            Value::Object(a)
+        }, &mut cap_fn) {
+            Ok(_) => return Err(format!("--assemble: stage {stage:?} 에 agent 턴이 없다(패키지화 대상 아님)")),
+            Err(e) if e.contains("__ASSEMBLE_STOP__") => {
+                let pkg = captured.ok_or("--assemble: 캡처 실패")?;
+                println!("{}", serde_json::to_string(&pkg).map_err(|e| e.to_string())?);
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // --with-output: 외부 실행자(TUI 에이전트)의 산출을 agent 턴에 주입 — 발행 시퀀스만 재생(LLM 0, 인증 불요).
+    if let Some(out) = with_output {
+        let mut used = false;
+        let mut inj_fn = |_prompt: &str, schema: Option<&Value>, label: &str| -> Result<Value, String> {
+            if used {
+                return Err(format!("--with-output: stage 에 agent 턴이 2개 이상({label:?}) — 주입 모드는 단일 턴 전제"));
+            }
+            used = true;
+            if let Some(sc) = schema {
+                check_required_keys(sc, &out).map_err(|e| format!("--with-output 산출이 schema 위반: {e}"))?;
+            }
+            Ok(out.clone())
+        };
+        let mut args_obj = match input.get("args") { Some(Value::Object(m)) => m.clone(), _ => Map::new() };
+        args_obj.insert("stage".to_string(), Value::String(stage.to_string()));
+        if let Some(l) = &lang { args_obj.insert("lang".to_string(), Value::String(l.code.clone())); }
+        let (events, result) = soksak_sidecar_workflow::doc_exec::run(doc, stage, &Value::Object(args_obj), &mut inj_fn)?;
+        return emit_stage_output(stage, events, result);
+    }
     let model = model_override
         .or_else(|| input.get("model").and_then(|m| m.as_str()).map(String::from))
         .unwrap_or_else(|| DEFAULT_MODEL.to_string());
@@ -323,8 +374,17 @@ fn run_exec_stage_doc(
         }
     };
     let (events, result) = soksak_sidecar_workflow::doc_exec::run(doc, stage, &args_json, &mut agent_fn)?;
+    emit_stage_output(stage, events, result)
+}
+
+/// emit_stage_output — stage 실행 산출의 stdout 계약(정본 LLM 경로와 --with-output 재생이 공유).
+/// generate 는 DraftDoc build+validate(위반=거부) 1문서, 그 외는 NodeEvent 라인들+result 라인.
+fn emit_stage_output(
+    stage: &str,
+    events: Vec<soksak_sidecar_workflow::emit_host::NodeEvent>,
+    result: Value,
+) -> Result<(), String> {
     if stage == "generate" {
-        // interp 경로와 동일한 generate 배치 계약: 이벤트 → DraftDoc build → validate(위반=거부) → 1문서 stdout.
         let mut ddoc = soksak_sidecar_workflow::draft_doc::build(&events)?;
         if let Some(Value::String(t)) = result.get("chunkTitle") {
             if !t.is_empty() {
@@ -347,6 +407,52 @@ fn run_exec_stage_doc(
         }
         let out = json!({ "ev": "result", "value": result });
         println!("{}", serde_json::to_string(&out).map_err(|e| e.to_string())?);
+    }
+    Ok(())
+}
+
+/// check_required_keys — --with-output 산출의 최소 스키마 검증(required 재귀). 전체 검증은
+/// 하류 게이트(draft validate·badge 파이프) 몫 — 여기선 필수 키 부재를 fail-loud 로만 막는다.
+
+#[cfg(test)]
+mod tests_pull_modes {
+    use super::*;
+
+    #[test]
+    fn required_keys_checked_recursively() {
+        let schema: Value = serde_json::json!({
+            "type": "object", "required": ["facts"],
+            "properties": { "facts": { "type": "array", "items": { "type": "object", "required": ["title"], "properties": { "title": {"type": "string"} } } } }
+        });
+        assert!(check_required_keys(&schema, &serde_json::json!({"facts": [{"title": "a"}]})).is_ok());
+        assert!(check_required_keys(&schema, &serde_json::json!({})).is_err(), "톱레벨 required 부재");
+        assert!(check_required_keys(&schema, &serde_json::json!({"facts": [{}]})).is_err(), "항목 required 부재");
+    }
+}
+
+fn check_required_keys(schema: &Value, value: &Value) -> Result<(), String> {
+    if let Some(req) = schema.get("required").and_then(|r| r.as_array()) {
+        for k in req {
+            if let Some(key) = k.as_str() {
+                if value.get(key).is_none() {
+                    return Err(format!("required 키 부재: {key:?}"));
+                }
+            }
+        }
+    }
+    if let (Some(props), Some(obj)) = (schema.get("properties").and_then(|p| p.as_object()), value.as_object()) {
+        for (k, sub) in props {
+            if let Some(v) = obj.get(k) {
+                if !v.is_null() {
+                    check_required_keys(sub, v)?;
+                }
+            }
+        }
+    }
+    if let (Some(items), Some(arr)) = (schema.get("items"), value.as_array()) {
+        for v in arr {
+            check_required_keys(items, v)?;
+        }
     }
     Ok(())
 }

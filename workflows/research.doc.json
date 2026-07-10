@@ -310,7 +310,8 @@
       "type": "object",
       "required": [
         "complete",
-        "verdict"
+        "verdict",
+        "gaps"
       ],
       "properties": {
         "complete": {
