@@ -107,7 +107,7 @@ export function execResultToEdit(execOut) {
  *  noVerdict: 항목별 무판정 연속 횟수(상한 도달 시 badge=f 확정 — 무한 LLM 재실행 루프 차단).
  *  fails: 노드별 연속 실패 횟수(ready 선택에서 실패 최소 노드 우선 — head-of-line 기아 방지). */
 export function makeReconcileState() {
-  return { noVerdict: new Map(), fails: new Map(), leases: new Map() };
+  return { noVerdict: new Map(), fails: new Map(), leases: new Map(), stageCtx: new Map() };
 }
 
 /** leaseActive — CLI 실행자(next)가 잡은 노드인가(만료 lease 는 지연 정리). */
@@ -452,55 +452,33 @@ async function resolveBody(body, deps, extraVars) {
 /** reconcileStage — kind=task 노드를 exec-stage 로 실행 → 자식 노드 발행 + 덩어리 갱신 + status=done(멱등) + poke.
  *  exec-stage 산출 = { children:[add 이벤트…], result:<워크플로 return> }. 실패는 ok:false(노드 미변경)→backoff.
  *  자식 부모 ref 해결: 배치 keyOf(로컬 emit id→칸반 id) / 기존 칸반 id(chunkRef)는 그대로. addNode(params)→칸반 id. */
-async function reconcileStage(deps, target, body, nodes) {
-  // hunt/audit 는 ledger(덩어리 자손 항목+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
+/** stagePublishedMarker — stage 발행-완료 마커(멱등 가드) 판정(순수). 재진입/pull 발급 양쪽이 공유. */
+export function stagePublishedMarker(target, body, stageName, nodes) {
+  if (!Array.isArray(nodes) || !target.parentId) return false;
+  const huntBlocked = new Set(target.blockedBy || []);
+  return stageName === "generate"
+    ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id)
+    : stageName === "hunt"
+      ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item" && !huntBlocked.has(n.id))
+      : stageName === "research"
+        ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "fact")
+        : stageName === "plan"
+          ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "plan-unit")
+          : stageName === "body"
+            ? (() => {
+                let fp;
+                try { fp = JSON.parse(body).args?.file_path; } catch { fp = undefined; }
+                return !!fp && nodes.some((n) => n && n.parentId === target.parentId && n.kind === "code" && n.category === fp);
+              })()
+            : false;
+}
+
+/** buildStageInput — stage 입력 조립(원장/facts 주입, ground=o 의미론 포함). spawn 과 pull 이 공유.
+ *  반환: { stageBody, ledger } | { error: <reconcile 반환형> } */
+export async function buildStageInput(deps, target, body, stageName) {
   let stageBody = body;
-  let stageName;
-  try { stageName = JSON.parse(body).stage; } catch { /* body 가 exec-stage 입력 아님 */ }
-  // ② 멱등 가드 — 재진입(발행 완료 후 status=done commit 실패/크래시 → 재pick)에서 execStage 재실행·중복 발행 차단.
-  // stage 별 "발행 완료 마커"(이미 발행됐음을 보이는 덩어리 자손)를 찾으면 execStage 안 돌리고 status=done 만 멱등 재확정.
-  //  - generate: 발행 끝에 Hunt/Audit task 를 덩어리 자식으로 낸다 → 덩어리에 (이 노드 말고) 다른 task 자식이 마커.
-  //  - hunt: 추가항목을 덩어리 직속 item 으로 낸다. 평탄(28febc9)에선 generate 항목도 덩어리 직속이므로
-  //    "직속 item 존재"만으론 항상 참(오발 — hunt 가 영영 안 돎). hunt.blockedBy(=generate 항목 칸반 id 동결 집합)
-  //    **차집합**이 마커다: blockedBy 밖의 직속 item = hunt 가 발행한 추가항목.
-  //    (잔여 경계: 추가항목 0개로 끝난 hunt 가 status=done 전 크래시하면 재실행 — LLM 1회 재호출일 뿐 발행 중복 없음.)
-  //  - audit: 노드 0개 발행(verdict 만 덩어리 result 로) → 재실행해도 중복 노드 0 → 가드 불필요.
-  // 자식 멱등키는 둘 수 없다(kanban node.add 가 매번 새 id; 비결정 generate 는 콘텐츠 dedup 불가) — 발행-완료 마커로
-  // 전량 재발행만 막는 설계. (남는 경계: 마커 발행 *전* 중간 크래시의 부분-발행 원자성 — kanban node.add 멱등키 필요. 후속.)
-  if (Array.isArray(nodes) && target.parentId) {
-    const huntBlocked = new Set(target.blockedBy || []);
-    const published =
-      stageName === "generate"
-        ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "task" && n.id !== target.id)
-        : stageName === "hunt"
-          ? nodes.some((n) => n && n.parentId === target.parentId && n.kind === "item" && !huntBlocked.has(n.id))
-          : stageName === "research"
-            ? // research 는 fact 를 최초 발행하는 유일한 출처 — 덩어리 직속 fact 존재=발행 완료 마커.
-              nodes.some((n) => n && n.parentId === target.parentId && n.kind === "fact")
-            : stageName === "plan"
-              ? // plan 은 plan-unit 을 최초 발행하는 유일한 출처 — 동일 패턴.
-                nodes.some((n) => n && n.parentId === target.parentId && n.kind === "plan-unit")
-              : stageName === "body"
-                ? // body 는 자기 file_path 의 code 노드를 최초 발행 — 같은 경로 code 자손이 마커.
-                  (() => {
-                    let fp;
-                    try { fp = JSON.parse(body).args?.file_path; } catch { fp = undefined; }
-                    return !!fp && nodes.some((n) => n && n.parentId === target.parentId && n.kind === "code" && n.category === fp);
-                  })()
-                : false;
-    if (published) {
-      await deps.editNode(target.id, { status: "done" });
-      await deps.poke();
-      return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
-    }
-  }
-  // hunt/classify/audit/research/plan 은 ledger(덩어리 자손 요건+id+배지) materialize 해 exec-stage args 에 주입(generate 는 불필요).
-  // classify 는 완성 원장(hunt 후)을 보고 각 항목 id 에 category 를 배정하므로 hunt/audit 와 동일 주입 대상.
-  // research(기초지식 발굴)는 인증 요건 원장이 발굴 근거. plan(한턴 슈도코드화)은 요건 원장 + fact 원장(args.facts) 둘 다.
   let ledger;
   const LEDGER_STAGES = new Set(["hunt", "classify", "audit", "research", "plan", "design-interface", "design-domain", "design-criteria"]);
-  // ground 의미론: plan·design 체인의 요건 원장·facts 는 **o 확정만**("verified facts" = o; f=치명, x=반려 유지).
-  // hunt(중복 회피)·classify(전수 배정)·audit(f 집계)·research 는 전 badge 원장이 필요해 필터하지 않는다.
   const O_ONLY = new Set(["plan", "design-interface", "design-domain", "design-criteria"]);
   if (LEDGER_STAGES.has(stageName) && deps.materializeLedger && target.parentId) {
     try {
@@ -513,21 +491,17 @@ async function reconcileStage(deps, target, body, nodes) {
       }
       stageBody = JSON.stringify(inp);
     } catch (e) {
-      // classify(배정 검증)·audit(f 집계=인증 계산)·research(발굴 근거=인증 원장)·plan(슈도코드 입력=원장)은
-      // 원장이 필수 — 없으면 거부(backoff). hunt 만 ledger 없이 진행 가능(빈 원장='중복 회피 정보 없음'일 뿐).
       if (stageName !== "hunt") {
-        return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` };
+        return { error: { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: `원장 materialize 실패(${stageName}): ${String((e && e.message) || e)}` } };
       }
     }
   }
-  let staged;
-  try {
-    staged = await deps.execStage(stageBody);
-  } catch (e) {
-    return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: String((e && e.message) || e) };
-  }
-  // 자식 stage 노드(hunt/classify/audit·plan)에 워크플로 전파 — 이 task 입력 body 에서 추출(같은 골격 재실행).
-  // workflowRef(번들 정본 이름)가 있으면 그것을, 없으면 임베드 skeleton 을 전파.
+  return { stageBody, ledger };
+}
+
+/** consumeStageOutput — stage 산출(draftDoc | children+result)의 소비: 발행·classify 검증·audit 상태기계·done·poke.
+ *  spawn(reconcileStage)과 pull(submitTick stage 제출)이 공유하는 단일 파이프. */
+export async function consumeStageOutput(deps, target, body, stageName, ledger, staged) {
   let childCtx;
   try {
     const inp = JSON.parse(body);
@@ -631,6 +605,26 @@ async function reconcileStage(deps, target, body, nodes) {
   return { ok: true, processed: 1, id: target.id, stage: true, published: children.length, assigned };
 }
 
+async function reconcileStage(deps, target, body, nodes) {
+  let stageName;
+  try { stageName = JSON.parse(body).stage; } catch { /* body 가 exec-stage 입력 아님 */ }
+  // 멱등 가드 — 재진입(발행 완료 후 status=done commit 실패/크래시 → 재pick)에서 재실행·중복 발행 차단.
+  if (stagePublishedMarker(target, body, stageName, nodes)) {
+    await deps.editNode(target.id, { status: "done" });
+    await deps.poke();
+    return { ok: true, processed: 0, id: target.id, stage: true, published: 0, idempotent: true };
+  }
+  const built = await buildStageInput(deps, target, body, stageName);
+  if (built.error) return built.error;
+  let staged;
+  try {
+    staged = await deps.execStage(built.stageBody);
+  } catch (e) {
+    return { ok: false, processed: 0, id: target.id, code: "INTERNAL", message: String((e && e.message) || e) };
+  }
+  return await consumeStageOutput(deps, target, body, stageName, built.ledger, staged);
+}
+
 /** extractOxf — 검증 산출에서 oxf 판정 추출(exec_one::extract_oxf 의 JS 미러 — oxf|verdict, o/x/f, trim·소문자). */
 export function extractOxf(output) {
   for (const key of ["oxf", "verdict"]) {
@@ -652,7 +646,44 @@ export async function nextTick(deps, state, resolveBodyFn) {
   const st = state || makeReconcileState();
   const listed = await deps.listNodes();
   const nodes = (envData(listed) || {}).nodes || [];
-  const ready = pickReady(nodes).filter((n) => n.kind !== "task" && n.badge === "검수전" && !leaseActive(st, n.id));
+  const readyAll = pickReady(nodes).filter((n) => !leaseActive(st, n.id));
+  const ready = readyAll.filter((n) => n.kind !== "task" && n.badge === "검수전");
+  // 검증 노드가 없으면 stage task 도 pull 대상(v2) — 저작 턴까지 외부 실행자가 수행(LLM spawn 0).
+  if (ready.length === 0 && deps.assembleStage) {
+    for (const t of readyAll.filter((n) => n.kind === "task" && n.status !== "done")) {
+      const tf = await deps.getNode(t.id);
+      const tn = (envData(tf) || {}).node || {};
+      let stageName;
+      try { stageName = JSON.parse(tn.body || "").stage; } catch { continue; } // exec-stage 입력이 아닌 task 는 pull 대상 아님
+      if (!stageName) continue;
+      if (stagePublishedMarker({ ...t, parentId: tn.parentId ?? t.parentId, blockedBy: tn.blockedBy ?? t.blockedBy }, tn.body, stageName, nodes)) {
+        // 이미 발행 완료(재진입) — done 멱등 확정 후 다음 후보.
+        await deps.editNode(t.id, { status: "done" });
+        if (deps.poke) await deps.poke();
+        continue;
+      }
+      const built = await buildStageInput(deps, { ...t, parentId: tn.parentId ?? t.parentId }, tn.body, stageName);
+      if (built.error) return { ok: false, code: built.error.code || "INTERNAL", message: built.error.message };
+      let asm;
+      try {
+        asm = await deps.assembleStage(built.stageBody);
+      } catch (e) {
+        return { ok: false, code: "INTERNAL", message: `stage 패키지 조립 실패(${t.id}): ${String((e && e.message) || e)}` };
+      }
+      const pkg = asm && asm.assembled;
+      if (!pkg || !pkg.prompt) return { ok: false, code: "INTERNAL", message: `stage 패키지에 prompt 없음(${t.id})` };
+      st.leases.set(t.id, Date.now() + NEXT_LEASE_MS);
+      st.stageCtx.set(t.id, { stageBody: built.stageBody, stageName, ledger: built.ledger, body: tn.body });
+      return {
+        ok: true,
+        node: { id: t.id, kind: "task", stage: stageName, title: tn.title || "" },
+        prompt: pkg.prompt,
+        schema: pkg.schema,
+        leaseMs: NEXT_LEASE_MS,
+      };
+    }
+    return { ok: true, node: null, message: "실행할 준비된 노드가 없습니다" };
+  }
   if (ready.length === 0) return { ok: true, node: null, message: "실행할 준비된 검증 노드가 없습니다" };
   const target = ready[0];
   const full = await deps.getNode(target.id);
@@ -690,6 +721,37 @@ export async function submitTick(deps, state, nodeId, output) {
   const full = await deps.getNode(nodeId);
   const node = (envData(full) || {}).node;
   if (!node) return { ok: false, code: "NOT_FOUND", message: `노드 미존재: ${nodeId}` };
+  if (node.kind === "task") {
+    // stage task 제출(pull v2) — 산출을 발행 시퀀스에 주입, 소비는 spawn 과 동일 파이프(consumeStageOutput).
+    if (node.status === "done") return { ok: false, code: "ALREADY_DONE", message: "이미 완료된 stage — 멱등 거부" };
+    if (!deps.execStageWithOutput) return { ok: false, code: "INTERNAL", message: "execStageWithOutput 미배선" };
+    if (output == null || typeof output !== "object") {
+      return { ok: false, code: "INVALID_INPUT", message: "stage 산출(output JSON) 필수" };
+    }
+    let ctx = st.stageCtx.get(nodeId);
+    if (!ctx) {
+      // lease 만료/재기동 후 제출 — 같은 조립 규칙으로 재조립(멱등 마커는 consume 전에 재검).
+      let stageName;
+      try { stageName = JSON.parse(node.body || "").stage; } catch { stageName = undefined; }
+      if (!stageName) return { ok: false, code: "INVALID_INPUT", message: "stage task 아님(body 에 stage 없음)" };
+      const built = await buildStageInput(deps, { id: nodeId, parentId: node.parentId, blockedBy: node.blockedBy }, node.body, stageName);
+      if (built.error) return built.error;
+      ctx = { stageBody: built.stageBody, stageName, ledger: built.ledger, body: node.body };
+    }
+    let staged;
+    try {
+      staged = await deps.execStageWithOutput(ctx.stageBody, output);
+    } catch (e) {
+      return { ok: false, code: "INTERNAL", message: `stage 산출 재생 실패: ${String((e && e.message) || e)}` };
+    }
+    const target = { id: nodeId, parentId: node.parentId, blockedBy: node.blockedBy };
+    const consumed = await consumeStageOutput(deps, target, ctx.body, ctx.stageName, ctx.ledger, staged);
+    if (consumed && consumed.ok) {
+      st.leases.delete(nodeId);
+      st.stageCtx.delete(nodeId);
+    }
+    return consumed;
+  }
   if (node.badge === "o" || node.badge === "x" || node.badge === "f") {
     return { ok: false, code: "ALREADY_DONE", message: `이미 확정된 노드(badge=${node.badge}) — 멱등 거부` };
   }
@@ -1010,14 +1072,15 @@ function execOne(app, bin, opts, body) {
 
 /** exec-stage spawn — stdin {skeleton, stage, args} 쓰고 stdout(자식 {ev:add} JSON line + 최종 {ev:result})
  *  파싱 → { children:[add…], result }. lease=프로세스-생존: onExit 까지 대기. env=인증(claude 실행하므로 필요). */
-function execStage(app, bin, opts, body) {
+function execStage(app, bin, opts, body, extraArgs) {
   return new Promise((resolve, reject) => {
     let out = "";
     let err = "";
     let seen = 0; // 진행 델타 증분 스캔 커서(축적 파싱과 별개 — 최종 판정은 exit 에서 그대로)
     const dec = new TextDecoder();
     const errDec = new TextDecoder();
-    const { cmd, args } = buildSpawnCmd(bin, ["exec-stage", "--lang", "ko"]);
+    const { cmd, args } = buildSpawnCmd(bin, ["exec-stage", "--lang", "ko", ...(extraArgs || [])]);
+    const assembleMode = Array.isArray(extraArgs) && extraArgs.includes("--assemble");
     Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then(async (handle) => {
         app.process.onData(handle, (b) => {
@@ -1053,6 +1116,7 @@ function execStage(app, bin, opts, body) {
           if (whole.startsWith("{")) {
             try {
               const one = JSON.parse(whole);
+              if (assembleMode) return resolve({ assembled: one }); // --assemble = {label,prompt,schema} 단일 JSON
               if (one && one.kind === "draft-chunk") return resolve({ draftDoc: one });
             } catch {
               /* 단일 JSON 아님 → 스트림 파싱으로 폴백 */
@@ -1339,8 +1403,20 @@ export default {
           const deps = {
             listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
             getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
+            editNode: (id, fields) => exec(KANBAN + ".node.edit", { node: id, ...fields }),
             resolvePrompt: (hash, vars, refs) => exec(KANBAN + ".prompt.resolve", { hash, vars, refs }),
             getPrompt: (hash) => exec(KANBAN + ".prompt.get", { hash }),
+            materializeLedger: async (chunkId) => {
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId);
+            },
+            materializeFacts: async (chunkId) => {
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId, "fact");
+            },
+            // stage 패키지 조립 — 사이드카 --assemble(LLM 0, 인증 불요).
+            assembleStage: async (body) => execStage(app, runtime.bin, await execOpts(app, runtime), body, ["--assemble"]),
+            poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
           return await nextTick(deps, reconcileState, (body, d, vars) => resolveBody(body, deps, vars));
         },
@@ -1363,8 +1439,25 @@ export default {
         handler: async ({ node, output }, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
           const deps = {
+            listNodes: () => exec(KANBAN + ".node.list", { limit: 100000 }),
             getNode: (id) => exec(KANBAN + ".node.get", { node: id }),
             editNode: (id, fields) => exec(KANBAN + ".node.edit", { node: id, ...fields }),
+            addNode: async (params) => {
+              const r = await exec(KANBAN + ".node.add", params);
+              return (envData(r) || {}).nodeId;
+            },
+            materializeLedger: async (chunkId) => {
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId);
+            },
+            materializeFacts: async (chunkId) => {
+              const listed = await exec(KANBAN + ".node.list", { limit: 100000 });
+              return buildLedger((envData(listed) || {}).nodes || [], chunkId, "fact");
+            },
+            putPrompt: (value) => exec(KANBAN + ".prompt.put", { value }),
+            // stage 산출 주입 재생 — 사이드카 --with-output(LLM 0, 인증 불요).
+            execStageWithOutput: async (body, out) => execStage(app, runtime.bin, await execOpts(app, runtime), body, ["--with-output", JSON.stringify(out)]),
+            progress: (cmd, delta) => app.events?.progress?.(cmd, delta),
             poke: () => app.scheduler?.poke?.(RECONCILE_ID),
           };
           return await submitTick(deps, reconcileState, node, output);

@@ -1484,3 +1484,48 @@ test("reconcileStage — plan/design 주입 원장은 o 확정만(ground 의미�
   assert.deepEqual(captured.args.ledger.map((e) => e.id), ["i1"], "plan 요건 원장 = o 만");
   assert.deepEqual(captured.args.facts.map((e) => e.id), ["i1"], "plan ground = o 만");
 });
+
+
+test("pull v2 — stage task 발급(next)·산출 제출(submit)이 spawn 과 동일 소비 파이프를 탄다", async () => {
+  const chunk = { id: "chunk", kind: "chunk" };
+  const task = { id: "t1", kind: "task", status: "todo", blockedBy: [], parentId: "chunk",
+    body: JSON.stringify({ workflow: "research", stage: "research", args: { directive: "d", chunkRef: "chunk" } }) };
+  const items = [{ id: "i1", kind: "item", badge: "o", parentId: "chunk", title: "요건A" }];
+  const nodes = [chunk, task, ...items];
+  const added = [];
+  const edits = [];
+  let poked = 0;
+  const deps = {
+    listNodes: async () => ({ ok: true, data: { nodes } }),
+    getNode: async (id) => ({ ok: true, data: { node: nodes.find((n) => n.id === id) } }),
+    editNode: async (id, fields) => { edits.push([id, fields]); return { ok: true }; },
+    addNode: async (p) => { added.push(p); return "k" + added.length; },
+    materializeLedger: async () => [{ id: "i1", title: "요건A", badge: "o" }],
+    materializeFacts: async () => [],
+    putPrompt: async () => ({ ok: true, data: { hash: "h" } }),
+    assembleStage: async (body) => {
+      assert.ok(body.includes("요건A"), "조립 입력에 원장 주입");
+      return { assembled: { label: "research", prompt: "RESEARCH PROMPT", schema: { required: ["facts"] } } };
+    },
+    execStageWithOutput: async (body, out) => {
+      assert.equal(out.facts.length, 1, "산출이 주입됨");
+      return { children: [{ ev: "add", id: "fact0", kind: "fact", title: out.facts[0].title, badge: "검수전" }], result: null };
+    },
+    poke: async () => { poked += 1; },
+  };
+  const st = makeReconcileState();
+  const pkg = await nextTick(deps, st, async () => "{}");
+  assert.equal(pkg.node.kind, "task", "검증 노드가 없으면 stage task 발급");
+  assert.equal(pkg.node.stage, "research");
+  assert.equal(pkg.prompt, "RESEARCH PROMPT");
+  const res = await submitTick(deps, st, "t1", { facts: [{ title: "fact제목", description: "d", origin: "agent", area: "framework" }] });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(added.length, 1, "자식 fact 발행");
+  assert.ok(edits.some(([id, f]) => id === "t1" && f.status === "done"), "task done");
+  assert.ok(poked >= 1, "poke");
+  const again = await submitTick(deps, st, "t1", { facts: [] });
+  // 재제출 — task 가 done 이므로 멱등 거부(getNode 가 갱신 status 를 주도록 반영)
+  nodes.find((n) => n.id === "t1").status = "done";
+  const again2 = await submitTick(deps, st, "t1", { facts: [] });
+  assert.equal(again2.code, "ALREADY_DONE");
+});
