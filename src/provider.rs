@@ -158,7 +158,7 @@ fn event_signals_529(ev: &serde_json::Value) -> bool {
 fn is_529(err: &str) -> bool {
     // transient 사전(§15): API 혼잡 + 연결단절 부류 — 재시도 대상. 결정적 실패는 여기 넣지 않는다.
     let e = err.to_ascii_lowercase();
-    ["529", "overloaded", "temporarily", "wait longer", "econnreset", "econnrefused", "unable to connect", "socket hang up", "connection closed", "429", "rate limit"]
+    ["529", "overloaded", "temporarily", "wait longer", "econnreset", "econnrefused", "unable to connect", "socket hang up", "connection closed", "429", "rate limit", "usage limit"]
         .iter().any(|p| e.contains(p))
 }
 

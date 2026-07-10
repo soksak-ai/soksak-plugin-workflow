@@ -57,7 +57,7 @@ function callSidecar(args, stdinObj) {
     const r = spawnSync(BIN, args, { input: JSON.stringify(stdinObj), encoding: "utf8", maxBuffer: 64 * 1024 * 1024, timeout: 30 * 60 * 1000, killSignal: "SIGKILL" });
     if (r.status === 0) return r.stdout;
     const err = (r.signal ? `timeout/${r.signal} ` : "") + (r.stderr || "").slice(-400);
-    if (!/529|overloaded|temporarily|wait longer|timeout|SIGKILL|ECONNRESET|ECONNREFUSED|Unable to connect|socket hang up|Connection closed/i.test(err)) {
+    if (!/529|overloaded|temporarily|wait longer|timeout|SIGKILL|usage limit|ECONNRESET|ECONNREFUSED|Unable to connect|socket hang up|Connection closed/i.test(err)) {
       throw new Error(`결정적 실패: ${args[0]} — ${err}`);
     }
     if (n >= 8) throw new Error(`transient 8회 소진: ${args[0]}`);
