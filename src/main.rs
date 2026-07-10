@@ -491,6 +491,8 @@ fn sidecar_root() -> Option<std::path::PathBuf> {
 /// 저작 게이트 = JSON 파싱(parse_json_lenient — 펜스/prose 방어) + doc_exec::validate(fail-loud) —
 /// 종전 gen.js(JS 저작)의 acorn 파싱·node 서브프로세스는 doc 경로에서 불필요(문법 실패 모드 자체가 소멸).
 fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
+    let mut assemble = false; // --assemble: 정련 턴의 {prompt, schema} 패키지만(LLM 0)
+    let mut with_refined: Option<Value> = None; // --with-refined: 외부 실행자의 정련 산출 주입(LLM 0)
     let mut idea = String::new();
     let mut model = DEFAULT_MODEL.to_string();
     let mut lang: Option<Language> = None;
@@ -519,6 +521,12 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
                 i += 1;
                 refs = Some(argv.get(i).cloned().ok_or("--refs 값 누락")?);
             }
+            "--assemble" => assemble = true,
+            "--with-refined" => {
+                i += 1;
+                let raw = argv.get(i).ok_or("--with-refined 값(JSON) 누락")?;
+                with_refined = Some(serde_json::from_str(raw).map_err(|e| format!("--with-refined JSON 파싱: {e}"))?);
+            }
             other => return Err(format!("generate-skeleton: 미지 인자 {other:?}")),
         }
         i += 1;
@@ -544,11 +552,7 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         user.push_str(&l.contract());
     }
 
-    // LLM 정련 — StructuredOutput 강제(REFINE_SCHEMA): 산출은 {directive, description} 소형 JSON 뿐이라
-    // 문법 실패(따옴표/펜스/잘림) 클래스가 구조적으로 소멸한다. text_only: 도구 전면 차단. 529 backoff 는 provider.
-    let (env, profile) = auth_env()?;
-    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 정련(directive)");
-    let refine_schema = json!({
+    let refine_schema_v = json!({
         "type": "object",
         "required": ["directive", "description"],
         "properties": {
@@ -556,6 +560,34 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
             "description": { "type": "string", "description": "이 드래프트의 한 줄 서술(담백)" }
         }
     });
+    // --assemble: 정련 턴 패키지만(LLM 0, 인증 불요) — pull 실행자가 자기 턴에 정련을 수행한다.
+    if assemble {
+        let pkg = json!({ "label": "refine", "prompt": format!("{system}\n\n{user}"), "schema": refine_schema_v });
+        println!("{}", serde_json::to_string(&pkg).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    // --with-refined: 외부 정련 산출 주입(LLM 0, 인증 불요) — 조립·검증 게이트는 동일.
+    if let Some(out) = with_refined {
+        let tpl_path = bundled_workflow_path("draft")?;
+        let tpl_raw = std::fs::read(&tpl_path).map_err(|e| format!("번들 draft 읽기 {tpl_path}: {e}"))?;
+        let template: Value = serde_json::from_slice(&tpl_raw).map_err(|e| format!("번들 draft 파싱 {tpl_path}: {e}"))?;
+        let directive = out.get("directive").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        let description = out.get("description").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        if directive.is_empty() {
+            return Err("--with-refined: directive 비어있음".into());
+        }
+        let doc = soksak_sidecar_workflow::doc_exec::inject_refinement(&template, &directive, &description);
+        if let Err(violations) = soksak_sidecar_workflow::doc_exec::validate(&doc) {
+            return Err(format!("조립 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default()));
+        }
+        println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
+        return Ok(());
+    }
+    // LLM 정련 — StructuredOutput 강제(REFINE_SCHEMA): 산출은 {directive, description} 소형 JSON 뿐이라
+    // 문법 실패(따옴표/펜스/잘림) 클래스가 구조적으로 소멸한다. text_only: 도구 전면 차단. 529 backoff 는 provider.
+    let (env, profile) = auth_env()?;
+    eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 정련(directive)");
+    let refine_schema = refine_schema_v;
     let req = AgentRequest {
         prompt: user,
         model: &model,

@@ -1001,13 +1001,13 @@ function waitStdoutSettle(getLen) {
 
 /** generate-skeleton spawn — 아이디어 → gen.js(LLM 저작) → skeleton JSON(stdout 문자열 resolve).
  *  claude 호출 → 인증 env 필요(발행 spawn 과 다름 — opts 는 execOpts 산출). lease=프로세스-생존(onExit 까지 대기). */
-function genSkeleton(app, bin, opts, spec) {
+function genSkeleton(app, bin, opts, spec, extraArgs) {
   return new Promise((resolve, reject) => {
     let out = "";
     let err = ""; // stderr — 실패 원인 표면화(fail-loud §2: 원인 없는 exit N 금지)
     const dec = new TextDecoder();
     const errDec = new TextDecoder();
-    const { cmd, args } = buildSpawnCmd(bin, genSkeletonArgs(spec));
+    const { cmd, args } = buildSpawnCmd(bin, genSkeletonArgs(spec).concat(extraArgs || []));
     Promise.resolve(app.process.spawn(cmd, args, opts || {}))
       .then((handle) => {
         app.process.onData(handle, (b) => {
@@ -1269,6 +1269,8 @@ export default {
           refs: { type: "string", description: "references override 경로(기본=플러그인 번들 self-contained)." },
           env: { type: "json", description: "generate-skeleton·exec-one(claude -p) 에 주입할 인증 env(ANTHROPIC_*). 순수 발행(--emit)은 토큰 불필요." },
           directive: { type: "string", description: "입력 지시어 — stage 작업 노드 body 에 임베드(exec-stage args.directive). 없으면 idea 로 승격." },
+          pull: { type: "boolean", description: "pull 발급 — 정련 턴의 {prompt, schema} 패키지만 반환(LLM 호출 0). 수행 후 refined 로 재호출하라." },
+          refined: { type: "json", description: "pull 수행 산출({directive, description}) — 주입 조립(LLM 0) 후 동일 발행 경로." },
         },
         returns: "{ ok, published?, code?, message? }",
         message: (d) => `${d.published ?? 0}개 노드를 발행했습니다`,
@@ -1278,8 +1280,20 @@ export default {
           if (!d.published) return [];
           return [{ cmd: `sok ${RECONCILE_CMD}`, why: "지금 바로 준비된 노드를 실행할 수 있습니다" }];
         },
-        handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive }) => {
+        handler: async ({ idea, skeleton, skeletonPath, bin, model, refs, env, directive, pull, refined }) => {
           runtime.bin = bin || null; // null → buildSpawnCmd 로그인셸 랩 기본
+          // pull 판(축 2): --assemble 로 정련 턴 패키지만 반환 — 외부 실행자가 수행 후 refined 로 재호출.
+          if (pull) {
+            if (!idea) return { ok: false, code: "INVALID_INPUT", message: "pull 발급에는 idea 필수" };
+            const raw = await genSkeleton(app, runtime.bin, await execOpts(app, runtime), { idea, model, refs }, ["--assemble"]);
+            let pkg;
+            try { pkg = JSON.parse(raw); } catch { return { ok: false, code: "INTERNAL", message: "정련 패키지 파싱 실패" }; }
+            return { ok: true, stage: "refine", prompt: pkg.prompt, schema: pkg.schema };
+          }
+          // refined 주입(축 2 제출): 외부 실행자의 정련 산출로 doc 조립(LLM 0) → 아래 공통 발행 경로 합류.
+          if (refined && idea && !skeleton && !skeletonPath) {
+            skeleton = await genSkeleton(app, runtime.bin, await execOpts(app, runtime), { idea, model, refs }, ["--with-refined", JSON.stringify(refined)]);
+          }
           runtime.env = env; // 세션 캡처(폴백) — 영속은 아래 secrets
           // env 를 볼트에 봉인(env:* 키) — 재시작 후 reconcile exec 이 secretEnv 로 되찾는다(인메모리 휘발 해소).
           if (env && typeof env === "object" && app.secrets) {
