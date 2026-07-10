@@ -94,3 +94,9 @@ and the multi-process stress test passes (lost-update 0, SIGKILL atomicity). The
 surfaced and fixed three pipeline defects (issuerize rework semantics, category mapping,
 body idempotency marker) — and demonstrated twice that runtime execution catches seam
 defects text verification cannot, fixing PROOF execution as the next frontier.
+The codex symmetry (2026-07-11): a single natural-language instruction to a codex TUI
+session (gpt-5.5) drove the same full pipeline on a fresh idea — the agent self-loaded the
+skill, pulled every turn (refinement → 14 requirements → certification → 23 facts → design
+→ 5 units → 5 code files), spawned its own reviewer subagents, found and fixed a symlink-
+escape defect RED→GREEN on its own, and exported a tree that runs (pass 7/0, manual smoke
+independently reproduced). Board transit verified — every gate passed, no bypass.
