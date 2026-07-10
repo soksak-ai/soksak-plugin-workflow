@@ -186,10 +186,16 @@ while (b.phase === "audit") {
   // 부결 보정 루프 — 감사의 gaps 를 요건 후보로 기계 투입(변환 LLM 0), 기존 verify 가 분별(가짜=x),
   // 재감사. 상한 2회(수렴 강제 — §2 fail-loud: 상한 도달 시 폐기 확정). gaps 소비자 부재 공백의 해소.
   const gaps = Array.isArray(result.gaps) ? result.gaps.filter((g) => typeof g === "string" && g.trim()) : [];
-  if (b.auditRounds >= 3 || gaps.length === 0) {
+  if (b.auditRounds >= 3) {
     b.chunk.badge = "f"; b.phase = "discarded"; save(b);
-    log(`폐기 확정(라운드 ${b.auditRounds}, gaps ${gaps.length}): ${b.chunk.result.slice(0, 200)}`);
+    log(`폐기 확정(라운드 ${b.auditRounds}): ${b.chunk.result.slice(0, 200)}`);
     process.exit(2);
+  }
+  if (gaps.length === 0) {
+    // complete=false + gaps 0 = 산출 계약 위반(산문만 서술) — 폐기가 아니라 재감사 대상(상한 안).
+    log("부결인데 gaps 0 — 산출 계약 위반, 재감사");
+    save(b);
+    continue;
   }
   log(`부결 — gaps ${gaps.length}건을 요건 후보로 투입(검증이 분별)`);
   for (const g of gaps) {
