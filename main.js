@@ -1332,7 +1332,7 @@ export default {
         message: (d) => (d.node ? `검증 노드 ${d.node.id} 실행 패키지를 발급했습니다` : "실행할 준비된 검증 노드가 없습니다"),
         hint: (d) => {
           if (!d.node) return [];
-          return [{ cmd: `sok plugin.soksak-plugin-workflow.submit node=${d.node.id} output='{"oxf":"o|x|f", …}'`, why: "prompt 를 직접 수행한 뒤 판정을 제출하면 spawn 경로와 같은 파이프를 탑니다" }];
+          return [{ cmd: `sok plugin.soksak-plugin-workflow.submit '{"node":"${d.node.id}","output":{"oxf":"o|x|f"}}'`, why: "prompt 를 직접 수행한 뒤 판정을 제출하면 spawn 경로와 같은 파이프를 탑니다" }];
         },
         handler: async (_p, inv) => {
           const exec = inv?.execute ?? ((n, q) => app.commands.execute(n, q));
