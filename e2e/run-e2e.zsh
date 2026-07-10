@@ -20,8 +20,8 @@ HERE="${0:A:h}"
 TMPD="${CLAUDE_JOB_DIR:-${TMPDIR:-/tmp}}/soksak-e2e"; mkdir -p "$TMPD"
 W="${SOKSAK_CLAUDE_WRAPPER:-claude}"
 EF="$TMPD/auth.env"; : > "$EF"; chmod 600 "$EF"
-zsh -ic 'claude(){ command env | grep -E "^(ANTHROPIC_[A-Z_]+|CLAUDE_ACCOUNT_NAME)=" > "'"$EF"'"; }; '"$W"' --version >/dev/null 2>&1 || '"$W"' >/dev/null 2>&1 </dev/null' >/dev/null 2>&1 || true
-grep -q '^ANTHROPIC_AUTH_TOKEN=' "$EF" || { print -u2 "run-e2e: 인증 env 캡처 실패 — 인터랙티브 zsh 의 claude 진입점($W)이 ANTHROPIC_AUTH_TOKEN 을 주입하는지 확인"; exit 1; }
+zsh -ic 'claude(){ command env | grep -E "^(ANTHROPIC_[A-Z_]+|CLAUDE_ACCOUNT_NAME|CLAUDE_CODE_OAUTH_TOKEN)=" > "'"$EF"'"; }; '"$W"' --version >/dev/null 2>&1 || '"$W"' >/dev/null 2>&1 </dev/null' >/dev/null 2>&1 || true
+grep -qE '^(ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN)=' "$EF" || { print -u2 "run-e2e: 인증 env 캡처 실패 — 인터랙티브 zsh 의 claude 진입점($W)이 ANTHROPIC_AUTH_TOKEN 또는 CLAUDE_CODE_OAUTH_TOKEN 을 주입하는지 확인"; exit 1; }
 set -a; source "$EF"; set +a
 
 # 3) cargo PATH 보장 + make 타깃 실행.
