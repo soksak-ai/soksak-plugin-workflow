@@ -469,7 +469,8 @@ export function stagePublishedMarker(target, body, stageName, nodes) {
             ? (() => {
                 let fp;
                 try { fp = JSON.parse(body).args?.file_path; } catch { fp = undefined; }
-                return !!fp && nodes.some((n) => n && n.parentId === target.parentId && n.kind === "code" && n.category === fp);
+                // f/x 코드는 대체 대상 — 마커가 아니다(재작업 task 를 발행-완료로 오인해 done 처리하는 것 방지).
+                return !!fp && nodes.some((n) => n && n.parentId === target.parentId && n.kind === "code" && n.category === fp && n.badge !== "f" && n.badge !== "x");
               })()
             : false;
 }
