@@ -18,14 +18,15 @@ explicit commit.
 
 ## 2. Definition of done — all of C1–C5, each with evidence
 
-- **C1a Standalone full-chain run** (correction 2026-07-08 — the standing instruction was
-  "run standalone first, connect to the app later"; binding the full run to the app caused
-  instance contention and is wrong): the committed standalone runner drives the whole chain
-  app-free on a file board — requirements verify (each item, real LLM) → hunt → additions
-  verified → classify → audit **certification** → research facts verified → design chain
-  verified → plan units verified → per-file body + body-verify — until every node is
-  confirmed. No simulated badges: every verdict is a real LLM oxf. Evidence: the file board
-  + run catalog.
+- **C1a Standalone full-chain run** ✅ (2026-07-10): the committed runner drove the whole
+  chain app-free — 63 requirements individually verified (o60/x3) → hunt (+3) → classify →
+  audit certification (one rejection→re-audit cycle) → 111 facts (research+design chain) →
+  plan 51 units → plan-audit assembly certification (2 rejection→patch rounds grew the file
+  set 38→48, adding the operating surfaces) → per-file body with rework loops (rejected code
+  regenerated with the verifier's findings injected; 5/5 rework successes) → **48/48 files
+  confirmed**. Every verdict a real LLM oxf; the strict gate (every o unit backed by an o
+  code) passed. Evidence locked: e2e/out/full-chain/evidence/ (REPORT.md + board snapshot)
+  + run catalog + exported file tree (export/, 48 files).
 - **C1b App attachment** ✅ (2026-07-08): attach sequence (window discovery → ping env
   re-seed → reconcile poke) produced a live transition observed as it happened (o 6→7), the
   confirmed node carrying a full verdict (oxf=o, origin, concrete reason) — the scheduler
