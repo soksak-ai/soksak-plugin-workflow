@@ -82,6 +82,8 @@ pub trait Deps {
     fn edit_node(&self, id: &str, fields: Value) -> EditResult;
     fn add_node(&self, params: Value) -> Option<String>;
     fn poke(&self);
+    /// 진행 델타(선택) — item 검증 중 무엇을 검증 중인지 흘린다. 기본 no-op.
+    fn progress(&self, _cmd: &str, _delta: &str) {}
 
     // exec seam — production=in-process provider/doc_exec. Err=throw(멱등: 노드 미변경).
     fn exec_one(&self, body: &str) -> Result<Value, String>;
@@ -448,6 +450,362 @@ pub fn build_add_params(
     }
     Value::Object(params)
 }
+
+// ── 정규화 item body 해소(main.js resolveBody) — promptHash → kanban prompt.resolve 로 완성 ──
+fn resolve_body(body: &str, deps: &dyn Deps, extra_vars: &Value) -> String {
+    let p: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return body.to_string(),
+    };
+    let prompt_hash = match p.get("promptHash").and_then(|v| v.as_str()) {
+        Some(h) => h.to_string(),
+        None => return body.to_string(),
+    };
+    // vars = { ...p.vars, ...extraVars }(extra 가 override).
+    let mut vars = serde_json::Map::new();
+    if let Some(pv) = p.get("vars").and_then(|v| v.as_object()) {
+        for (k, v) in pv {
+            vars.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(ev) = extra_vars.as_object() {
+        for (k, v) in ev {
+            vars.insert(k.clone(), v.clone());
+        }
+    }
+    let refs = p.get("refs").cloned().unwrap_or_else(|| json!({}));
+    let rp = match deps.resolve_prompt(&prompt_hash, Value::Object(vars), refs) {
+        Some(d) => d,
+        None => return body.to_string(),
+    };
+    let prompt = match rp.get("prompt") {
+        Some(v) if !v.is_null() => v.clone(),
+        _ => return body.to_string(),
+    };
+    let mut schema = p.get("schema").cloned();
+    if let Some(sh) = p.get("schemaHash").and_then(|v| v.as_str()) {
+        let sr = match deps.get_prompt(sh) {
+            Some(v) => v,
+            None => return body.to_string(),
+        };
+        let value = sr.get("value").cloned().unwrap_or(sr);
+        if !value.is_object() {
+            return body.to_string();
+        }
+        schema = Some(value);
+    }
+    match schema {
+        Some(s) => json!({ "prompt": prompt, "schema": s }).to_string(),
+        None => json!({ "prompt": prompt }).to_string(),
+    }
+}
+
+struct StageInput {
+    stage_body: String,
+    ledger: Option<Vec<Value>>,
+}
+
+// exec-stage args 주입(main.js buildStageInput) — ledger/facts 를 stage args 에 실어 보낸다.
+// Err(Value) = 에러 TickResult(materialize 실패, hunt 제외).
+fn build_stage_input(deps: &dyn Deps, target: &Node, body: &str, stage_name: &str) -> Result<StageInput, Value> {
+    let ledger_stages: HashSet<&str> = ["hunt", "classify", "audit", "research", "plan", "design-interface", "design-domain", "design-criteria"].into_iter().collect();
+    let o_only: HashSet<&str> = ["plan", "design-interface", "design-domain", "design-criteria"].into_iter().collect();
+    let mut stage_body = body.to_string();
+    let mut ledger: Option<Vec<Value>> = None;
+    if ledger_stages.contains(stage_name) && target.parent_id.is_some() {
+        let parent = target.parent_id.clone().unwrap();
+        let materialize = || -> Result<String, String> {
+            let led = deps.materialize_ledger(&parent)?;
+            let mut inp: Value = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            let filtered = if o_only.contains(stage_name) {
+                led.iter().filter(|e| e.get("badge").and_then(|b| b.as_str()) == Some("o")).cloned().collect::<Vec<_>>()
+            } else {
+                led.clone()
+            };
+            let args = inp.get_mut("args").and_then(|a| a.as_object_mut());
+            if let Some(args) = args {
+                args.insert("ledger".into(), json!(filtered));
+            } else {
+                inp["args"] = json!({ "ledger": filtered });
+            }
+            if stage_name == "plan" || o_only.contains(stage_name) {
+                let facts = deps.materialize_facts(&parent)?;
+                let f_filtered = if o_only.contains(stage_name) {
+                    facts.iter().filter(|e| e.get("badge").and_then(|b| b.as_str()) == Some("o")).cloned().collect::<Vec<_>>()
+                } else {
+                    facts
+                };
+                inp["args"]["facts"] = json!(f_filtered);
+            }
+            Ok(inp.to_string())
+        };
+        // ledger 는 반환에도 실어야 함(classify 검증). materialize 를 한 번 더 부르지 않게 캡처.
+        match deps.materialize_ledger(&parent) {
+            Ok(led) => {
+                ledger = Some(led);
+                match materialize() {
+                    Ok(sb) => stage_body = sb,
+                    Err(e) => {
+                        if stage_name != "hunt" {
+                            return Err(json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": format!("원장 materialize 실패({stage_name}): {e}") }));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                if stage_name != "hunt" {
+                    return Err(json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": format!("원장 materialize 실패({stage_name}): {e}") }));
+                }
+            }
+        }
+    }
+    Ok(StageInput { stage_body, ledger })
+}
+
+// stage 산출 소비(main.js consumeStageOutput) — draftDoc 검증·발행 또는 자식 발행 + classify/audit 처리.
+fn consume_stage_output(deps: &dyn Deps, target: &Node, body: &str, stage_name: &str, ledger: Option<Vec<Value>>, staged: StageOut) -> Value {
+    // childCtx — 자식 task 에 전파할 workflowRef/skeleton+directive.
+    let child_ctx: Option<Value> = serde_json::from_str::<Value>(body).ok().and_then(|inp| {
+        if let Some(w) = inp.get("workflow").and_then(|v| v.as_str()) {
+            Some(json!({ "workflowRef": w, "directive": inp.pointer("/args/directive").cloned().unwrap_or(Value::Null) }))
+        } else if inp.get("skeleton").is_some() {
+            Some(json!({ "skeleton": inp.get("skeleton"), "directive": inp.pointer("/args/directive").cloned().unwrap_or(Value::Null) }))
+        } else {
+            None
+        }
+    });
+
+    match staged {
+        StageOut::DraftDoc(draft) => {
+            // draft_doc 검증 재사용(골든 태그). build 는 이미 됐고 여기선 재검증.
+            let doc: crate::draft_doc::DraftDoc = match serde_json::from_value(draft.clone()) {
+                Ok(d) => d,
+                Err(e) => return json!({ "ok": false, "processed": 0, "id": target.id, "code": "VALIDATION_FAILED", "message": format!("DraftDoc 역직렬화 실패: {e}") }),
+            };
+            if let Err(violations) = crate::draft_doc::validate(&doc) {
+                return json!({ "ok": false, "processed": 0, "id": target.id, "code": "VALIDATION_FAILED", "message": format!("DraftDoc 검증 실패({}건): {}", violations.len(), violations[0]) });
+            }
+            let published = match apply_draft_doc(deps, &draft, target.parent_id.as_deref(), child_ctx.as_ref()) {
+                Ok(p) => p,
+                Err(e) => return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": e }),
+            };
+            deps.edit_node(&target.id, json!({ "status": "done" }));
+            deps.poke();
+            json!({ "ok": true, "processed": 1, "id": target.id, "stage": true, "published": published })
+        }
+        StageOut::Children { children, result } => {
+            let mut key_of: HashMap<String, String> = HashMap::new();
+            let mut role_to_hash: HashMap<String, String> = HashMap::new();
+            for ev in &children {
+                if let Some(reg) = ev.get("register_prompts").or_else(|| ev.get("registerPrompts")) {
+                    for (role, hash) in register_prompt_templates(reg, deps) {
+                        role_to_hash.insert(role, hash);
+                    }
+                }
+                let parent_id = ev.get("parent").and_then(|v| v.as_str()).map(|p| key_of.get(p).cloned().unwrap_or_else(|| p.to_string()));
+                let blocked_by: Vec<String> = ev
+                    .get("blocked_by")
+                    .or_else(|| ev.get("blockedBy"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|id| id.as_str()).map(|id| key_of.get(id).cloned().unwrap_or_else(|| id.to_string())).collect())
+                    .unwrap_or_default();
+                let params = build_add_params(ev, parent_id.as_deref(), &blocked_by, child_ctx.as_ref(), &role_to_hash);
+                if let Some(node_id) = deps.add_node(params) {
+                    if let Some(ev_id) = ev.get("id").and_then(|v| v.as_str()) {
+                        key_of.insert(ev_id.to_string(), node_id);
+                    }
+                }
+            }
+            let res = &result;
+            let mut assigned = 0;
+            if stage_name == "classify" {
+                let assignments = res.get("assignments").and_then(|v| v.as_array());
+                let Some(assignments) = assignments else {
+                    return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INVALID_RESULT", "message": "classify 결과에 assignments 배열 없음" });
+                };
+                let Some(ledger) = ledger.as_ref() else {
+                    return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": "classify 원장 materialize 실패 — 배정 검증 불가" });
+                };
+                let ledger_ids: HashSet<String> = ledger.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str()).map(String::from)).collect();
+                let mut seen: HashSet<String> = HashSet::new();
+                let mut errs: Vec<String> = Vec::new();
+                for a in assignments {
+                    let id = a.get("id").and_then(|v| v.as_str());
+                    let cat = a.get("category").and_then(|v| v.as_str());
+                    match (id, cat) {
+                        (Some(id), Some(cat)) if !cat.is_empty() => {
+                            if !ledger_ids.contains(id) {
+                                errs.push(format!("원장 밖 id: {id}"));
+                            } else if seen.contains(id) {
+                                errs.push(format!("중복 배정: {id}"));
+                            }
+                            seen.insert(id.to_string());
+                        }
+                        _ => errs.push(format!("형식 위반: {a}")),
+                    }
+                }
+                for id in &ledger_ids {
+                    if !seen.contains(id) {
+                        errs.push(format!("미배정: {id}"));
+                    }
+                }
+                if !errs.is_empty() {
+                    return json!({ "ok": false, "processed": 0, "id": target.id, "code": "VALIDATION_FAILED", "message": format!("classify 배정 검증 실패({}건): {}", errs.len(), errs[0]) });
+                }
+                for a in assignments {
+                    let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let cat = a.get("category").cloned().unwrap_or(Value::Null);
+                    let er = deps.edit_node(id, json!({ "category": cat }));
+                    if !er.ok {
+                        return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": format!("category 기록 실패({id}): {}", er.message.unwrap_or_default()) });
+                    }
+                    assigned += 1;
+                }
+            }
+            if stage_name == "audit" && !res.is_object() {
+                return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INVALID_RESULT", "message": "audit 결과 없음(verdict/complete 미반환)" });
+            }
+            if res.is_object() {
+                if let Some(parent_id) = &target.parent_id {
+                    let mut chunk_edit = serde_json::Map::new();
+                    if let Some(t) = res.get("chunkTitle").and_then(|v| v.as_str()) {
+                        if !t.is_empty() {
+                            chunk_edit.insert("title".into(), json!(t));
+                        }
+                    }
+                    if let Some(v) = res.get("verdict").and_then(|v| v.as_str()) {
+                        if !v.is_empty() {
+                            chunk_edit.insert("result".into(), json!(v));
+                        }
+                    }
+                    if stage_name == "classify" {
+                        if let Some(d) = res.get("dimension").and_then(|v| v.as_str()) {
+                            if !d.is_empty() {
+                                chunk_edit.insert("result".into(), json!(d));
+                            }
+                        }
+                    }
+                    if stage_name == "audit" {
+                        let f_count = ledger.as_ref().map(|l| l.iter().filter(|e| e.get("badge").and_then(|b| b.as_str()) == Some("f")).count() as i64).unwrap_or(-1);
+                        let complete = res.get("complete").and_then(|v| v.as_bool()) == Some(true);
+                        chunk_edit.insert("badge".into(), json!(if complete && f_count == 0 { "o" } else { "f" }));
+                    }
+                    if !chunk_edit.is_empty() {
+                        deps.edit_node(parent_id, Value::Object(chunk_edit));
+                    }
+                }
+            }
+            deps.edit_node(&target.id, json!({ "status": "done" }));
+            deps.poke();
+            json!({ "ok": true, "processed": 1, "id": target.id, "stage": true, "published": children.len(), "assigned": assigned })
+        }
+    }
+}
+
+// stage 작업 실행(main.js reconcileStage) — 멱등 마커 → buildStageInput → execStage → consume.
+fn reconcile_stage(deps: &dyn Deps, target: &Node, body: &str, nodes: &[Node]) -> Value {
+    let stage_name = serde_json::from_str::<Value>(body).ok().and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from)).unwrap_or_default();
+    if stage_published_marker(target, body, &stage_name, nodes) {
+        deps.edit_node(&target.id, json!({ "status": "done" }));
+        deps.poke();
+        return json!({ "ok": true, "processed": 0, "id": target.id, "stage": true, "published": 0, "idempotent": true });
+    }
+    let built = match build_stage_input(deps, target, body, &stage_name) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let staged = match deps.exec_stage(&built.stage_body) {
+        Ok(s) => s,
+        Err(e) => return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": e }),
+    };
+    consume_stage_output(deps, target, body, &stage_name, built.ledger, staged)
+}
+
+/// reconcile 한 틱(main.js reconcileTick) — ready 1개 처리. task→exec-stage, 항목→exec-one(검증→배지).
+/// 진척(배지 확정) 시 poke. exec 실패는 ok:false(노드 미변경=멱등).
+pub fn reconcile_tick(deps: &dyn Deps, state: &mut ReconcileState, now_ms: u64) -> Value {
+    let nodes = deps.list_nodes();
+    let ready: Vec<Node> = pick_ready(&nodes).into_iter().filter(|n| !lease_active(state, &n.id, now_ms)).collect();
+    if ready.is_empty() {
+        return json!({ "ok": true, "processed": 0 });
+    }
+    // 기아 방지: 연속 실패 최소 ready 선택.
+    let mut target = ready[0].clone();
+    if !state.fails.is_empty() {
+        let mut best = u32::MAX;
+        for n in &ready {
+            let f = state.fails.get(&n.id).copied().unwrap_or(0);
+            if f < best {
+                best = f;
+                target = n.clone();
+            }
+        }
+    }
+    let node = deps.get_node(&target.id).unwrap_or_default();
+    let body = node.body_str().to_string();
+    if target.kind.as_deref() == Some("task") {
+        let res = reconcile_stage(deps, &target, &body, &nodes);
+        if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            state.fails.remove(&target.id);
+        } else {
+            *state.fails.entry(target.id.clone()).or_insert(0) += 1;
+        }
+        return res;
+    }
+    let title = node.title.clone().unwrap_or_else(|| target.id.clone());
+    deps.progress("reconcile", &title.chars().take(120).collect::<String>());
+    let mut field_vars = serde_json::Map::new();
+    if let Some(t) = &node.title {
+        field_vars.insert("title".into(), json!(t));
+    }
+    if let Some(d) = &node.description {
+        field_vars.insert("description".into(), json!(d));
+    }
+    if let Some(c) = &node.category {
+        field_vars.insert("category".into(), json!(c));
+    }
+    let exec_body = resolve_body(&body, deps, &Value::Object(field_vars));
+    let exec_out = match deps.exec_one(&exec_body) {
+        Ok(o) => o,
+        Err(e) => {
+            *state.fails.entry(target.id.clone()).or_insert(0) += 1;
+            return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": e });
+        }
+    };
+    state.fails.remove(&target.id);
+    let mut edit = exec_result_to_edit(&exec_out);
+    let has_badge = edit.get("badge").is_some();
+    if !has_badge {
+        let n = state.no_verdict.get(&target.id).copied().unwrap_or(0) + 1;
+        if n >= NO_VERDICT_MAX {
+            let last = edit.get("result").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let obj = edit.as_object_mut().unwrap();
+            obj.insert("badge".into(), json!("f"));
+            obj.insert("result".into(), json!(format!("무판정 {n}회 소진(출력에 oxf 없음 — 스키마 부재/모델 이탈) → 자동 f. 마지막 출력: {last}")));
+            state.no_verdict.remove(&target.id);
+        } else {
+            state.no_verdict.insert(target.id.clone(), n);
+        }
+    } else {
+        state.no_verdict.remove(&target.id);
+    }
+    deps.edit_node(&target.id, edit.clone());
+    let final_badge = edit.get("badge").and_then(|v| v.as_str()).map(String::from);
+    if final_badge.is_some() {
+        deps.poke();
+    }
+    json!({ "ok": true, "processed": 1, "id": target.id, "badge": final_badge })
+}
+
+// applyDraftDoc·registerPromptTemplates 는 chunk 5(draft 발행). 여기선 시그니처만 전방 선언용 — chunk 5 에서 구현.
+fn apply_draft_doc(deps: &dyn Deps, doc: &Value, chunk_id: Option<&str>, task_ctx: Option<&Value>) -> Result<usize, String> {
+    crate::reconcile::draft::apply_draft_doc(deps, doc, chunk_id, task_ctx)
+}
+fn register_prompt_templates(register_prompts: &Value, deps: &dyn Deps) -> Vec<(String, String)> {
+    crate::reconcile::draft::register_prompt_templates(register_prompts, deps)
+}
+
+pub mod draft;
 
 #[cfg(test)]
 #[path = "reconcile_tests.rs"]

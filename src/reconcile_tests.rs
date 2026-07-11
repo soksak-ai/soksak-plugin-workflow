@@ -4,10 +4,164 @@
 // resolve_directive·gen_skeleton_args·build_secret_env_map·build_spawn_cmd·lease_active).
 use super::*;
 use serde_json::json;
+use std::cell::RefCell;
 
 // 노드 리터럴 헬퍼 — json! → Node.
 fn node(v: Value) -> Node {
     serde_json::from_value(v).expect("node fixture")
+}
+
+// ── recording FakeDeps(main.js fakeDeps + splice 이식) ───────────────────────
+#[derive(Default)]
+struct Calls {
+    get: Vec<String>,
+    edit: Vec<(String, Value)>,
+    exec: Vec<String>,
+    stage: Vec<String>,
+    add: Vec<Value>,
+    poke: u32,
+    put: Vec<Value>,
+}
+impl Calls {
+    fn edit_of(&self, id: &str) -> Option<&Value> {
+        self.edit.iter().find(|(i, _)| i == id).map(|(_, f)| f)
+    }
+    fn add_find(&self, pred: impl Fn(&Value) -> bool) -> Option<&Value> {
+        self.add.iter().find(|p| pred(p))
+    }
+}
+
+struct FakeDeps {
+    nodes: Vec<Node>,
+    exec_out: Option<Value>,
+    exec_throw: Option<String>,
+    staged: Option<StageOut>,
+    stage_throw: Option<String>,
+    ledger: Option<Result<Vec<Value>, String>>,
+    facts: Option<Result<Vec<Value>, String>>,
+    resolve_out: Option<Value>,
+    get_prompt_out: Option<Value>,
+    put_hash: Option<String>,
+    assemble_out: Option<Result<Value, String>>,
+    stage_with_output_out: Option<Result<StageOut, String>>,
+    edit_err_ids: std::collections::HashSet<String>,
+    calls: RefCell<Calls>,
+}
+
+impl FakeDeps {
+    fn new(nodes: Vec<Node>) -> Self {
+        FakeDeps {
+            nodes,
+            exec_out: None,
+            exec_throw: None,
+            staged: None,
+            stage_throw: None,
+            ledger: None,
+            facts: None,
+            resolve_out: None,
+            get_prompt_out: None,
+            put_hash: None,
+            assemble_out: None,
+            stage_with_output_out: None,
+            edit_err_ids: std::collections::HashSet::new(),
+            calls: RefCell::new(Calls::default()),
+        }
+    }
+    fn exec(mut self, out: Value) -> Self {
+        self.exec_out = Some(out);
+        self
+    }
+    fn exec_throws(mut self, msg: &str) -> Self {
+        self.exec_throw = Some(msg.to_string());
+        self
+    }
+    fn stage(mut self, s: StageOut) -> Self {
+        self.staged = Some(s);
+        self
+    }
+    fn ledger(mut self, v: Vec<Value>) -> Self {
+        self.ledger = Some(Ok(v));
+        self
+    }
+    fn ledger_throws(mut self, msg: &str) -> Self {
+        self.ledger = Some(Err(msg.to_string()));
+        self
+    }
+    fn facts(mut self, v: Vec<Value>) -> Self {
+        self.facts = Some(Ok(v));
+        self
+    }
+    fn c(&self) -> std::cell::Ref<'_, Calls> {
+        self.calls.borrow()
+    }
+}
+
+// children/result → StageOut::Children 헬퍼.
+fn staged_children(children: Vec<Value>, result: Value) -> StageOut {
+    StageOut::Children { children, result }
+}
+
+impl Deps for FakeDeps {
+    fn list_nodes(&self) -> Vec<Node> {
+        self.nodes.clone()
+    }
+    fn get_node(&self, id: &str) -> Option<Node> {
+        self.calls.borrow_mut().get.push(id.to_string());
+        self.nodes.iter().find(|n| n.id == id).cloned()
+    }
+    fn edit_node(&self, id: &str, fields: Value) -> EditResult {
+        self.calls.borrow_mut().edit.push((id.to_string(), fields));
+        if self.edit_err_ids.contains(id) {
+            EditResult::err(format!("edit 실패: {id}"))
+        } else {
+            EditResult::ok()
+        }
+    }
+    fn add_node(&self, params: Value) -> Option<String> {
+        let mut c = self.calls.borrow_mut();
+        c.add.push(params);
+        Some(format!("k-{}", c.add.len()))
+    }
+    fn poke(&self) {
+        self.calls.borrow_mut().poke += 1;
+    }
+    fn exec_one(&self, body: &str) -> Result<Value, String> {
+        self.calls.borrow_mut().exec.push(body.to_string());
+        if let Some(e) = &self.exec_throw {
+            return Err(e.clone());
+        }
+        Ok(self.exec_out.clone().unwrap_or(Value::Null))
+    }
+    fn exec_stage(&self, body: &str) -> Result<StageOut, String> {
+        self.calls.borrow_mut().stage.push(body.to_string());
+        if let Some(e) = &self.stage_throw {
+            return Err(e.clone());
+        }
+        Ok(self.staged.clone().expect("staged 미설정"))
+    }
+    fn materialize_ledger(&self, _chunk_id: &str) -> Result<Vec<Value>, String> {
+        self.ledger.clone().unwrap_or_else(|| Err("materializeLedger 미설정".into()))
+    }
+    fn materialize_facts(&self, _chunk_id: &str) -> Result<Vec<Value>, String> {
+        self.facts.clone().unwrap_or_else(|| Ok(vec![]))
+    }
+    fn put_prompt(&self, value: Value) -> Option<String> {
+        let mut c = self.calls.borrow_mut();
+        c.put.push(value);
+        Some(self.put_hash.clone().unwrap_or_else(|| format!("h-{}", c.put.len())))
+    }
+    fn resolve_prompt(&self, _hash: &str, _vars: Value, _refs: Value) -> Option<Value> {
+        self.resolve_out.clone()
+    }
+    fn get_prompt(&self, _hash: &str) -> Option<Value> {
+        self.get_prompt_out.clone()
+    }
+    fn assemble_stage(&self, _body: &str) -> Option<Result<Value, String>> {
+        self.assemble_out.clone()
+    }
+    fn exec_stage_with_output(&self, _body: &str, _out: Value) -> Option<Result<StageOut, String>> {
+        self.stage_with_output_out.clone()
+    }
 }
 fn nodes(vs: Vec<Value>) -> Vec<Node> {
     vs.into_iter().map(node).collect()
@@ -280,6 +434,244 @@ fn lease_active_expiry() {
     assert!(lease_active(&mut st, "n1", 100), "만료 전 활성");
     assert!(!lease_active(&mut st, "n1", 200), "만료 시각 도달 = 비활성 + 삭제");
     assert!(!st.leases.contains_key("n1"), "만료 lease 는 lazy 삭제");
+}
+
+// ── reconcileTick (chunk 2) ─────────────────────────────────────────────────
+fn tick(deps: &FakeDeps) -> Value {
+    let mut st = ReconcileState::default();
+    reconcile_tick(deps, &mut st, 0)
+}
+
+#[test]
+fn reconcile_tick_item_verify() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"verify\"}" })]);
+    let d = FakeDeps::new(ns).exec(json!({ "oxf": "o", "result": { "reason": "실재 요건" } }));
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["processed"], 1);
+    assert_eq!(r["id"], "n1");
+    assert_eq!(r["badge"], "o");
+    assert_eq!(d.c().get, vec!["n1"]);
+    assert_eq!(d.c().exec, vec!["{\"prompt\":\"verify\"}"]);
+    assert_eq!(d.c().edit.len(), 1);
+    assert_eq!(d.c().edit_of("n1").unwrap()["badge"], "o");
+    assert_eq!(d.c().poke, 1);
+}
+
+#[test]
+fn reconcile_tick_no_ready() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "o", "blockedBy": [], "parentId": null, "status": "done" })]);
+    let d = FakeDeps::new(ns).exec(json!({ "oxf": "o", "result": {} }));
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["processed"], 0);
+    assert_eq!(d.c().exec.len(), 0);
+    assert_eq!(d.c().edit.len(), 0);
+    assert_eq!(d.c().poke, 0);
+}
+
+#[test]
+fn reconcile_tick_no_verdict_single() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"x\"}" })]);
+    let d = FakeDeps::new(ns).exec(json!({ "oxf": null, "result": "무판정 출력" }));
+    let r = tick(&d);
+    assert_eq!(r["badge"], Value::Null);
+    assert!(d.c().edit_of("n1").unwrap().get("badge").is_none());
+    assert_eq!(d.c().poke, 0);
+}
+
+#[test]
+fn reconcile_tick_exec_fail() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"x\"}" })]);
+    let d = FakeDeps::new(ns).exec_throws("exec-one exit 1 (529)");
+    let r = tick(&d);
+    assert_eq!(r["ok"], false);
+    assert_eq!(r["processed"], 0);
+    assert_eq!(d.c().edit.len(), 0);
+    assert_eq!(d.c().poke, 0);
+}
+
+#[test]
+fn reconcile_tick_task_publish() {
+    let ns = nodes(vec![json!({ "id": "gen", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk-7", "body": "{\"stage\":\"generate\"}" })]);
+    let staged = staged_children(
+        vec![
+            json!({ "ev": "add", "id": "g0", "kind": "group", "parent": "chunk-7", "title": "재고" }),
+            json!({ "ev": "add", "id": "g0i0", "kind": "item", "parent": "g0", "title": "재고 차감", "prompt": "verify…", "badge": "검수전" }),
+        ],
+        json!({ "chunkTitle": "약국 재고 SaaS", "titleOrigin": "agent" }),
+    );
+    let d = FakeDeps::new(ns).stage(staged);
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["stage"], true);
+    assert_eq!(r["published"], 2);
+    assert_eq!(d.c().stage, vec!["{\"stage\":\"generate\"}"]);
+    assert_eq!(d.c().add.len(), 2);
+    assert_eq!(d.c().add[0]["parentId"], "chunk-7");
+    assert_eq!(d.c().add[1]["kind"], "item");
+    assert_eq!(d.c().add[1]["parentId"], "k-1", "항목 parent=그룹 칸반 id(keyOf)");
+    assert_eq!(d.c().edit_of("chunk-7").unwrap()["title"], "약국 재고 SaaS");
+    assert_eq!(d.c().edit_of("gen").unwrap()["status"], "done");
+    assert_eq!(d.c().poke, 1);
+    assert_eq!(d.c().exec.len(), 0);
+}
+
+#[test]
+fn reconcile_tick_hunt_ledger_injected() {
+    let ns = nodes(vec![json!({ "id": "hunt", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"skeleton\":{},\"stage\":\"hunt\",\"args\":{\"directive\":\"약국\"}}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], Value::Null)).ledger(vec![json!({ "title": "재고 차감", "badge": "o" })]);
+    tick(&d);
+    let sent: Value = serde_json::from_str(&d.c().stage[0]).unwrap();
+    assert_eq!(sent["args"]["ledger"], json!([{ "title": "재고 차감", "badge": "o" }]));
+    assert_eq!(sent["stage"], "hunt");
+}
+
+#[test]
+fn reconcile_tick_classify_ledger_injected() {
+    let ns = nodes(vec![json!({ "id": "classify", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"classify\",\"args\":{\"directive\":\"약국\"}}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], json!({ "dimension": "", "assignments": [] }))).ledger(vec![json!({ "id": "i0", "title": "재고 차감", "badge": "o" })]);
+    tick(&d);
+    let sent: Value = serde_json::from_str(&d.c().stage[0]).unwrap();
+    assert_eq!(sent["args"]["ledger"], json!([{ "id": "i0", "title": "재고 차감", "badge": "o" }]));
+    assert_eq!(sent["stage"], "classify");
+}
+
+#[test]
+fn reconcile_tick_classify_result_assign() {
+    let ns = nodes(vec![json!({ "id": "classify", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"classify\"}" })]);
+    let staged = staged_children(vec![], json!({ "dimension": "기능 영역", "assignments": [{ "id": "i0", "category": "재고" }, { "id": "i1", "category": "발주" }] }));
+    let d = FakeDeps::new(ns).stage(staged).ledger(vec![json!({ "id": "i0", "title": "차감", "badge": "o" }), json!({ "id": "i1", "title": "발주", "badge": "o" })]);
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["stage"], true);
+    assert_eq!(r["assigned"], 2);
+    assert_eq!(d.c().edit_of("i0").unwrap(), &json!({ "category": "재고" }));
+    assert_eq!(d.c().edit_of("i1").unwrap(), &json!({ "category": "발주" }));
+    assert_eq!(d.c().edit_of("chunk").unwrap()["result"], "기능 영역");
+    assert_eq!(d.c().edit_of("classify").unwrap()["status"], "done");
+    assert_eq!(d.c().poke, 1);
+    assert_eq!(d.c().add.len(), 0);
+}
+
+#[test]
+fn reconcile_tick_no_verdict_cap_then_f() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"x\"}" })]);
+    let mut st = ReconcileState::default();
+    let mk = || FakeDeps::new(ns.clone()).exec(json!({ "oxf": null, "result": "무판정 출력" }));
+    let d1 = mk();
+    reconcile_tick(&d1, &mut st, 0);
+    assert!(d1.c().edit_of("n1").unwrap().get("badge").is_none());
+    assert_eq!(d1.c().poke, 0);
+    let d2 = mk();
+    reconcile_tick(&d2, &mut st, 0);
+    assert!(d2.c().edit_of("n1").unwrap().get("badge").is_none());
+    let d3 = mk();
+    let r3 = reconcile_tick(&d3, &mut st, 0);
+    assert_eq!(d3.c().edit_of("n1").unwrap()["badge"], "f");
+    assert!(d3.c().edit_of("n1").unwrap()["result"].as_str().unwrap().contains("무판정 3회"));
+    assert_eq!(d3.c().poke, 1);
+    assert_eq!(r3["badge"], "f");
+}
+
+#[test]
+fn reconcile_tick_no_verdict_reset_on_success() {
+    let ns = nodes(vec![json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"x\"}" })]);
+    let mut st = ReconcileState::default();
+    reconcile_tick(&FakeDeps::new(ns.clone()).exec(json!({ "oxf": null, "result": "무판정" })), &mut st, 0);
+    reconcile_tick(&FakeDeps::new(ns.clone()).exec(json!({ "oxf": null, "result": "무판정" })), &mut st, 0);
+    let d_ok = FakeDeps::new(ns.clone()).exec(json!({ "oxf": "o", "result": "판정" }));
+    reconcile_tick(&d_ok, &mut st, 0);
+    assert_eq!(d_ok.c().edit_of("n1").unwrap()["badge"], "o");
+    let d4 = FakeDeps::new(ns.clone()).exec(json!({ "oxf": null, "result": "무판정" }));
+    reconcile_tick(&d4, &mut st, 0);
+    assert!(d4.c().edit_of("n1").unwrap().get("badge").is_none());
+}
+
+#[test]
+fn reconcile_tick_starvation_fail_min_pick() {
+    let ns = nodes(vec![
+        json!({ "id": "n1", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"a\"}" }),
+        json!({ "id": "n2", "badge": "검수전", "blockedBy": [], "parentId": null, "status": "todo", "body": "{\"prompt\":\"b\"}" }),
+    ]);
+    let mut st = ReconcileState::default();
+    let d1 = FakeDeps::new(ns.clone()).exec_throws("영구 실패");
+    let r1 = reconcile_tick(&d1, &mut st, 0);
+    assert_eq!(r1["ok"], false);
+    assert_eq!(r1["id"], "n1");
+    let d2 = FakeDeps::new(ns.clone()).exec(json!({ "oxf": "o", "result": "ok" }));
+    let r2 = reconcile_tick(&d2, &mut st, 0);
+    assert_eq!(r2["id"], "n2", "n1 실패 → n2 선택");
+    assert_eq!(r2["badge"], "o");
+}
+
+#[test]
+fn reconcile_tick_audit_certify() {
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns)
+        .stage(staged_children(vec![], json!({ "verdict": "완결 — 목표 도달", "complete": true })))
+        .ledger(vec![json!({ "id": "i0", "title": "a", "badge": "o" }), json!({ "id": "i1", "title": "b", "badge": "x" })]);
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(d.c().edit_of("chunk").unwrap()["badge"], "o");
+    assert_eq!(d.c().edit_of("chunk").unwrap()["result"], "완결 — 목표 도달");
+    assert_eq!(d.c().edit_of("audit").unwrap()["status"], "done");
+}
+
+#[test]
+fn reconcile_tick_audit_f_propagate() {
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns)
+        .stage(staged_children(vec![], json!({ "verdict": "감사 통과 주장", "complete": true })))
+        .ledger(vec![json!({ "id": "i0", "badge": "o" }), json!({ "id": "i1", "badge": "f" })]);
+    tick(&d);
+    assert_eq!(d.c().edit_of("chunk").unwrap()["badge"], "f");
+}
+
+#[test]
+fn reconcile_tick_audit_incomplete() {
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], json!({ "verdict": "누락 존재", "complete": false }))).ledger(vec![json!({ "id": "i0", "badge": "o" })]);
+    tick(&d);
+    assert_eq!(d.c().edit_of("chunk").unwrap()["badge"], "f");
+    assert_eq!(d.c().edit_of("chunk").unwrap()["result"], "누락 존재");
+}
+
+#[test]
+fn reconcile_tick_audit_no_result() {
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], Value::Null)).ledger(vec![json!({ "id": "i0", "badge": "o" })]);
+    let r = tick(&d);
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("audit 결과 없음"));
+    assert_eq!(d.c().edit.len(), 0);
+}
+
+#[test]
+fn reconcile_tick_materialize_fail_rejects_before_stage() {
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], json!({ "verdict": "v", "complete": true }))).ledger_throws("kanban 응답 없음");
+    let r = tick(&d);
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("원장 materialize 실패(audit)"));
+    assert_eq!(d.c().stage.len(), 0);
+}
+
+#[test]
+fn reconcile_stage_workflowref_propagates_to_child_task() {
+    let ns = nodes(vec![json!({ "id": "research", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"workflow\":\"research\",\"stage\":\"research\",\"args\":{\"directive\":\"정련\"}}" })]);
+    let staged = staged_children(
+        vec![
+            json!({ "ev": "add", "id": "fact0", "kind": "fact", "parent": "chunk", "title": "저장소 확정", "badge": "검수전" }),
+            json!({ "ev": "add", "id": "plan", "kind": "task", "parent": "chunk", "stage": "plan", "title": "슈도코드화", "blocked_by": ["fact0"] }),
+        ],
+        Value::Null,
+    );
+    let d = FakeDeps::new(ns).stage(staged).ledger(vec![json!({ "id": "i0", "title": "요건", "badge": "o" })]);
+    tick(&d);
+    let plan_add = d.c().add_find(|p| p["kind"] == "task").cloned().unwrap();
+    let body: Value = serde_json::from_str(plan_add["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body, json!({ "workflow": "research", "stage": "plan", "args": { "directive": "정련", "chunkRef": "chunk" } }));
 }
 
 // ── stagePublishedMarker ────────────────────────────────────────────────────
