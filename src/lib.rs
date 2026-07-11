@@ -13,4 +13,5 @@ pub mod generate_skeleton;
 pub mod host;
 pub mod lang;
 pub mod provider;
+pub mod reconcile;
 pub mod emit_host;

@@ -82,11 +82,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "soksak-protocol"
+version = "0.0.1"
+
+[[package]]
+name = "soksak-service-proto"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soksak-protocol",
+]
+
+[[package]]
 name = "soksak-sidecar-workflow"
 version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
+ "soksak-service-proto",
  "wait-timeout",
 ]
 
