@@ -22,7 +22,7 @@ plan-skill.md)이 이어진다.
 - 산출 kind = `fact` — draft 요건(kind=item)과 원장이 섞이지 않는다(buildLedger 는 kind 필터).
   fact 의 area(framework/methodology/directive)는 category 필드로 발행된다.
 - 저작 LLM 불참(PRINCIPLES §7): 입력 directive 가 이미 정련본이라 재정련할 것이 없다 — canonical doc
-  정적 인스턴스화만 한다. 실행 통로는 `workflow.research {chunk}` (main.js):
+  정적 인스턴스화만 한다. 실행 통로는 `workflow.research {chunk}` (서비스 serve 핸들러):
   게이트(researchGate — badge='o' ∧ description 존재 ∧ 멱등) → `--workflow research --emit
   --args-json {chunkRef, directive}` → 기존 발행 relay. task body 는 doc 임베드가 아니라
   `{workflow:"research"}` 이름 참조 — exec-stage 가 `plugin_root/workflows/research.doc.json` 을 로드
@@ -37,6 +37,6 @@ plan-skill.md)이 이어진다.
 
 - 프롬프트 원문(RESEARCH_COMMON·FACT_VERIFY_TMPL·prompts.research)의 byte 안정성은 콘텐츠 주소화
   dedup 의 전제다(PRINCIPLES §3) — 다듬기 변경은 전 research 의 dedup 을 깨는 변경이며 의도적일 때만.
-- 스키마(RESEARCH_SCHEMA·VERIFY_SCHEMA)와 stages 구조 변경은 소비자(main.js reconcile 분기·검증
+- 스키마(RESEARCH_SCHEMA·VERIFY_SCHEMA)와 stages 구조 변경은 소비자(서비스 reconcile 분기·검증
   파이프·이슈라이즈 게이트)와의 계약 변경이다 — 해당 테스트(doc_exec `bundled_research_doc_*`,
-  reconcile.test.mjs research/plan 케이스)를 함께 고친다(기준 약화 금지 §6).
+  reconcile.rs research/plan 케이스)를 함께 고친다(기준 약화 금지 §6).

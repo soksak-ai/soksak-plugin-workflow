@@ -35,8 +35,10 @@ agent 실행은 `claude -p` 로 위임하며, 인증 env(`ANTHROPIC_*` 또는 OA
 
 ## 구성
 
-- `main.js` — 플러그인 어댑터: 명령, 발행 relay, 스케줄러 배선
-- `src/` — 실행 런타임(Rust): 문서 실행, exec-one/exec-stage, provider
+- `plugin.json` — 계약만(`entry: null`): 명령은 상주 서비스에 바인딩되고(`bind: "service"`),
+  코어가 사이드카에서 스폰해 라우팅한다
+- `src/` — 사이드카 런타임(Rust): `serve` 핸들러가 명령·reconcile tick 을 소유한다.
+  문서 실행, exec-one/exec-stage, provider
 - `workflows/` — 번들 정본 워크플로 문서(`workflow-doc@0.0.1`)
 - `references/` — 저작 프롬프트가 임베드하는 stage 스킬 텍스트
 - `e2e/` — 재현 가능 하니스(`e2e/run-e2e.zsh`, `make -C e2e help`)

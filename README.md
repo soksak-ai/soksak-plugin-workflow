@@ -36,8 +36,10 @@ Call as `sok plugin.soksak-plugin-workflow.<command>` or via MCP.
 
 ## Layout
 
-- `main.js` — plugin adapter: commands, publish relay, scheduler wiring
-- `src/` — execution runtime (Rust): doc execution, exec-one / exec-stage, provider
+- `plugin.json` — contract only (`entry: null`): the commands bind to a resident
+  service (`bind: "service"`), which the core spawns from the sidecar and routes to
+- `src/` — the sidecar runtime (Rust): the `serve` handler owns the commands and
+  reconcile ticks; doc execution, exec-one / exec-stage, provider
 - `workflows/` — bundled canonical workflow documents (`workflow-doc@0.0.1`)
 - `references/` — stage skill texts the authoring prompts embed
 - `e2e/` — reproducible harness (`e2e/run-e2e.zsh`, `make -C e2e help`)

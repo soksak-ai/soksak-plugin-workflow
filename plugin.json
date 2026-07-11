@@ -4,15 +4,29 @@
   "name": "Workflow",
   "version": "0.0.1",
   "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 칸반 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
-  "entry": "main.js",
+  "entry": null,
   "permissions": [
-    "process",
+    "service",
+    "sidecar",
     "commands",
     "schedule",
     "secrets"
   ],
   "dependencies": {
     "soksak-plugin-kanban": "^0.1.0"
+  },
+  "sidecars": [
+    {
+      "name": "workflow",
+      \"interface\": { \"id\": \"soksak-spec-sidecar-workflow\", \"range\": \"0.0.1\" }
+    }
+  ],
+  "service": {
+    "sidecar": "workflow",
+    "interface": "soksak-service-spec@1",
+    "subscribe": [
+      "bus:kanban:changed"
+    ]
   },
   "contributes": {
     "commands": [
@@ -21,56 +35,184 @@
         "title": {
           "ko": "워크플로를 발행합니다",
           "en": "Publishes the workflow"
-        }
+        },
+        "bind": "service",
+        "description": "Publish a workflow DAG to the kanban board from an idea or a pre-authored skeleton. Give `idea` to have the provider author a skeleton (LLM), or `skeleton` (a JSON-serialized workflow-doc) to publish directly with no LLM. Returns the published node summary.",
+        "triggers": {
+          "ko": "워크플로 발행 실행 아이디어 시작"
+        },
+        "params": {
+          "idea": {
+            "type": "string",
+            "required": false,
+            "description": "Idea text — the provider authors a skeleton from it (LLM). Mutually exclusive with skeleton; one is required."
+          },
+          "skeleton": {
+            "type": "string",
+            "required": false,
+            "description": "Pre-authored workflow-doc as a JSON string — published directly, no LLM. Mutually exclusive with idea."
+          },
+          "directive": {
+            "type": "string",
+            "required": false,
+            "description": "Override DIRECTIVE for the run; defaults to the skeleton's own or the idea."
+          },
+          "model": {
+            "type": "string",
+            "required": false,
+            "description": "Provider model for skeleton authoring (idea path only)."
+          }
+        },
+        "returns": "{ ok, published }"
       },
       {
         "name": "ping",
         "title": {
           "ko": "프로바이더 상태를 점검합니다",
           "en": "Probes the provider"
-        }
+        },
+        "bind": "service",
+        "description": "Probe the LLM provider end to end by running one exec-one judgement, confirming auth and reachability. Returns the verdict oxf.",
+        "triggers": {
+          "ko": "프로바이더 점검 상태 확인 헬스"
+        },
+        "params": {},
+        "returns": "{ ok, oxf }"
       },
       {
         "name": "reconcile",
         "title": {
           "ko": "준비된 워크플로 노드를 실행합니다",
           "en": "Runs ready workflow nodes"
-        }
+        },
+        "bind": "service",
+        "description": "Advance the DAG one reconcile tick: run every ready node (item=exec-one verify, task=exec-stage), publish children, stamp badges, and poke for the next tick. Idempotent — a spent tick is a no-op. The reconcile schedule fires this.",
+        "triggers": {
+          "ko": "실행 진행 틱 조정"
+        },
+        "params": {},
+        "returns": "{ ran, published, ... }"
       },
       {
         "name": "research",
         "title": {
           "ko": "조사 워크플로를 발행합니다",
           "en": "Publishes the research workflow"
-        }
+        },
+        "bind": "service",
+        "description": "Publish the research workflow for a plan chunk — gathers evidence (facts) before the plan turn. Requires the chunk to have passed its research gate.",
+        "triggers": {
+          "ko": "조사 리서치 발행"
+        },
+        "params": {
+          "chunk": {
+            "type": "string",
+            "required": true,
+            "description": "Chunk id to research."
+          }
+        },
+        "returns": "{ ok, published }"
       },
       {
         "name": "issuerize",
         "title": {
           "ko": "계획을 개발 이슈로 승격합니다",
           "en": "Promotes plans to issues"
-        }
+        },
+        "bind": "service",
+        "description": "Promote a confirmed plan chunk into development issues (unlock issues). Requires the chunk's audit to have passed.",
+        "triggers": {
+          "ko": "이슈 승격 발행 계획"
+        },
+        "params": {
+          "chunk": {
+            "type": "string",
+            "required": true,
+            "description": "Chunk id to promote."
+          }
+        },
+        "returns": "{ ok, issues }"
       },
       {
         "name": "next",
         "title": {
           "ko": "검증 노드의 실행 패키지를 발급합니다",
           "en": "Issues a verification work package"
-        }
+        },
+        "bind": "service",
+        "description": "Issue the next work package for an external executor (pull v2): the {prompt, schema} for a verification node or an authoring turn, leased so the spawn path skips it. Optionally scoped to a chunk.",
+        "triggers": {
+          "ko": "다음 패키지 발급 검증"
+        },
+        "params": {
+          "chunk": {
+            "type": "string",
+            "required": false,
+            "description": "Chunk id to scope the package; omit for any ready node."
+          }
+        },
+        "returns": "{ ok, node, prompt, schema } or { ok, idle }"
       },
       {
         "name": "submit",
         "title": {
           "ko": "검증 판정을 제출합니다",
           "en": "Submits a verification verdict"
-        }
+        },
+        "bind": "service",
+        "description": "Submit an external executor's output for a node — extracted into the same pipe as the spawn path (oxf verdict -> badge/result -> poke). No retry latitude: submission is an explicit act.",
+        "triggers": {
+          "ko": "제출 판정 검증"
+        },
+        "params": {
+          "node": {
+            "type": "string",
+            "required": true,
+            "description": "Node id being submitted."
+          },
+          "output": {
+            "type": "json",
+            "required": true,
+            "description": "The executor's output object for that node."
+          }
+        },
+        "returns": "{ ok, badge, ... }"
       },
       {
         "name": "export",
         "title": {
           "ko": "확정 코드를 파일로 내보냅니다",
           "en": "Exports confirmed code to files"
-        }
+        },
+        "bind": "service",
+        "description": "Write a chunk's confirmed code to files under `dir`. Materializes the ledger and emits each confirmed body to its path.",
+        "triggers": {
+          "ko": "내보내기 익스포트 파일 확정"
+        },
+        "params": {
+          "chunk": {
+            "type": "string",
+            "required": true,
+            "description": "Chunk id to export."
+          },
+          "dir": {
+            "type": "string",
+            "required": true,
+            "description": "Destination directory (absolute) for the written files."
+          }
+        },
+        "returns": "{ ok, written }"
+      }
+    ],
+    "schedules": [
+      {
+        "name": "reconcile",
+        "command": "reconcile",
+        "trigger": {
+          "reconcile": true
+        },
+        "timeoutMs": 1800000,
+        "zombieBackstopMs": 3600000
       }
     ],
     "skill": {

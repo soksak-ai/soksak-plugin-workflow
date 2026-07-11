@@ -10,11 +10,11 @@ explicit commit.
 | # | Deliverable | Where |
 |---|---|---|
 | D1 | Directive suite: design (domain models / interfaces / acceptance criteria, one unified turn) · plan (pseudocode units for every file) · body (per-file real code + PROOF) · three verify templates | `workflows/research.doc.json` |
-| D2 | issuerize redefined: confirmed o-units become per-file codification body tasks (the old "unlock issue" form is gone) | `main.js` issuerizeTick |
+| D2 | issuerize redefined: confirmed o-units become per-file codification body tasks (the old "unlock issue" form is gone) | the service (issuerize_tick) |
 | D3 | Methodology tournament assets: two decomposition variant docs (parallel / chain) + committed runner + metrics | `e2e/methodologies/` · `tools/run-tournament.zsh` |
-| D4 | CLI executor surface: `next` (execution package for a ready verification node) / `submit` (output back into the same badge pipeline) + a usage skill teaching the next→perform→submit loop. No claude -p call — an external LLM pulls, performs, submits. Scope v1 = verification nodes (stage tasks stay spawn-owned) | `main.js` + `plugin.json` + bundled skill |
+| D4 | CLI executor surface: `next` (execution package for a ready verification node) / `submit` (output back into the same badge pipeline) + a usage skill teaching the next→perform→submit loop. No claude -p call — an external LLM pulls, performs, submits. Scope v1 = verification nodes (stage tasks stay spawn-owned) | the service + `plugin.json` + bundled skill |
 | D5 | Run catalog: raw per-call event stream + latest symlink | `src/provider.rs` (done) |
-| D6 | Code export: write confirmed code nodes to a real file tree (explicit target dir, confirmed code only) | `main.js` export command |
+| D6 | Code export: write confirmed code nodes to a real file tree (explicit target dir, confirmed code only) | the service (export_tick) |
 
 ## 2. Definition of done — all of C1–C5, each with evidence
 

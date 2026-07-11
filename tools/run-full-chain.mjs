@@ -9,7 +9,6 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { buildLedger, validateDraftDoc } from "../main.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -65,6 +64,13 @@ function callSidecar(args, stdinObj) {
     spawnSync("sleep", ["300"]);
   }
 }
+
+// buildLedger·validateDraftDoc — 사이드카 서브커맨드의 얇은 클라이언트(LLM 0). 로직 단일진실은
+// Rust(reconcile::build_ledger·draft_doc::validate) — main.js JS 재구현은 소멸했다(§S4).
+const buildLedger = (nodes, chunkId, kind) =>
+  JSON.parse(callSidecar(["build-ledger", "--chunk", chunkId, "--kind", kind], { nodes }));
+const validateDraftDoc = (ddoc) =>
+  JSON.parse(callSidecar(["validate-draft"], ddoc)).violations;
 
 // ── 검증(exec-one) — kind→템플릿 매핑, vars 치환(런타임 resolve 계약 미러) ──
 function verifyTemplate(node) {

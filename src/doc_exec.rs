@@ -2,7 +2,7 @@
 //!
 //! 저작 LLM 이 JS 코드(gen.js) 대신 **선언형 문서**를 내고, 이 실행기가 stage 를 돈다.
 //! interp(ESTree AST) 경로의 문서 대체 — 경계는 전부 재사용: publish → NodeEvent(EmitHost 와 동일 wire),
-//! agent → 러너 클로저(ClaudeHost 동형), generate 산출 → draft_doc build/validate, relay(main.js) 무변경.
+//! agent → 러너 클로저(ClaudeHost 동형), generate 산출 → draft_doc build/validate, relay(서비스) 무변경.
 //! JS 표면의 취약성(문법 실패·펜스·클론 VM 제약)이 스키마 검증(validate, fail-loud)으로 대체된다.
 //!
 //! 문서 형태:
@@ -1072,7 +1072,7 @@ mod tests {
 
     #[test]
     fn events_serialize_same_wire_as_interp_path() {
-        // relay(main.js handleEv) 가 파싱하는 wire — {"ev":"add", snake_case 필드}. interp 경로와 동일 serde.
+        // relay(서비스 relay) 가 파싱하는 wire — {"ev":"add", snake_case 필드}. interp 경로와 동일 serde.
         let (events, _) = run(&mini_doc(), "", &json!({ "directive": "d" }), &mut no_agent).unwrap();
         let line = serde_json::to_string(&events[0]).unwrap();
         assert!(line.contains("\"ev\":\"add\""), "{line}");

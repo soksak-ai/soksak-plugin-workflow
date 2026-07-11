@@ -98,7 +98,7 @@ fn real_main() -> Result<(), String> {
 
     // exec-stage — stage 작업 실행(동적 발행). stdin {workflow|skeleton(doc), stage, args:{directive, chunkRef, ledger…}}
     // → doc_exec 로 stage 실행(agent=claude, publish=NodeEvent) → 자식 {ev:add} JSON line + 최종 {ev:result}
-    // (generate 는 DraftDoc 1문서). main.js reconcile 가 kind=task 노드를 이 경로로 실행해 항목/fact 동적 발행.
+    // (generate 는 DraftDoc 1문서). 서비스 reconcile 이 kind=task 노드를 이 경로로 실행해 항목/fact 동적 발행.
     if argv[0] == "exec-stage" {
         return run_exec_stage(&argv);
     }
@@ -107,6 +107,14 @@ fn real_main() -> Result<(), String> {
     // system=workflow-doc 저작 스킬 + soksak draft-skill.md(역할), user=아이디어+③파생.
     if argv[0] == "generate-skeleton" {
         return run_generate_skeleton(&argv);
+    }
+    // build-ledger·validate-draft — reconcile 순수부의 CLI 미러(app-0 러너용, LLM 0). 로직 단일진실은
+    // Rust(reconcile::build_ledger·draft_doc::validate) — 이전 JS(main.js) 재구현은 소멸했다.
+    if argv[0] == "build-ledger" {
+        return run_build_ledger(&argv);
+    }
+    if argv[0] == "validate-draft" {
+        return run_validate_draft();
     }
 
     // --workflow <name> — 번들 정본 워크플로(sidecar_root/workflows/<name>.doc.json) 해석(경로 대신 이름).
@@ -186,6 +194,52 @@ fn real_main() -> Result<(), String> {
     Ok(())
 }
 
+/// run_build_ledger — build-ledger 서브커맨드(LLM 0). stdin {nodes:[...]} + --chunk <id> --kind <kind>
+/// → 원장 JSON 배열(stdout). reconcile::build_ledger 의 CLI 미러 — app-0 러너가 JS 재구현 없이 소비한다.
+fn run_build_ledger(argv: &[String]) -> Result<(), String> {
+    use soksak_sidecar_workflow::reconcile::{build_ledger, Node};
+    let mut chunk = String::new();
+    let mut kind = String::new();
+    let mut i = 1;
+    while i < argv.len() {
+        match argv[i].as_str() {
+            "--chunk" => {
+                i += 1;
+                chunk = argv.get(i).cloned().ok_or("--chunk 값 누락")?;
+            }
+            "--kind" => {
+                i += 1;
+                kind = argv.get(i).cloned().ok_or("--kind 값 누락")?;
+            }
+            other => return Err(format!("build-ledger: 미지 인자 {other:?}")),
+        }
+        i += 1;
+    }
+    if chunk.is_empty() || kind.is_empty() {
+        return Err("build-ledger: --chunk·--kind 필수".to_string());
+    }
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| format!("read stdin: {e}"))?;
+    let input: Value = serde_json::from_str(&raw).map_err(|e| format!("stdin JSON: {e}"))?;
+    let nodes: Vec<Node> = serde_json::from_value(input.get("nodes").cloned().unwrap_or_else(|| Value::Array(vec![])))
+        .map_err(|e| format!("nodes 파싱: {e}"))?;
+    let ledger = build_ledger(&nodes, &chunk, &kind);
+    println!("{}", serde_json::to_string(&ledger).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// run_validate_draft — validate-draft 서브커맨드(LLM 0). stdin <draft-doc> → {violations:[...]}
+/// (빈 배열=유효). draft_doc::validate 의 CLI 미러 — 검증 로직 단일진실은 Rust.
+fn run_validate_draft() -> Result<(), String> {
+    use soksak_sidecar_workflow::draft_doc::{validate, DraftDoc};
+    let mut raw = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut raw).map_err(|e| format!("read stdin: {e}"))?;
+    let doc: DraftDoc = serde_json::from_str(&raw).map_err(|e| format!("draft-doc 파싱: {e}"))?;
+    let violations = validate(&doc).err().unwrap_or_default();
+    println!("{}", json!({ "violations": violations }));
+    Ok(())
+}
+
 /// run_exec_one — exec-one 서브커맨드. stdin {prompt, schema?, model?} 한 노드 → claude → {oxf, result}.
 fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let mut lang: Option<Language> = None;
@@ -236,7 +290,7 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
 
 /// run_exec_stage — stage 작업 실행(모델 B). stdin {skeleton:{program}, stage, args, model?} → ClaudeEmitHost 해석.
 /// opts.publish 없는 agent(예: genPrompt)는 claude 실행, opts.publish:true agent 는 자식 노드 발행(stdout JSON line).
-/// 최종 워크플로 return 은 {ev:result, value} 로. main.js reconcile 가 kind=task 노드를 이걸로 실행해 동적 발행.
+/// 최종 워크플로 return 은 {ev:result, value} 로. 서비스 reconcile 이 kind=task 노드를 이걸로 실행해 동적 발행.
 fn run_exec_stage(argv: &[String]) -> Result<(), String> {
     let mut lang: Option<Language> = None;
     let mut allow_tools: Vec<String> = vec![];

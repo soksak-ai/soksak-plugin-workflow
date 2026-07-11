@@ -33,9 +33,9 @@ build:
 	cd $(SOKSAK) && cargo build --release --bin soksak-sidecar-workflow
 
 # test — 결정적 단위/통합(플러그인 self-contained). LLM 미호출.
+# reconcile.test.mjs(main.js JS 유닛)는 소멸했다 — 로직은 Rust(reconcile tick 63케이스)가 소유한다.
 test:
 	cd $(SOKSAK) && cargo test
-	cd $(SOKSAK) && node --test reconcile.test.mjs
 
 # e2e — LLM 저작(인증 env 주입식). idea → workflow-doc(JSON) → 발행 스모크(chunk + generate task 확인).
 e2e: build
