@@ -156,11 +156,17 @@ impl Deps for FakeDeps {
     fn get_prompt(&self, _hash: &str) -> Option<Value> {
         self.get_prompt_out.clone()
     }
-    fn assemble_stage(&self, _body: &str) -> Option<Result<Value, String>> {
-        self.assemble_out.clone()
+    fn has_assemble_stage(&self) -> bool {
+        self.assemble_out.is_some()
     }
-    fn exec_stage_with_output(&self, _body: &str, _out: Value) -> Option<Result<StageOut, String>> {
-        self.stage_with_output_out.clone()
+    fn assemble_stage(&self, _body: &str) -> Result<Value, String> {
+        self.assemble_out.clone().unwrap_or_else(|| Err("assembleStage 미배선".into()))
+    }
+    fn has_exec_stage_with_output(&self) -> bool {
+        self.stage_with_output_out.is_some()
+    }
+    fn exec_stage_with_output(&self, _body: &str, _out: Value) -> Result<StageOut, String> {
+        self.stage_with_output_out.clone().unwrap_or_else(|| Err("execStageWithOutput 미배선".into()))
     }
 }
 fn nodes(vs: Vec<Value>) -> Vec<Node> {
@@ -672,6 +678,347 @@ fn reconcile_stage_workflowref_propagates_to_child_task() {
     let plan_add = d.c().add_find(|p| p["kind"] == "task").cloned().unwrap();
     let body: Value = serde_json::from_str(plan_add["body"].as_str().unwrap()).unwrap();
     assert_eq!(body, json!({ "workflow": "research", "stage": "plan", "args": { "directive": "정련", "chunkRef": "chunk" } }));
+}
+
+// ── extractOxf(exec_one 재사용 확인) ────────────────────────────────────────
+#[test]
+fn extract_oxf_keys_and_normalization() {
+    use crate::exec_one::extract_oxf;
+    assert_eq!(extract_oxf(&json!({ "oxf": "o" })).as_deref(), Some("o"));
+    assert_eq!(extract_oxf(&json!({ "oxf": " X " })).as_deref(), Some("x"));
+    assert_eq!(extract_oxf(&json!({ "verdict": "f" })).as_deref(), Some("f"));
+    assert_eq!(extract_oxf(&json!({ "oxf": "pass" })), None);
+    assert_eq!(extract_oxf(&json!("문자열")), None);
+    assert_eq!(extract_oxf(&Value::Null), None);
+}
+
+// ── nextTick / submitTick (chunk 3) ─────────────────────────────────────────
+// cliDeps: getNode 가 fullBody 를 body 로 주입(main.js cliDeps). resolve_body 실경로 —
+// body 의 promptHash→resolve_out(prompt), schemaHash→get_prompt_out(value) 로 조립(스텁 대신).
+fn cli_deps(nodes: Vec<Node>, full_body: &str) -> FakeDeps {
+    let mut ns = nodes;
+    for n in &mut ns {
+        n.body = Some(full_body.to_string());
+    }
+    let mut d = FakeDeps::new(ns);
+    d.resolve_out = Some(json!({ "prompt": "VERIFY: 항목을 판정하라" }));
+    d.get_prompt_out = Some(json!({ "value": { "required": ["oxf"] } }));
+    d
+}
+
+#[test]
+fn next_tick_returns_verify_package_with_lease() {
+    let ns = nodes(vec![
+        json!({ "id": "t1", "kind": "task", "status": "todo", "blockedBy": [] }),
+        json!({ "id": "v1", "kind": "item", "badge": "검수전", "blockedBy": [], "title": "요건 검증" }),
+    ]);
+    let d = cli_deps(ns, "{\"promptHash\":\"h\",\"schemaHash\":\"sh\"}");
+    let mut st = ReconcileState::default();
+    let r = next_tick(&d, &mut st, None, 0);
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["node"]["id"], "v1");
+    assert!(r["prompt"].as_str().unwrap().contains("VERIFY"));
+    assert!(r["schema"].is_object());
+    assert!(lease_active(&mut st, "v1", 0));
+}
+
+#[test]
+fn next_tick_leased_node_not_redistributed() {
+    let ns = nodes(vec![json!({ "id": "v1", "kind": "item", "badge": "검수전", "blockedBy": [], "title": "요건" })]);
+    let mut st = ReconcileState::default();
+    next_tick(&cli_deps(ns.clone(), "{\"promptHash\":\"h\"}"), &mut st, None, 0);
+    let r2 = next_tick(&cli_deps(ns, "{\"promptHash\":\"h\"}"), &mut st, None, 0);
+    assert_eq!(r2["ok"], true);
+    assert_eq!(r2["node"], Value::Null);
+}
+
+#[test]
+fn reconcile_tick_skips_leased_node() {
+    let ns = nodes(vec![json!({ "id": "v1", "kind": "item", "badge": "검수전", "blockedBy": [], "title": "요건", "body": "" })]);
+    let mut st = ReconcileState::default();
+    st.leases.insert("v1".into(), 60_000);
+    let d = FakeDeps::new(ns).exec(json!({ "oxf": "o", "result": "ok" }));
+    let r = reconcile_tick(&d, &mut st, 0);
+    assert_eq!(r["processed"], 0);
+}
+
+#[test]
+fn submit_tick_pipe_and_lease_release() {
+    let ns = nodes(vec![json!({ "id": "v1", "kind": "item", "badge": "검수전", "title": "요건" })]);
+    let mut st = ReconcileState::default();
+    st.leases.insert("v1".into(), 60_000);
+    let d = cli_deps(ns, "{}");
+    let r = submit_tick(&d, &mut st, "v1", &json!({ "oxf": "o", "origin": "agent", "reason": "실재 요건" }));
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["badge"], "o");
+    assert_eq!(d.c().edit[0].0, "v1");
+    assert_eq!(d.c().edit[0].1["badge"], "o");
+    assert!(d.c().edit[0].1["result"].as_str().unwrap().contains("실재 요건"));
+    assert_eq!(d.c().poke, 1);
+    assert!(!lease_active(&mut st, "v1", 0));
+}
+
+#[test]
+fn submit_tick_already_done_rejected() {
+    let ns = nodes(vec![json!({ "id": "v1", "kind": "item", "badge": "o", "title": "요건" })]);
+    let d = cli_deps(ns, "{}");
+    let mut st = ReconcileState::default();
+    let r = submit_tick(&d, &mut st, "v1", &json!({ "oxf": "x" }));
+    assert_eq!(r["ok"], false);
+    assert_eq!(r["code"], "ALREADY_DONE");
+    assert_eq!(d.c().edit.len(), 0);
+}
+
+#[test]
+fn submit_tick_no_verdict_rejected() {
+    let ns = nodes(vec![json!({ "id": "v1", "kind": "item", "badge": "검수전", "title": "요건" })]);
+    let d = cli_deps(ns, "{}");
+    let mut st = ReconcileState::default();
+    let r = submit_tick(&d, &mut st, "v1", &json!({ "reason": "판정 없이" }));
+    assert_eq!(r["ok"], false);
+    assert_eq!(r["code"], "INVALID_INPUT");
+    assert_eq!(d.c().edit.len(), 0);
+}
+
+// ── reconcileStage plan/design ground(o only) ───────────────────────────────
+#[test]
+fn reconcile_stage_plan_ground_o_only() {
+    let mixed = vec![
+        json!({ "id": "i1", "title": "요건A", "badge": "o" }),
+        json!({ "id": "i2", "title": "요건B", "badge": "x" }),
+        json!({ "id": "f1", "title": "fact치명", "badge": "f" }),
+    ];
+    let ns = nodes(vec![json!({ "id": "plan", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"workflow\":\"research\",\"stage\":\"plan\",\"args\":{\"directive\":\"d\"}}" })]);
+    let d = FakeDeps::new(ns).stage(staged_children(vec![], Value::Null)).ledger(mixed.clone()).facts(mixed);
+    tick(&d);
+    let sent: Value = serde_json::from_str(&d.c().stage[0]).unwrap();
+    let ledger_ids: Vec<&str> = sent["args"]["ledger"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ledger_ids, vec!["i1"], "plan 요건 원장 = o 만");
+    let fact_ids: Vec<&str> = sent["args"]["facts"].as_array().unwrap().iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(fact_ids, vec!["i1"], "plan ground = o 만");
+}
+
+// ── exportTick (chunk 4) ────────────────────────────────────────────────────
+#[test]
+fn export_tick_o_codes_only_proof_stripped() {
+    let ns = nodes(vec![
+        json!({ "id": "chunk", "kind": "chunk", "parentId": null, "badge": "o" }),
+        json!({ "id": "c1", "kind": "code", "parentId": "chunk", "title": "src/a.ts", "badge": "o", "description": "export const a = 1;\n\n---- PROOF ----\ncommands: [\"tsc\"]" }),
+        json!({ "id": "c2", "kind": "code", "parentId": "chunk", "title": "src/b.ts", "badge": "x", "description": "버려진 코드" }),
+    ]);
+    let d = FakeDeps::new(ns);
+    let written = RefCell::new(Vec::<(String, String)>::new());
+    // write_file 은 기본 no-op — 기록을 위해 별도 FakeDeps 확장 대신 결과만 검증.
+    let r = export_tick(&ExportDeps { inner: d, written: &written }, "chunk", "/tmp/out");
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["files"], json!(["src/a.ts"]));
+    let w = written.borrow();
+    assert_eq!(w[0].0, "src/a.ts");
+    assert!(w[0].1.contains("export const a = 1;"));
+    assert!(!w[0].1.contains("PROOF"));
+}
+
+// export 는 write_file 을 기록해야 하므로 얇은 래퍼로 위임.
+struct ExportDeps<'a> {
+    inner: FakeDeps,
+    written: &'a RefCell<Vec<(String, String)>>,
+}
+impl Deps for ExportDeps<'_> {
+    fn list_nodes(&self) -> Vec<Node> {
+        self.inner.list_nodes()
+    }
+    fn get_node(&self, id: &str) -> Option<Node> {
+        self.inner.get_node(id)
+    }
+    fn edit_node(&self, id: &str, f: Value) -> EditResult {
+        self.inner.edit_node(id, f)
+    }
+    fn add_node(&self, p: Value) -> Option<String> {
+        self.inner.add_node(p)
+    }
+    fn poke(&self) {
+        self.inner.poke()
+    }
+    fn exec_one(&self, b: &str) -> Result<Value, String> {
+        self.inner.exec_one(b)
+    }
+    fn exec_stage(&self, b: &str) -> Result<StageOut, String> {
+        self.inner.exec_stage(b)
+    }
+    fn materialize_ledger(&self, c: &str) -> Result<Vec<Value>, String> {
+        self.inner.materialize_ledger(c)
+    }
+    fn materialize_facts(&self, c: &str) -> Result<Vec<Value>, String> {
+        self.inner.materialize_facts(c)
+    }
+    fn put_prompt(&self, v: Value) -> Option<String> {
+        self.inner.put_prompt(v)
+    }
+    fn write_file(&self, rel: &str, content: &str) {
+        self.written.borrow_mut().push((rel.to_string(), content.to_string()));
+    }
+}
+
+#[test]
+fn export_tick_pending_code_rejected() {
+    let ns = nodes(vec![
+        json!({ "id": "chunk", "kind": "chunk", "parentId": null, "badge": "o" }),
+        json!({ "id": "c1", "kind": "code", "parentId": "chunk", "title": "src/a.ts", "badge": "검수전", "description": "code" }),
+    ]);
+    let r = export_tick(&FakeDeps::new(ns), "chunk", "/tmp/out");
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("미확정 code 1건"));
+}
+
+#[test]
+fn export_tick_no_code_gate() {
+    let ns = nodes(vec![json!({ "id": "chunk", "kind": "chunk", "parentId": null, "badge": "o" })]);
+    let r = export_tick(&FakeDeps::new(ns), "chunk", "/tmp/out");
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("code 노드 없음"));
+}
+
+#[test]
+fn export_tick_path_escape_rejected() {
+    for bad in ["/etc/passwd", "../evil.ts", "a/../../evil.ts"] {
+        let ns = nodes(vec![
+            json!({ "id": "chunk", "kind": "chunk", "parentId": null, "badge": "o" }),
+            json!({ "id": "c1", "kind": "code", "parentId": "chunk", "title": bad, "badge": "o", "description": "x" }),
+        ]);
+        let r = export_tick(&FakeDeps::new(ns), "chunk", "/tmp/out");
+        assert_eq!(r["ok"], false, "{bad}");
+        assert_eq!(r["code"], "INVALID_INPUT", "{bad}");
+    }
+}
+
+// ── issuerizeTick (chunk 4) ─────────────────────────────────────────────────
+fn issuerize_nodes() -> Vec<Node> {
+    nodes(vec![
+        json!({ "id": "chunk", "kind": "chunk", "parentId": null, "badge": "o", "status": "todo", "description": "정련 지시 전문" }),
+        json!({ "id": "i0", "kind": "item", "parentId": "chunk", "title": "요건", "badge": "o" }),
+        json!({ "id": "f0", "kind": "fact", "parentId": "chunk", "title": "프레임워크: X 채택", "badge": "o" }),
+        json!({ "id": "f1", "kind": "fact", "parentId": "chunk", "title": "방법론: 근거 부족", "badge": "x" }),
+        json!({ "id": "u0", "kind": "plan-unit", "parentId": "chunk", "title": "재고 차감 구현", "description": "PSEUDO:\n차감(order)…", "category": "src/deduct.ts", "badge": "o" }),
+        json!({ "id": "u1", "kind": "plan-unit", "parentId": "chunk", "title": "동기화 구현", "description": "PSEUDO:\nsync()…", "category": "src/sync.ts", "badge": "x" }),
+    ])
+}
+
+#[test]
+fn issuerize_gate_pass_issues_o_units() {
+    let d = FakeDeps::new(issuerize_nodes());
+    let r = issuerize_tick(&d, "chunk");
+    assert_eq!(r["ok"], true);
+    assert_eq!(r["issued"], 1);
+    let first = &d.c().add[0];
+    assert_eq!(first["kind"], "task");
+    assert_eq!(first["parentId"], "chunk");
+    let body: Value = serde_json::from_str(first["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["workflow"], "research");
+    assert_eq!(body["stage"], "body");
+    assert_eq!(body["args"]["file_path"], "src/deduct.ts");
+    assert!(body["args"]["pseudocode"].as_str().unwrap().contains("PSEUDO"));
+    assert_eq!(body["args"]["directive"], "정련 지시 전문");
+    assert_eq!(body["args"]["chunkRef"], "chunk");
+}
+
+#[test]
+fn issuerize_unverified_unit_rejected() {
+    let mut ns = issuerize_nodes();
+    ns[4].badge = Some("검수전".into());
+    let r = issuerize_tick(&FakeDeps::new(ns), "chunk");
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("유닛 미검증"));
+}
+
+#[test]
+fn issuerize_unconfirmed_chunk_rejected() {
+    let mut ns = issuerize_nodes();
+    ns[0].badge = Some("f".into());
+    let d = FakeDeps::new(ns);
+    let r = issuerize_tick(&d, "chunk");
+    assert_eq!(r["ok"], false);
+    assert!(r["message"].as_str().unwrap().contains("미인증"));
+    assert_eq!(d.c().add.len(), 0);
+}
+
+#[test]
+fn issuerize_gate_missing_stages() {
+    let no_facts: Vec<Node> = issuerize_nodes().into_iter().filter(|n| n.kind.as_deref() != Some("fact")).collect();
+    assert!(issuerize_tick(&FakeDeps::new(no_facts), "chunk")["message"].as_str().unwrap().contains("research 미경유"));
+    let mut pending = issuerize_nodes();
+    pending[2].badge = Some("검수전".into());
+    assert!(issuerize_tick(&FakeDeps::new(pending), "chunk")["message"].as_str().unwrap().contains("미검증 1건"));
+    let no_units: Vec<Node> = issuerize_nodes().into_iter().filter(|n| n.kind.as_deref() != Some("plan-unit")).collect();
+    assert!(issuerize_tick(&FakeDeps::new(no_units), "chunk")["message"].as_str().unwrap().contains("plan 미경유"));
+}
+
+#[test]
+fn issuerize_idempotent_when_covered() {
+    let mut with_code = issuerize_nodes();
+    with_code.push(node(json!({ "id": "c0", "kind": "code", "parentId": "chunk", "title": "src/deduct.ts", "category": "src/deduct.ts", "badge": "검수전" })));
+    assert!(issuerize_tick(&FakeDeps::new(with_code), "chunk")["message"].as_str().unwrap().contains("이미 이슈라이즈"));
+    let mut with_task = issuerize_nodes();
+    with_task.push(node(json!({ "id": "t0", "kind": "task", "parentId": "chunk", "title": "실코드화", "status": "todo", "body": "{\"workflow\":\"research\",\"stage\":\"body\",\"args\":{\"file_path\":\"src/deduct.ts\"}}" })));
+    let d = FakeDeps::new(with_task);
+    assert!(issuerize_tick(&d, "chunk")["message"].as_str().unwrap().contains("이미 이슈라이즈"));
+    assert_eq!(d.c().add.len(), 0);
+}
+
+#[test]
+fn issuerize_rework_on_rejected_code() {
+    let mut ns = issuerize_nodes();
+    ns.push(node(json!({ "id": "c0", "kind": "code", "parentId": "chunk", "title": "src/deduct.ts", "category": "src/deduct.ts", "badge": "f", "result": "{\"oxf\":\"f\",\"reason\":\"store 계약 위반 — mutate 반환형 오용\"}" })));
+    let d = FakeDeps::new(ns);
+    let r = issuerize_tick(&d, "chunk");
+    assert_eq!(r["ok"], true, "{r}");
+    assert_eq!(d.c().add.len(), 1);
+    let body: Value = serde_json::from_str(d.c().add[0]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["args"]["file_path"], "src/deduct.ts");
+    assert!(body["args"]["pseudocode"].as_str().unwrap().contains("store 계약 위반"));
+}
+
+// ── researchGate (chunk 4) ──────────────────────────────────────────────────
+fn gate_deps(nodes: Vec<Node>, bodies: Vec<(&str, &str)>) -> FakeDeps {
+    let bmap: HashMap<String, String> = bodies.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    let mut ns = nodes;
+    for n in &mut ns {
+        if let Some(b) = bmap.get(&n.id) {
+            n.body = Some(b.clone());
+        }
+    }
+    FakeDeps::new(ns)
+}
+
+#[test]
+fn research_gate_pass() {
+    let ns = nodes(vec![json!({ "id": "chunk", "kind": "chunk", "badge": "o", "description": "정련 지시" })]);
+    let g = research_gate(&gate_deps(ns, vec![]), "chunk");
+    assert_eq!(g["ok"], true);
+    assert_eq!(g["directive"], "정련 지시");
+}
+
+#[test]
+fn research_gate_rejections() {
+    assert!(research_gate(&FakeDeps::new(vec![]), "chunk")["message"].as_str().unwrap().contains("미존재"));
+    let unconfirmed = nodes(vec![json!({ "id": "chunk", "badge": "검수전", "description": "d" })]);
+    assert!(research_gate(&FakeDeps::new(unconfirmed), "chunk")["message"].as_str().unwrap().contains("미인증"));
+    let no_desc = nodes(vec![json!({ "id": "chunk", "badge": "o", "description": " " })]);
+    assert!(research_gate(&FakeDeps::new(no_desc), "chunk")["message"].as_str().unwrap().contains("비어있음"));
+}
+
+#[test]
+fn research_gate_idempotent() {
+    let with_fact = nodes(vec![
+        json!({ "id": "chunk", "kind": "chunk", "badge": "o", "description": "d" }),
+        json!({ "id": "f0", "kind": "fact", "parentId": "chunk" }),
+    ]);
+    assert!(research_gate(&FakeDeps::new(with_fact), "chunk")["message"].as_str().unwrap().contains("fact 존재"));
+    let with_task = nodes(vec![
+        json!({ "id": "chunk", "kind": "chunk", "badge": "o", "description": "d" }),
+        json!({ "id": "t1", "kind": "task", "parentId": "chunk" }),
+    ]);
+    let g = research_gate(&gate_deps(with_task, vec![("t1", "{\"workflow\":\"research\",\"stage\":\"research\"}")]), "chunk");
+    assert!(g["message"].as_str().unwrap().contains("research task 발행됨"));
 }
 
 // ── stagePublishedMarker ────────────────────────────────────────────────────

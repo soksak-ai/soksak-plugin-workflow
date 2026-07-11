@@ -39,6 +39,9 @@ pub struct Node {
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// 검증 결과(JSON 문자열 등) — issuerize 가 반려 사유(result.reason) 를 읽는다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 impl Node {
@@ -102,12 +105,19 @@ pub trait Deps {
         None
     }
 
-    // pull(next/submit) seam — 미배선이면 None(검증 노드 경로).
-    fn assemble_stage(&self, _body: &str) -> Option<Result<Value, String>> {
-        None
+    // pull(next/submit) seam — 배선 여부는 has_* 로 질의(JS 의 deps.assembleStage 존재 검사 대응).
+    // 미배선(기본)이면 검증 노드 경로. 프로브 호출 금지(production 이 빈 body 로 조립하는 오류).
+    fn has_assemble_stage(&self) -> bool {
+        false
     }
-    fn exec_stage_with_output(&self, _body: &str, _out: Value) -> Option<Result<StageOut, String>> {
-        None
+    fn assemble_stage(&self, _body: &str) -> Result<Value, String> {
+        Err("assembleStage 미배선".into())
+    }
+    fn has_exec_stage_with_output(&self) -> bool {
+        false
+    }
+    fn exec_stage_with_output(&self, _body: &str, _out: Value) -> Result<StageOut, String> {
+        Err("execStageWithOutput 미배선".into())
     }
 
     // export — 파일 쓰기.
@@ -795,6 +805,311 @@ pub fn reconcile_tick(deps: &dyn Deps, state: &mut ReconcileState, now_ms: u64) 
         deps.poke();
     }
     json!({ "ok": true, "processed": 1, "id": target.id, "badge": final_badge })
+}
+
+/// pull v2: 다음 실행 노드 조립(main.js nextTick) — 검증 노드 우선, 없으면 stage task(assemble).
+/// lease 를 잡아 스케줄러 spawn 과의 경합을 막는다. chunk=스코프(팬아웃).
+pub fn next_tick(deps: &dyn Deps, state: &mut ReconcileState, chunk: Option<&str>, now_ms: u64) -> Value {
+    let nodes = deps.list_nodes();
+    let by_id: HashMap<String, &Node> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let in_scope = |n: &Node| -> bool {
+        let Some(scope) = chunk else { return true };
+        if n.id == scope {
+            return false; // 스코프 자신은 실행 대상 아님(자손만).
+        }
+        let mut p = n.parent_id.clone();
+        let mut guard = 0;
+        while let Some(pid) = p {
+            if guard >= 100 {
+                break;
+            }
+            guard += 1;
+            if pid == scope {
+                return true;
+            }
+            p = by_id.get(&pid).and_then(|m| m.parent_id.clone());
+        }
+        false
+    };
+    let ready_all: Vec<Node> = pick_ready(&nodes).into_iter().filter(|n| !lease_active(state, &n.id, now_ms) && in_scope(n)).collect();
+    let ready: Vec<Node> = ready_all.iter().filter(|n| n.kind.as_deref() != Some("task") && n.badge.as_deref() == Some("검수전")).cloned().collect();
+
+    // 검증 노드 없고 assemble 배선됐으면 stage task pull.
+    if ready.is_empty() && deps.has_assemble_stage() {
+        for t in ready_all.iter().filter(|n| n.kind.as_deref() == Some("task") && n.status.as_deref() != Some("done")) {
+            let tn = match deps.get_node(&t.id) {
+                Some(n) => n,
+                None => continue,
+            };
+            let stage_name = match serde_json::from_str::<Value>(tn.body_str()).ok().and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from)) {
+                Some(s) if !s.is_empty() => s,
+                _ => continue,
+            };
+            // 병합 타겟 — 전체 노드의 parentId/blockedBy.
+            let target = tn.clone();
+            if stage_published_marker(&target, tn.body_str(), &stage_name, &nodes) {
+                deps.edit_node(&t.id, json!({ "status": "done" }));
+                deps.poke();
+                continue;
+            }
+            let built = match build_stage_input(deps, &target, tn.body_str(), &stage_name) {
+                Ok(b) => b,
+                Err(e) => return json!({ "ok": false, "code": e.get("code").cloned().unwrap_or(json!("INTERNAL")), "message": e.get("message").cloned().unwrap_or(Value::Null) }),
+            };
+            let asm = match deps.assemble_stage(&built.stage_body) {
+                Ok(a) => a,
+                Err(e) => return json!({ "ok": false, "code": "INTERNAL", "message": format!("stage 패키지 조립 실패({}): {e}", t.id) }),
+            };
+            let pkg = asm.get("assembled");
+            let prompt = pkg.and_then(|p| p.get("prompt")).filter(|v| !v.is_null());
+            if prompt.is_none() {
+                return json!({ "ok": false, "code": "INTERNAL", "message": format!("stage 패키지에 prompt 없음({})", t.id) });
+            }
+            state.leases.insert(t.id.clone(), now_ms + NEXT_LEASE_MS);
+            state.stage_ctx.insert(
+                t.id.clone(),
+                StageCtx { stage_body: built.stage_body.clone(), stage_name: stage_name.clone(), ledger: built.ledger.clone(), body: tn.body_str().to_string() },
+            );
+            return json!({
+                "ok": true,
+                "node": { "id": t.id, "kind": "task", "stage": stage_name, "title": tn.title.clone().unwrap_or_default() },
+                "prompt": prompt,
+                "schema": pkg.and_then(|p| p.get("schema")),
+                "leaseMs": NEXT_LEASE_MS,
+            });
+        }
+        return json!({ "ok": true, "node": null, "message": "실행할 준비된 노드가 없습니다" });
+    }
+    if ready.is_empty() {
+        return json!({ "ok": true, "node": null, "message": "실행할 준비된 검증 노드가 없습니다" });
+    }
+    let target = &ready[0];
+    let node = deps.get_node(&target.id).unwrap_or_default();
+    let mut field_vars = serde_json::Map::new();
+    if let Some(t) = &node.title {
+        field_vars.insert("title".into(), json!(t));
+    }
+    if let Some(d) = &node.description {
+        field_vars.insert("description".into(), json!(d));
+    }
+    if let Some(c) = &node.category {
+        field_vars.insert("category".into(), json!(c));
+    }
+    let resolved = resolve_body(node.body_str(), deps, &Value::Object(field_vars));
+    let pkg: Value = match serde_json::from_str(&resolved) {
+        Ok(v) => v,
+        Err(_) => return json!({ "ok": false, "code": "INTERNAL", "message": format!("실행 패키지 조립 실패({}) — 프롬프트 미해석", target.id) }),
+    };
+    let prompt = pkg.get("prompt").filter(|v| !v.is_null());
+    if prompt.is_none() {
+        return json!({ "ok": false, "code": "INTERNAL", "message": format!("실행 패키지에 prompt 없음({})", target.id) });
+    }
+    state.leases.insert(target.id.clone(), now_ms + NEXT_LEASE_MS);
+    json!({
+        "ok": true,
+        "node": { "id": target.id, "kind": target.kind, "title": node.title.clone().unwrap_or_default() },
+        "prompt": prompt,
+        "schema": pkg.get("schema"),
+        "leaseMs": NEXT_LEASE_MS,
+    })
+}
+
+/// pull v2: CLI 실행자 산출 제출(main.js submitTick) — spawn 과 동일 파이프. 멱등·무판정 거부.
+pub fn submit_tick(deps: &dyn Deps, state: &mut ReconcileState, node_id: &str, output: &Value) -> Value {
+    if node_id.is_empty() {
+        return json!({ "ok": false, "code": "INVALID_INPUT", "message": "node(노드 id) 필수" });
+    }
+    let node = match deps.get_node(node_id) {
+        Some(n) => n,
+        None => return json!({ "ok": false, "code": "NOT_FOUND", "message": format!("노드 미존재: {node_id}") }),
+    };
+    if node.kind.as_deref() == Some("task") {
+        if node.status.as_deref() == Some("done") {
+            return json!({ "ok": false, "code": "ALREADY_DONE", "message": "이미 완료된 stage — 멱등 거부" });
+        }
+        if !deps.has_exec_stage_with_output() {
+            return json!({ "ok": false, "code": "INTERNAL", "message": "execStageWithOutput 미배선" });
+        }
+        if !output.is_object() {
+            return json!({ "ok": false, "code": "INVALID_INPUT", "message": "stage 산출(output JSON) 필수" });
+        }
+        let ctx = match state.stage_ctx.get(node_id).cloned() {
+            Some(c) => c,
+            None => {
+                let stage_name = match serde_json::from_str::<Value>(node.body_str()).ok().and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from)) {
+                    Some(s) if !s.is_empty() => s,
+                    _ => return json!({ "ok": false, "code": "INVALID_INPUT", "message": "stage task 아님(body 에 stage 없음)" }),
+                };
+                match build_stage_input(deps, &node, node.body_str(), &stage_name) {
+                    Ok(b) => StageCtx { stage_body: b.stage_body, stage_name, ledger: b.ledger, body: node.body_str().to_string() },
+                    Err(e) => return e,
+                }
+            }
+        };
+        let staged = match deps.exec_stage_with_output(&ctx.stage_body, output.clone()) {
+            Ok(s) => s,
+            Err(e) => return json!({ "ok": false, "code": "INTERNAL", "message": format!("stage 산출 재생 실패: {e}") }),
+        };
+        let consumed = consume_stage_output(deps, &node, &ctx.body, &ctx.stage_name, ctx.ledger, staged);
+        if consumed.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+            state.leases.remove(node_id);
+            state.stage_ctx.remove(node_id);
+        }
+        return consumed;
+    }
+    let badge = node.badge_str();
+    if badge == "o" || badge == "x" || badge == "f" {
+        return json!({ "ok": false, "code": "ALREADY_DONE", "message": format!("이미 확정된 노드(badge={badge}) — 멱등 거부") });
+    }
+    let oxf = match crate::exec_one::extract_oxf(output) {
+        Some(o) => o,
+        None => return json!({ "ok": false, "code": "INVALID_INPUT", "message": "산출에 oxf(o/x/f) 판정 없음 — 무판정 제출 거부" }),
+    };
+    let result = match output {
+        Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    deps.edit_node(node_id, json!({ "badge": oxf, "result": result }));
+    state.leases.remove(node_id);
+    deps.poke();
+    json!({ "ok": true, "node": node_id, "badge": oxf })
+}
+
+/// 확정 code 노드 실파일화(main.js exportTick) — o 확정 code 만, PROOF 블록 제외. 게이트: code≥1·전부 확정.
+pub fn export_tick(deps: &dyn Deps, chunk_id: &str, dir: &str) -> Value {
+    let nodes = deps.list_nodes();
+    let by_id: HashMap<String, &Node> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let codes: Vec<&Node> = nodes.iter().filter(|n| n.kind.as_deref() == Some("code") && descends(&by_id, n, chunk_id)).collect();
+    if codes.is_empty() {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": "확정할 code 노드 없음 — issuerize→실코드화 후에 export" });
+    }
+    let pending = codes.iter().filter(|n| !matches!(n.badge_str(), "o" | "x" | "f")).count();
+    if pending > 0 {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": format!("미확정 code {pending}건(검수전) — 검증 완료 후 export") });
+    }
+    let mut files: Vec<String> = Vec::new();
+    for c in codes.iter().filter(|n| n.badge_str() == "o") {
+        let rel = c.title.clone().unwrap_or_default().trim().to_string();
+        if rel.is_empty() || rel.starts_with('/') || rel.split('/').any(|seg| seg == "..") {
+            return json!({ "ok": false, "code": "INVALID_INPUT", "message": format!("부적합 파일 경로({}) — 상대경로만, '..' 금지", json!(rel)) });
+        }
+        let node = deps.get_node(&c.id).unwrap_or_default();
+        let desc = node.description.clone().or_else(|| c.description.clone()).unwrap_or_default();
+        let content = format!("{}\n", desc.split("---- PROOF ----").next().unwrap_or("").trim_end());
+        deps.write_file(&rel, &content);
+        files.push(rel);
+    }
+    json!({ "ok": true, "files": files, "dir": dir })
+}
+
+/// 이슈라이즈(main.js issuerizeTick) — 인증 덩어리의 plan-unit(o)을 파일별 실코드화 body task 로 승격.
+/// 게이트: 덩어리 o·fact≥1 전부 확정·plan-unit≥1 전부 확정. 멱등: 커버된 파일 제외.
+pub fn issuerize_tick(deps: &dyn Deps, chunk_id: &str) -> Value {
+    let nodes = deps.list_nodes();
+    let by_id: HashMap<String, &Node> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let chunk = match by_id.get(chunk_id) {
+        Some(c) => *c,
+        None => return json!({ "ok": false, "code": "NOT_FOUND", "message": format!("덩어리 미존재: {chunk_id}") }),
+    };
+    if chunk.badge_str() != "o" {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": format!("덩어리 미인증(badge={}) — audit 인증(badge='o') 후에만 이슈라이즈", json!(chunk.badge)) });
+    }
+    let confirmed = |n: &Node| matches!(n.badge_str(), "o" | "x" | "f");
+    let body_stage = |n: &Node| serde_json::from_str::<Value>(n.body_str()).ok().and_then(|v| v.get("stage").and_then(|s| s.as_str()).map(String::from));
+    let body_tasks: Vec<&Node> = nodes.iter().filter(|n| n.kind.as_deref() == Some("task") && descends(&by_id, n, chunk_id) && body_stage(n).as_deref() == Some("body")).collect();
+    let codes: Vec<&Node> = nodes.iter().filter(|n| n.kind.as_deref() == Some("code") && descends(&by_id, n, chunk_id)).collect();
+    let covered_file = |file: &str| -> bool {
+        codes.iter().any(|c| c.category.as_deref() == Some(file) && c.badge_str() == "o")
+            || body_tasks.iter().any(|t| {
+                serde_json::from_str::<Value>(t.body_str()).ok().and_then(|v| v.get("args").and_then(|a| a.get("file_path")).and_then(|f| f.as_str()).map(String::from)).as_deref() == Some(file)
+                    && t.status.as_deref() != Some("done")
+            })
+            || codes.iter().any(|c| c.category.as_deref() == Some(file) && !confirmed(c))
+    };
+    let facts: Vec<&Node> = nodes.iter().filter(|n| n.kind.as_deref() == Some("fact") && descends(&by_id, n, chunk_id)).collect();
+    if facts.is_empty() {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": "research 미경유(기초지식 fact 없음) — research 워크플로 후에만 이슈라이즈" });
+    }
+    let unverified_facts = facts.iter().filter(|n| !confirmed(n)).count();
+    if unverified_facts > 0 {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": format!("기초지식 미검증 {unverified_facts}건(검수전) — 검증 완료 후 이슈라이즈") });
+    }
+    let units: Vec<&Node> = nodes.iter().filter(|n| n.kind.as_deref() == Some("plan-unit") && descends(&by_id, n, chunk_id)).collect();
+    if units.is_empty() {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": "plan 미경유(plan-unit 없음) — plan(한턴 슈도코드화) 후에만 이슈라이즈" });
+    }
+    let unverified_units = units.iter().filter(|n| !confirmed(n)).count();
+    if unverified_units > 0 {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": format!("유닛 미검증 {unverified_units}건(검수전) — plan 검증 완료 후 이슈라이즈") });
+    }
+    let directive = chunk.description.clone().unwrap_or_default();
+    let pending: Vec<&Node> = units.iter().filter(|n| n.badge_str() == "o" && !covered_file(n.category.as_deref().unwrap_or(""))).copied().collect();
+    if pending.is_empty() {
+        return json!({ "ok": false, "code": "ALREADY_DONE", "message": "이미 이슈라이즈된 덩어리(전 유닛 실코드화 진행/완료) — 멱등 거부" });
+    }
+    let mut issued = 0;
+    for u in &pending {
+        let file = u.category.clone().unwrap_or_default();
+        let rejected: Vec<&&Node> = codes.iter().filter(|c| c.category.as_deref() == Some(file.as_str()) && matches!(c.badge_str(), "f" | "x")).collect();
+        let rework: Vec<String> = rejected
+            .iter()
+            .filter_map(|c| serde_json::from_str::<Value>(c.result.as_deref().unwrap_or("{}")).ok().and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(String::from)))
+            .filter(|s| !s.is_empty())
+            .collect();
+        let pseudo = if rework.is_empty() {
+            u.description.clone().unwrap_or_default()
+        } else {
+            format!("{}\n\nPRIOR ATTEMPT REJECTED — the verifier's findings, every one of which THIS attempt must fix:\n- {}", u.description.clone().unwrap_or_default(), rework.join("\n- "))
+        };
+        let body = json!({
+            "workflow": "research",
+            "stage": "body",
+            "args": { "title": u.title, "file_path": file, "pseudocode": pseudo, "chunkRef": chunk_id, "directive": directive },
+        })
+        .to_string();
+        let params = json!({
+            "title": format!("실코드화: {}", if file.is_empty() { u.title.clone().unwrap_or_default() } else { file.clone() }),
+            "parentId": chunk_id,
+            "body": body,
+            "blockedBy": [],
+            "locked": true,
+            "type": "task",
+            "kind": "task",
+        });
+        if deps.add_node(params).is_none() {
+            return json!({ "ok": false, "code": "INTERNAL", "message": format!("body task 발행 실패({}) — 부분 승격 중단(발행 {issued}건)", u.id), "issued": issued });
+        }
+        issued += 1;
+    }
+    json!({ "ok": true, "issued": issued, "chunk": chunk_id })
+}
+
+/// research 진입 게이트(main.js researchGate) — 덩어리 o·description 비어있지 않음·멱등(fact/research task 부재).
+pub fn research_gate(deps: &dyn Deps, chunk_id: &str) -> Value {
+    let nodes = deps.list_nodes();
+    let by_id: HashMap<String, &Node> = nodes.iter().map(|n| (n.id.clone(), n)).collect();
+    let chunk = match nodes.iter().find(|n| n.id == chunk_id) {
+        Some(c) => c,
+        None => return json!({ "ok": false, "code": "NOT_FOUND", "message": format!("덩어리 미존재: {chunk_id}") }),
+    };
+    if chunk.badge_str() != "o" {
+        return json!({ "ok": false, "code": "GATE_REQUIRED", "message": format!("덩어리 미인증(badge={}) — audit 인증(badge='o') 후에만 research", json!(chunk.badge)) });
+    }
+    if chunk.description.as_deref().map(|d| d.trim().is_empty()).unwrap_or(true) {
+        return json!({ "ok": false, "code": "INVALID_INPUT", "message": "덩어리 description(정련 directive) 비어있음 — 검증 기준 없이 research 불가" });
+    }
+    if nodes.iter().any(|n| n.kind.as_deref() == Some("fact") && descends(&by_id, n, chunk_id)) {
+        return json!({ "ok": false, "code": "ALREADY_DONE", "message": "이미 research 진행/완료(fact 존재) — 멱등 거부" });
+    }
+    for t in nodes.iter().filter(|n| n.kind.as_deref() == Some("task") && n.parent_id.as_deref() == Some(chunk_id)) {
+        let full = deps.get_node(&t.id).unwrap_or_default();
+        if let Ok(b) = serde_json::from_str::<Value>(full.body_str()) {
+            if b.get("workflow").and_then(|w| w.as_str()) == Some("research") {
+                return json!({ "ok": false, "code": "ALREADY_DONE", "message": "이미 research task 발행됨 — 멱등 거부" });
+            }
+        }
+    }
+    json!({ "ok": true, "directive": chunk.description })
 }
 
 // applyDraftDoc·registerPromptTemplates 는 chunk 5(draft 발행). 여기선 시그니처만 전방 선언용 — chunk 5 에서 구현.
