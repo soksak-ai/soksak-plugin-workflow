@@ -17,6 +17,7 @@ use soksak_sidecar_workflow::exec_one;
 use soksak_sidecar_workflow::generate_skeleton::build_user_prompt;
 use soksak_sidecar_workflow::host::build_prompt_with_schema;
 use soksak_sidecar_workflow::lang::Language;
+use soksak_sidecar_workflow::paths::bundled_workflow_path;
 use soksak_sidecar_workflow::provider::{run_agent, run_agent_text, AgentRequest};
 use std::collections::HashSet;
 
@@ -84,6 +85,11 @@ fn real_main() -> Result<(), String> {
         return Ok(());
     }
 
+    // serve — 상주 plugin service(PS17/PS18). 코어가 `serve` 로 스폰, stdio NDJSON 로 커맨드 라우팅.
+    // main.js 소멸 후 커맨드 로직·상태가 여기 산다(exec-one/exec-stage 는 이 안에서 in-process 재사용).
+    if argv[0] == "serve" {
+        return soksak_sidecar_workflow::wf_service::run_serve();
+    }
     // exec-one — 단일 노드 실행(규칙 C). stdin {prompt, schema?, model?} → claude → {oxf, result}.
     // 발행과 분리된 stateless 실행기. 코어 스케줄러가 칸반 ready 노드 하나를 이 경로로 실행한다.
     if argv[0] == "exec-one" {
@@ -457,35 +463,6 @@ fn check_required_keys(schema: &Value, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// bundled_workflow_path — 번들 정본 워크플로 경로(sidecar_root/workflows/<name>.doc.json).
-/// 이름은 파일명 안전 문자만 허용(경로 탈출 차단 — 영숫자/-/_).
-fn bundled_workflow_path(name: &str) -> Result<String, String> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        return Err(format!("--workflow 이름 부적합: {name:?} (영숫자/-/_ 만)"));
-    }
-    let root = sidecar_root().ok_or("--workflow: 플러그인 루트 해석 실패(references/draft-skill.md 기준)")?;
-    let p = root.join("workflows").join(format!("{name}.doc.json"));
-    if !p.is_file() {
-        return Err(format!("번들 워크플로 없음: {}", p.display()));
-    }
-    Ok(p.display().to_string())
-}
-
-/// sidecar_root — 이 바이너리가 속한 사이드카 루트(self-contained references/·workflows/ 소재).
-/// current_exe 의 조상 중 `references/draft-skill.md` 를 가진 첫 디렉토리.
-/// generate-skeleton 이 외부 리포 없이 자기 트리(사이드카 번들)의 지시어를 찾는 근거.
-fn sidecar_root() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let mut dir = exe.parent();
-    while let Some(d) = dir {
-        if d.join("references/draft-skill.md").is_file() {
-            return Some(d.to_path_buf());
-        }
-        dir = d.parent();
-    }
-    None
-}
-
 /// run_generate_skeleton — generate-skeleton 서브커맨드. 아이디어 → workflow-doc@0.0.1(LLM 저작) → doc JSON stdout.
 /// system=SKILL+api+patterns+draft-skill(**플러그인 번들 references/**, --refs 로 override 가능), user=아이디어+③파생.
 /// 저작 게이트 = JSON 파싱(parse_json_lenient — 펜스/prose 방어) + doc_exec::validate(fail-loud) —
@@ -536,7 +513,7 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
     }
     // refs dir 해석: ① --refs, ② **사이드카 번들**(self-contained 기본 — exe 상위 references/).
     let refs_dir = refs
-        .or_else(|| sidecar_root().map(|r| format!("{}/references", r.display())))
+        .or_else(|| soksak_sidecar_workflow::paths::sidecar_root().map(|r| format!("{}/references", r.display())))
         .ok_or("generate-skeleton: references 해석 실패 — --refs 또는 플러그인 번들(references/draft-skill.md) 확인")?;
     // system 층 = draft **정련** 역할 지시어. LLM 은 정련만 한다(PRINCIPLES §7) — 문서 골격·상수(COMMON·
     // 스키마·프롬프트)는 번들 정본(workflows/draft.doc.json)을 도구가 조립한다. 19KB verbatim 재타이핑은
@@ -583,55 +560,19 @@ fn run_generate_skeleton(argv: &[String]) -> Result<(), String> {
         println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
         return Ok(());
     }
-    // LLM 정련 — StructuredOutput 강제(REFINE_SCHEMA): 산출은 {directive, description} 소형 JSON 뿐이라
-    // 문법 실패(따옴표/펜스/잘림) 클래스가 구조적으로 소멸한다. text_only: 도구 전면 차단. 529 backoff 는 provider.
+    // LLM 정련 실경로 = lib 단일진실(generate_skeleton::generate_doc). CLI 와 serve(wf_service) 가 같은
+    // 함수를 부른다 — system=draft-skill.md, 골격 상수=번들 draft.doc.json 조립, 산출 {directive, description}
+    // 소형 JSON(재타이핑 0), 정련 2회. assemble/with-refined(LLM 0)만 CLI 전용으로 위에서 처리했다.
     let (env, profile) = auth_env()?;
     eprintln!("[soksak] generate-skeleton (model={model}, 프로필={profile}) → claude -p 정련(directive)");
-    let refine_schema = refine_schema_v;
-    let req = AgentRequest {
-        prompt: user,
-        model: &model,
-        allowed_tools: vec![],
-        timeout_secs: 7200,
-        system_prompt: Some(system), text_only: true,
-        schema: Some(refine_schema),
-        effort: "xhigh".into(),
-    };
-    // 번들 정본 골격 로드 — 상수(COMMON·스키마·프롬프트·stages)는 도구가 조립(byte 안정 §3, LLM 재타이핑 0).
-    let tpl_path = bundled_workflow_path("draft")?;
-    let tpl_raw = std::fs::read(&tpl_path).map_err(|e| format!("번들 draft 읽기 {tpl_path}: {e}"))?;
-    let template: Value = serde_json::from_slice(&tpl_raw).map_err(|e| format!("번들 draft 파싱 {tpl_path}: {e}"))?;
-
-    // 정련은 LLM 비결정 — 총 2회 시도(재정련 1회). 각 시도는 동일 게이트(주입+validate)를 통과해야 하고 최종 실패는 loud.
-    let mut last_err = String::new();
-    for attempt in 1..=2 {
-        if attempt > 1 {
-            eprintln!("[soksak] generate-skeleton 재정련 시도 {attempt}/2 — 직전: {last_err}");
-        }
-        let out = match run_agent(&req, &env) {
-            Ok(o) => o,
-            Err(e) => {
-                last_err = format!("정련 호출 실패: {e}");
-                continue;
-            }
-        };
-        if let Some(p) = &gen_out {
-            let _ = std::fs::write(p, serde_json::to_string_pretty(&out).unwrap_or_default());
-            eprintln!("[soksak] 정련 산출 보존 → {p}");
-        }
-        let directive = out.get("directive").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
-        let description = out.get("description").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
-        if directive.is_empty() {
-            last_err = "정련 directive 비어있음".to_string();
-            continue;
-        }
-        let doc = soksak_sidecar_workflow::doc_exec::inject_refinement(&template, &directive, &description);
-        if let Err(violations) = soksak_sidecar_workflow::doc_exec::validate(&doc) {
-            last_err = format!("조립 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
-            continue;
-        }
-        println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
-        return Ok(());
-    }
-    Err(format!("generate-skeleton: 정련 2회 실패 — {last_err}"))
+    let doc = soksak_sidecar_workflow::generate_skeleton::generate_doc(
+        &idea,
+        &model,
+        lang.as_ref(),
+        &refs_dir,
+        &env,
+        gen_out.as_deref(),
+    )?;
+    println!("{}", serde_json::to_string(&doc).map_err(|e| e.to_string())?);
+    Ok(())
 }

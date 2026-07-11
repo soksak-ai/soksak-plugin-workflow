@@ -20,6 +20,85 @@ pub fn build_user_prompt(idea: &str, directives: &[DomainDirective]) -> String {
     s
 }
 
+/// refine_schema — 정련 턴 StructuredOutput 스키마({directive, description}). CLI/serve 공용.
+pub fn refine_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["directive", "description"],
+        "properties": {
+            "directive": { "type": "string", "description": "정련된 DIRECTIVE 전문 — 아이디어의 실제 의도를 담은 지시어(섹션 라벨 재구성 허용, 실질 요건 누락 금지)" },
+            "description": { "type": "string", "description": "이 드래프트의 한 줄 서술(담백)" }
+        }
+    })
+}
+
+/// generate_doc — 아이디어 → 검증된 workflow-doc(LLM 정련 실경로). CLI(run_generate_skeleton)와
+/// serve(wf_service) 의 단일진실. system=번들 draft-skill.md, 골격 상수=번들 draft.doc.json 조립
+/// (LLM 은 {directive, description} 소형 JSON 만 — 재타이핑 0). 정련 2회 후 최종 실패는 loud.
+/// assemble/with-refined(LLM 0) 모드는 CLI 전용 — 이 함수는 정련 실경로만 소유한다.
+pub fn generate_doc(
+    idea: &str,
+    model: &str,
+    lang: Option<&crate::lang::Language>,
+    refs_dir: &str,
+    env: &[(String, String)],
+    gen_out: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    use crate::provider::{run_agent, AgentRequest};
+    use serde_json::Value;
+    let system = std::fs::read_to_string(format!("{refs_dir}/draft-skill.md"))
+        .map_err(|e| format!("refs 읽기 {refs_dir}/draft-skill.md: {e}"))?;
+    let directives = crate::derive_directive::synth_directives(idea, &crate::domain_lib::builtin_library());
+    let mut user = build_user_prompt(idea, &directives);
+    if let Some(l) = lang {
+        user.push_str(&l.contract());
+    }
+    let schema = refine_schema();
+    let tpl_path = crate::paths::bundled_workflow_path("draft")?;
+    let tpl_raw = std::fs::read(&tpl_path).map_err(|e| format!("번들 draft 읽기 {tpl_path}: {e}"))?;
+    let template: Value = serde_json::from_slice(&tpl_raw).map_err(|e| format!("번들 draft 파싱 {tpl_path}: {e}"))?;
+    let mut last_err = String::new();
+    for attempt in 1..=2 {
+        if attempt > 1 {
+            eprintln!("[soksak] generate-skeleton 재정련 시도 {attempt}/2 — 직전: {last_err}");
+        }
+        let req = AgentRequest {
+            prompt: user.clone(),
+            model,
+            allowed_tools: vec![],
+            timeout_secs: 7200,
+            system_prompt: Some(system.clone()),
+            text_only: true,
+            schema: Some(schema.clone()),
+            effort: "xhigh".into(),
+        };
+        let out = match run_agent(&req, env) {
+            Ok(o) => o,
+            Err(e) => {
+                last_err = format!("정련 호출 실패: {e}");
+                continue;
+            }
+        };
+        if let Some(p) = gen_out {
+            let _ = std::fs::write(p, serde_json::to_string_pretty(&out).unwrap_or_default());
+            eprintln!("[soksak] 정련 산출 보존 → {p}");
+        }
+        let directive = out.get("directive").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        let description = out.get("description").and_then(|d| d.as_str()).unwrap_or("").trim().to_string();
+        if directive.is_empty() {
+            last_err = "정련 directive 비어있음".to_string();
+            continue;
+        }
+        let doc = crate::doc_exec::inject_refinement(&template, &directive, &description);
+        if let Err(violations) = crate::doc_exec::validate(&doc) {
+            last_err = format!("조립 doc 검증 실패({}건): {}", violations.len(), violations.first().cloned().unwrap_or_default());
+            continue;
+        }
+        return Ok(doc);
+    }
+    Err(format!("generate-skeleton: 정련 2회 실패 — {last_err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

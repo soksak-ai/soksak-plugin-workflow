@@ -13,5 +13,7 @@ pub mod generate_skeleton;
 pub mod host;
 pub mod lang;
 pub mod provider;
+pub mod paths;
 pub mod reconcile;
+pub mod wf_service;
 pub mod emit_host;
