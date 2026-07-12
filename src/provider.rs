@@ -43,48 +43,62 @@ pub struct AgentRequest<'a> {
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 /// run_agent_text 가 timeout 래퍼로 이 args 를 `claude` 에 적용한다. system_prompt 가 Some 이면
 /// `--append-system-prompt <내용>` 추가(user prompt 와 분리 — claude CLI 공식 플래그).
-/// search_mcp_config — 검색/문서조회 MCP 서버 설정(claude `--mcp-config` 인라인 JSON). research/검증
-/// 에이전트가 버전·호환성·사실을 grounding. 기본 = z.ai MCP 서버(@z_ai/mcp-server: 웹검색·웹리더·Zread·
-/// 비전) — 인증은 Z_AI_API_KEY(= glm 인증 토큰 ANTHROPIC_AUTH_TOKEN 재사용) + Z_AI_MODE=ZAI, 별도 키 불요.
-/// 토큰 없으면 None(배선 생략). SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override.
-fn search_mcp_config() -> Option<String> {
-    if let Ok(v) = std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG") {
-        if !v.trim().is_empty() {
-            return Some(v);
+/// search_mcp — 리서치/검증 에이전트의 검색 기질(substrate). 규칙: 프롬프트가 요구하는 도구를 실제로
+/// 노출한다고 프로브(tools/mcp-verify.mjs)로 검증된 서버만 배선한다. "노출할 것이다" 가정 배선 금지 —
+/// z.ai 패키지를 검색으로 착각한 오류의 재발 방지. 기본 = 키 없는 2종(실증 완료):
+///   context7(@upstash/context7-mcp) — 라이브러리 docs·버전·호환성(resolve-library-id, query-docs).
+///   ddg-search(@oevortex/ddg_search) — 웹검색·현재 사실(web-search, 실데이터 반환 확인).
+/// 키 있는 프리미엄(Tavily/Brave)은 env 있을 때만 옵트인. 반환 = (--mcp-config JSON, allowedTools 토큰
+/// mcp__<서버>). SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override(서버명 파싱해 grant).
+fn search_mcp() -> Option<(String, Vec<String>)> {
+    let cfg: Value = match std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG").ok().filter(|v| !v.trim().is_empty()) {
+        Some(v) => {
+            let raw = if std::path::Path::new(&v).is_file() { std::fs::read_to_string(&v).ok()? } else { v };
+            serde_json::from_str(&raw).ok()?
         }
+        None => {
+            let mut servers = serde_json::Map::new();
+            servers.insert("context7".into(), serde_json::json!({
+                "type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }));
+            servers.insert("ddg-search".into(), serde_json::json!({
+                "type": "stdio", "command": "npx", "args": ["-y", "@oevortex/ddg_search"] }));
+            if let Some(k) = std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.is_empty()) {
+                servers.insert("tavily".into(), serde_json::json!({
+                    "type": "stdio", "command": "npx", "args": ["-y", "tavily-mcp"], "env": { "TAVILY_API_KEY": k } }));
+            }
+            if let Some(k) = std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()) {
+                servers.insert("brave".into(), serde_json::json!({
+                    "type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": k } }));
+            }
+            serde_json::json!({ "mcpServers": servers })
+        }
+    };
+    let tokens: Vec<String> = cfg
+        .get("mcpServers")
+        .and_then(|m| m.as_object())
+        .map(|m| m.keys().map(|k| format!("mcp__{k}")).collect())
+        .unwrap_or_default();
+    if tokens.is_empty() {
+        return None;
     }
-    let key = std::env::var("Z_AI_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|k| !k.is_empty()))?;
-    Some(
-        serde_json::json!({
-            "mcpServers": { "zai-mcp-server": {
-                "type": "stdio",
-                "command": "npx",
-                "args": ["-y", "@z_ai/mcp-server"],
-                "env": { "Z_AI_API_KEY": key, "Z_AI_MODE": "ZAI" }
-            }}
-        })
-        .to_string(),
-    )
+    Some((cfg.to_string(), tokens))
 }
 
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 fn claude_args(req: &AgentRequest) -> Vec<String> {
     // 도구 정책. text_only(저작)=파일/실행/검색 전면 차단(순수 텍스트). 그 외 발굴/판정 에이전트=파일·셸 배회
-    // 차단(Bash 를 안 막으면 git/ls 로 배회하다 대형 출력에서 타임아웃 — 실측). 검색은 z.ai MCP 로 하고
-    // Anthropic WebSearch 는 z.ai 엔드포인트가 미지원(요청 시 grant hang)이라 차단.
-    let (disallowed, mcp): (&str, Option<String>) = if req.text_only {
+    // 차단(Bash 를 안 막으면 git/ls 로 배회하다 대형 출력에서 타임아웃 — 실측). 검색은 배선된 MCP 로 하고
+    // Anthropic WebSearch 는 -p 에서 grant 못 해 hang 이라 차단(대신 ddg web-search 사용).
+    let (disallowed, mcp): (&str, Option<(String, Vec<String>)>) = if req.text_only {
         ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit WebFetch WebSearch TodoWrite", None)
     } else {
-        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit TodoWrite WebFetch WebSearch", search_mcp_config())
+        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit TodoWrite WebFetch WebSearch", search_mcp())
     };
-    // allowedTools = req 명시분 + (검색 배선 시) z.ai MCP 서버 전체 허용 — 명시 grant 라 -p 에서 권한 프롬프트 없이
-    // 바로 쓴다(--dangerously-skip-permissions 없이). StructuredOutput 은 --json-schema 강제라 영향 없음.
+    // allowedTools = req 명시분 + 배선된 검색 MCP 서버 도구 명시 grant(-p 에서 권한 프롬프트 없이 즉시 사용,
+    // 위험 플래그 없이). StructuredOutput 은 --json-schema 강제라 영향 없음.
     let mut allowed = req.allowed_tools.clone();
-    if mcp.is_some() {
-        allowed.push("mcp__zai-mcp-server".into());
+    if let Some((_, ref tokens)) = mcp {
+        allowed.extend(tokens.iter().cloned());
     }
     let mut args: Vec<String> = vec![
         "-p".into(),
@@ -100,7 +114,7 @@ fn claude_args(req: &AgentRequest) -> Vec<String> {
         "--model".into(),
         req.model.into(),
     ];
-    if let Some(cfg) = mcp {
+    if let Some((cfg, _)) = mcp {
         args.push("--mcp-config".into());
         args.push(cfg);
     }
@@ -718,5 +732,43 @@ mod tests {
         };
         let args = claude_args(&req);
         assert!(!args.iter().any(|a| a == "--append-system-prompt"), "None 이면 system flag 미부착");
+    }
+
+    fn req(text_only: bool) -> AgentRequest<'static> {
+        AgentRequest {
+            prompt: "p".into(), model: "glm-5.2", text_only,
+            allowed_tools: vec![], timeout_secs: 10, system_prompt: None,
+            schema: Some(json!({ "type": "object" })), effort: "max".into(),
+        }
+    }
+
+    /// 규칙: 발굴/판정 에이전트는 프로브 검증된 검색 MCP(context7 docs·ddg 웹검색)만 배선하고, 그 도구를
+    /// 명시 grant 한다. z.ai 비전 서버는 검색이 아니므로 배선 안 한다(가정 배선 오류 재발 방지 회귀 테스트).
+    #[test]
+    fn search_mcp_wires_probe_verified_servers_only() {
+        // SOKSAK_WORKFLOW_MCP_CONFIG 가 세팅돼 있으면 기본 배선 단언이 무의미 — 기본 경로에서만 검증.
+        if std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG").is_ok_and(|v| !v.trim().is_empty()) {
+            return;
+        }
+        let args = claude_args(&req(false));
+        let mi = args.iter().position(|a| a == "--mcp-config").expect("검색 에이전트엔 --mcp-config 배선");
+        let cfg = &args[mi + 1];
+        assert!(cfg.contains("@upstash/context7-mcp"), "context7(docs/버전) 배선: {cfg}");
+        assert!(cfg.contains("@oevortex/ddg_search"), "ddg(웹검색) 배선: {cfg}");
+        assert!(!cfg.contains("z_ai") && !cfg.contains("zai"), "z.ai 비전 서버는 검색 아님 — 배선 금지: {cfg}");
+        let ai = args.iter().position(|a| a == "--allowedTools").expect("allowedTools");
+        let allowed = &args[ai + 1];
+        assert!(allowed.contains("mcp__context7") && allowed.contains("mcp__ddg-search"),
+            "배선 서버 도구를 명시 grant(권한 프롬프트 hang 방지): {allowed}");
+        // Anthropic WebSearch/Bash 는 -p 배회·hang 원인 → 차단.
+        let di = args.iter().position(|a| a == "--disallowedTools").expect("disallowedTools");
+        assert!(args[di + 1].contains("WebSearch") && args[di + 1].contains("Bash"), "WebSearch·Bash 차단");
+    }
+
+    /// text_only(저작) 에이전트엔 검색 MCP 를 배선하지 않는다(순수 텍스트 반환).
+    #[test]
+    fn search_mcp_absent_for_text_only() {
+        let args = claude_args(&req(true));
+        assert!(!args.iter().any(|a| a == "--mcp-config"), "저작 에이전트엔 검색 MCP 미배선");
     }
 }
