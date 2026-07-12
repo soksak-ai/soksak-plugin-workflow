@@ -70,7 +70,9 @@ pub fn generate_doc(
             system_prompt: Some(system.clone()),
             text_only: true,
             schema: Some(schema.clone()),
-            effort: "xhigh".into(),
+            // 단일턴 저작(아이디어→workflow-doc)은 본질적으로 최고를 요구 — 최고 effort 고정(D). STEP 0
+            // 실측: 최고는 claude `max`(xhigh 위)·codex `ultra`. run_codex_once 매핑이 max→ultra 정렬.
+            effort: "max".into(),
         };
         let out = match run_agent(&req, env) {
             Ok(o) => o,

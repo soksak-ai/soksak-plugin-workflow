@@ -233,6 +233,17 @@ fn normalize_schema_for_openai(v: &mut Value) {
 /// run_codex_once — codex exec 어댑터(claude -p 등가): 프롬프트=stdin, 스키마=--output-schema(파일),
 /// 스트림=--json(run catalog 보존), 결과=-o(최종 메시지 파일). 인증은 codex 자체 로그인(~/.codex) —
 /// ANTHROPIC env 불요. 하드캡·transient 계약은 claude 경로와 동일.
+/// codex_reasoning_effort — 추상 effort(우리 어휘, claude `--effort` 기준: low/medium/high/xhigh/max)를
+/// codex `model_reasoning_effort` 값으로 매핑. 두 provider 최고 tier 가 다름(claude `max` ↔ codex `ultra`)이라
+/// 최고만 정렬하고 나머지는 codex 도 수용하는 동명값(low/medium/high/xhigh)을 그대로 넘긴다. codex 는
+/// minimal/none 도 있으나 우리 어휘엔 없어 매핑 대상 아님(미지정 시 codex config 기본).
+fn codex_reasoning_effort(effort: &str) -> &str {
+    match effort {
+        "max" => "ultra", // 각 provider 최고를 정렬
+        other => other,   // low/medium/high/xhigh — codex 동명 수용
+    }
+}
+
 fn run_codex_once(req: &AgentRequest) -> Result<String, String> {
     let tmp = std::env::temp_dir().join(format!("soksak-codex-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("codex tmp: {e}"))?;
@@ -244,6 +255,12 @@ fn run_codex_once(req: &AgentRequest) -> Result<String, String> {
     if !req.model.is_empty() && req.model != "default" {
         // "default" = codex 자체 기본 모델(config) 사용 — -m 생략.
         cmd.arg("-m").arg(req.model);
+    }
+    // reasoning effort 배선(파리티) — claude `--effort` 와 대칭으로 codex 도 명시 전달한다. codex 는
+    // `-c model_reasoning_effort=<v>` config override(STEP 0 실측: CLI 미검증). effort 어휘가 provider
+    // 마다 달라 최고를 정렬한다(claude `max` ↔ codex `ultra`). 미지정("")이면 codex config 기본에 맡김.
+    if !req.effort.is_empty() {
+        cmd.arg("-c").arg(format!("model_reasoning_effort={}", codex_reasoning_effort(&req.effort)));
     }
     let schema_file = if let Some(sc) = &req.schema {
         let f = tmp.join(format!("schema-{}.json", std::process::id()));
