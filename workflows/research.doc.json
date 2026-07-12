@@ -1081,7 +1081,7 @@
         "op": "agent",
         "prompt": "research-audit",
         "schema": "RESEARCH_AUDIT_SCHEMA",
-        "label": "완전성 감사",
+        "label": "완전성 감사 R1",
         "bind": "a"
       },
       {
@@ -1094,7 +1094,235 @@
             "op": "publish",
             "node": {
               "id": {
-                "auto": "fact"
+                "auto": "a1f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "when": "a.additions",
+        "node": {
+          "id": "research-audit-2",
+          "kind": "task",
+          "stage": "research-audit-2",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "완전성 재감사 R2",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "design-interface",
+          "kind": "task",
+          "stage": "design-interface",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "구조 확정 — 인터페이스",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        },
+        "unless": "a.additions"
+      },
+      {
+        "op": "return",
+        "value": {}
+      }
+    ],
+    "research-audit-2": [
+      {
+        "op": "agent",
+        "prompt": "research-audit",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "완전성 감사 R2",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a2f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "when": "a.additions",
+        "node": {
+          "id": "research-audit-3",
+          "kind": "task",
+          "stage": "research-audit-3",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "완전성 재감사 R3",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "design-interface",
+          "kind": "task",
+          "stage": "design-interface",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "구조 확정 — 인터페이스",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        },
+        "unless": "a.additions"
+      },
+      {
+        "op": "return",
+        "value": {}
+      }
+    ],
+    "research-audit-3": [
+      {
+        "op": "agent",
+        "prompt": "research-audit",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "완전성 감사 R3",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a3f"
               },
               "kind": "fact",
               "parent": {

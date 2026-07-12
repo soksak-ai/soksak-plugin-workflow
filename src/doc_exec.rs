@@ -14,7 +14,7 @@
 //! op 5종:
 //!   {"op":"agent","prompt":p,"schema"?:valueName,"label"?:s,"bind":var}
 //!   {"op":"forEach","in":path,"when"?:path,"collect"?:var,"do":[op…]}   // item/index 바인딩
-//!   {"op":"publish","node":{…}}   // 필드 값 = 리터럴 | {"$":path,"or"?:default} | id 는 {"auto":prefix} 가능
+//!   {"op":"publish","node":{…},"when"?:path,"unless"?:path}  // 값=리터럴|{"$":path,"or"?:def}|id={"auto":prefix}; when=truthy·unless=falsy 일 때만 발행(빈 배열=falsy)
 //!   {"op":"return","value":{k: expr}}
 //! path = "root.seg.seg" — root 는 locals(bind/item/index/collect) → "args" → "values".
 
@@ -533,9 +533,21 @@ fn exec_ops(
                 }
             }
             Some("publish") => {
-                let node = op.get("node").and_then(|x| x.as_object()).ok_or("publish.node 누락")?;
-                let ev = build_event(node, scope, st, for_index)?;
-                st.events.push(ev);
+                // when/unless 조건부 발행 — 수렴 루프 게이트. when: 값 truthy 일 때만(갭 있으면 재감사),
+                // unless: 값 falsy 일 때만(갭 0 이면 다음 스테이지). 둘 다 없으면 무조건. (빈 배열=falsy — truthy 참조)
+                let gated = match (
+                    op.get("when").and_then(|x| x.as_str()),
+                    op.get("unless").and_then(|x| x.as_str()),
+                ) {
+                    (Some(w), _) => truthy(&scope.lookup(w).unwrap_or(Json::Null)),
+                    (None, Some(u)) => !truthy(&scope.lookup(u).unwrap_or(Json::Null)),
+                    (None, None) => true,
+                };
+                if gated {
+                    let node = op.get("node").and_then(|x| x.as_object()).ok_or("publish.node 누락")?;
+                    let ev = build_event(node, scope, st, for_index)?;
+                    st.events.push(ev);
+                }
             }
             Some("return") => {
                 let spec = op.get("value").and_then(|x| x.as_object()).ok_or("return.value 누락")?;
@@ -558,7 +570,9 @@ fn truthy(v: &Json) -> bool {
         Json::Bool(b) => *b,
         Json::String(s) => !s.is_empty(),
         Json::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        _ => true,
+        // 빈 배열/객체 = falsy(수렴 게이트의 핵심: additions 가 비면 재감사 안 함). 비지 않으면 truthy.
+        Json::Array(a) => !a.is_empty(),
+        Json::Object(m) => !m.is_empty(),
     }
 }
 
@@ -753,6 +767,34 @@ mod tests {
         d["stages"][""][1]["node"]["id"] = json!("chunk"); // gen id 를 chunk 로 중복
         let errs = validate(&d).unwrap_err();
         assert!(errs.iter().any(|e| e.contains("중복")), "{errs:?}");
+    }
+
+    #[test]
+    fn conditional_publish_gates_convergence_loop() {
+        // when/unless = 수렴 게이트. 감사가 additions 를 내면 재감사 발행(when), 비면 다음 스테이지(unless).
+        // 이 게이트가 없으면 감사가 매번 진행만 해 편차를 못 죽인다 — 완전성 루프의 종료 조건.
+        let doc = json!({
+            "spec": SPEC,
+            "meta": { "name": "x", "description": "t" },
+            "values": { "AUDIT_SCHEMA": { "type": "object", "required": ["additions"] } },
+            "prompts": { "audit": "AUDIT" },
+            "stages": { "audit": [
+                { "op": "agent", "prompt": "audit", "schema": "AUDIT_SCHEMA", "bind": "a" },
+                { "op": "publish", "when": "a.additions",
+                  "node": { "id": "reaudit", "kind": "task", "stage": "audit", "title": "재감사" } },
+                { "op": "publish", "unless": "a.additions",
+                  "node": { "id": "proceed", "kind": "task", "stage": "design", "title": "진행" } }
+            ] }
+        });
+        let ids = |ev: &[NodeEvent]| ev.iter().map(|NodeEvent::Add { id, .. }| id.clone()).collect::<Vec<_>>();
+        // 갭 있음 → 재감사만(진행 게이트 차단).
+        let mut with_gap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [ { "title": "누락된 큐 전략" } ] }));
+        let (ev, _) = run(&doc, "audit", &json!({}), &mut with_gap).expect("run(gap)");
+        assert_eq!(ids(&ev), vec!["reaudit"], "갭 있으면 재감사만 발행, 진행 안 함");
+        // 갭 0(빈 배열=falsy) → 진행만(수렴·종료).
+        let mut no_gap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
+        let (ev2, _) = run(&doc, "audit", &json!({}), &mut no_gap).expect("run(no gap)");
+        assert_eq!(ids(&ev2), vec!["proceed"], "갭 0 이면 진행만 발행, 재감사 안 함(무한루프 종료)");
     }
 
     #[test]
@@ -1061,6 +1103,39 @@ mod tests {
         assert_eq!(category.as_deref(), Some("src/inventory/deduct.ts"));
         assert_eq!(prompt_role.as_deref(), Some("body-verify"));
         assert_eq!(br, json!({ "file": "src/inventory/deduct.ts" }));
+    }
+
+    /// [번들 정본] research-audit = 경계 있는 완전성 수렴 루프. 갭 있으면 재감사(누적 ground 위),
+    /// 갭 0 이면 design 진행, 상한(R3) 도달 시 갭 잔존해도 진행(무한루프 금지). 편차를 죽이는 종료 조건.
+    #[test]
+    fn bundled_research_audit_converges_or_bounds() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
+            "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
+        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
+        // 갭 있음 → 재감사(research-audit-2) 발행, design 보류.
+        let mut gap = |p: &str, _s: Option<&Json>, _l: &str| {
+            assert!(p.contains("정련 지시"), "{{{{directive}}}} 렌더");
+            assert!(p.contains("SQLite 채택"), "{{{{facts}}}} 렌더(누적 ground 감사 대상)");
+            Ok(json!({ "additions": [
+                { "title": "누락: 캐시·세션 전략", "description": "조회·세션 캐시 미확정 — plan 재발명 위험",
+                  "area": "framework", "origin": "agent", "reason": "downstream 재결정 차단" } ] }))
+        };
+        let (ev, _) = run(&doc, "research-audit", &args, &mut gap).expect("audit R1(gap)");
+        let s = stages(&ev);
+        assert!(s.iter().any(|x| x == "research-audit-2"), "갭 있으면 재감사 발행: {s:?}");
+        assert!(!s.iter().any(|x| x == "design-interface"), "갭 있으면 design 보류: {s:?}");
+        // 갭 0 → design 진행, 재감사 없음(수렴·종료).
+        let mut nogap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
+        let (ev2, _) = run(&doc, "research-audit", &args, &mut nogap).expect("audit R1(no gap)");
+        let s2 = stages(&ev2);
+        assert!(s2.iter().any(|x| x == "design-interface"), "갭 0 이면 design 진행: {s2:?}");
+        assert!(!s2.iter().any(|x| x.starts_with("research-audit")), "갭 0 이면 재감사 없음(수렴): {s2:?}");
+        // 상한 라운드(R3) — 갭 잔존해도 design 진행, R4 없음(무한루프 경계).
+        let (ev3, _) = run(&doc, "research-audit-3", &args, &mut gap).expect("audit R3(gap)");
+        let s3 = stages(&ev3);
+        assert!(s3.iter().any(|x| x == "design-interface"), "상한 라운드는 갭 잔존해도 진행: {s3:?}");
+        assert!(!s3.iter().any(|x| x == "research-audit-4"), "R4 없음(상한 3): {s3:?}");
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
