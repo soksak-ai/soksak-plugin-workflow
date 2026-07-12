@@ -419,10 +419,16 @@ impl ServiceHandler for WorkflowService {
                 }
             }
             "ping" => {
-                let out = exec_one_inprocess(r#"{"prompt":"다음 항목을 판정하라: \"1 더하기 1은 2다\". 참이면 oxf=o."}"#);
-                match out {
-                    Ok(o) => ok_outcome(json!({ "ok": true, "oxf": o.get("oxf") })),
-                    Err(e) => Outcome::err(ErrCode::Internal, &e),
+                // 라이브니스 = 서비스 루프가 응답하는 것 자체(즉시, LLM·rate limit 무관). LLM 이 걸린 ping 은
+                // 프로바이더가 느리거나 rate limit 이면 "서비스 죽음"으로 오인된다 — 두 관심사를 분리한다.
+                // 프로바이더 스모크(exec-one 실발화)는 {"llm":true} 로 옵트인.
+                if params.get("llm").and_then(|b| b.as_bool()) == Some(true) {
+                    match exec_one_inprocess(r#"{"prompt":"다음 항목을 판정하라: \"1 더하기 1은 2다\". 참이면 oxf=o."}"#) {
+                        Ok(o) => ok_outcome(json!({ "ok": true, "alive": true, "llm": true, "oxf": o.get("oxf") })),
+                        Err(e) => Outcome::err(ErrCode::Internal, &e),
+                    }
+                } else {
+                    ok_outcome(json!({ "ok": true, "alive": true, "model": DEFAULT_MODEL }))
                 }
             }
             "run" => run_publish(&deps, runtime, params),
