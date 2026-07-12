@@ -43,7 +43,49 @@ pub struct AgentRequest<'a> {
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 /// run_agent_text 가 timeout 래퍼로 이 args 를 `claude` 에 적용한다. system_prompt 가 Some 이면
 /// `--append-system-prompt <내용>` 추가(user prompt 와 분리 — claude CLI 공식 플래그).
+/// search_mcp_config — 검색/문서조회 MCP 서버 설정(claude `--mcp-config` 인라인 JSON). research/검증
+/// 에이전트가 버전·호환성·사실을 grounding. 기본 = z.ai MCP 서버(@z_ai/mcp-server: 웹검색·웹리더·Zread·
+/// 비전) — 인증은 Z_AI_API_KEY(= glm 인증 토큰 ANTHROPIC_AUTH_TOKEN 재사용) + Z_AI_MODE=ZAI, 별도 키 불요.
+/// 토큰 없으면 None(배선 생략). SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override.
+fn search_mcp_config() -> Option<String> {
+    if let Ok(v) = std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG") {
+        if !v.trim().is_empty() {
+            return Some(v);
+        }
+    }
+    let key = std::env::var("Z_AI_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|k| !k.is_empty()))?;
+    Some(
+        serde_json::json!({
+            "mcpServers": { "zai-mcp-server": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["-y", "@z_ai/mcp-server"],
+                "env": { "Z_AI_API_KEY": key, "Z_AI_MODE": "ZAI" }
+            }}
+        })
+        .to_string(),
+    )
+}
+
+/// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 fn claude_args(req: &AgentRequest) -> Vec<String> {
+    // 도구 정책. text_only(저작)=파일/실행/검색 전면 차단(순수 텍스트). 그 외 발굴/판정 에이전트=파일·셸 배회
+    // 차단(Bash 를 안 막으면 git/ls 로 배회하다 대형 출력에서 타임아웃 — 실측). 검색은 z.ai MCP 로 하고
+    // Anthropic WebSearch 는 z.ai 엔드포인트가 미지원(요청 시 grant hang)이라 차단.
+    let (disallowed, mcp): (&str, Option<String>) = if req.text_only {
+        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit WebFetch WebSearch TodoWrite", None)
+    } else {
+        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit TodoWrite WebFetch WebSearch", search_mcp_config())
+    };
+    // allowedTools = req 명시분 + (검색 배선 시) z.ai MCP 서버 전체 허용 — 명시 grant 라 -p 에서 권한 프롬프트 없이
+    // 바로 쓴다(--dangerously-skip-permissions 없이). StructuredOutput 은 --json-schema 강제라 영향 없음.
+    let mut allowed = req.allowed_tools.clone();
+    if mcp.is_some() {
+        allowed.push("mcp__zai-mcp-server".into());
+    }
     let mut args: Vec<String> = vec![
         "-p".into(),
         req.prompt.clone(),
@@ -52,18 +94,16 @@ fn claude_args(req: &AgentRequest) -> Vec<String> {
         "--verbose".into(),
         "--strict-mcp-config".into(),
         "--allowedTools".into(),
-        req.allowed_tools.join(" "),
+        allowed.join(" "),
         "--disallowedTools".into(),
-        // Task 는 항상 금지(sub-agent → async hang 방지). text_only(저작)는 모든 파일/실행/검색 도구도 차단해
-        // 모델이 순수 JS 텍스트만 반환하게(빈 --allowedTools 는 CLI 가 무시하므로 disallow 로 강제).
-        if req.text_only {
-            "Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit WebFetch WebSearch TodoWrite".into()
-        } else {
-            "Task".into()
-        },
+        disallowed.into(),
         "--model".into(),
         req.model.into(),
     ];
+    if let Some(cfg) = mcp {
+        args.push("--mcp-config".into());
+        args.push(cfg);
+    }
     if let Some(sp) = &req.system_prompt {
         args.push("--append-system-prompt".into());
         args.push(sp.clone());

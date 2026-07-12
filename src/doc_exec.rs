@@ -965,9 +965,9 @@ mod tests {
         let NodeEvent::Add { register_prompts, .. } = &events[1];
         assert!(register_prompts.is_none(), "registerPromptsOnce 는 1회만");
         let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &events[2];
-        assert_eq!((id.as_str(), kind.as_str()), ("design-interface", "task"));
-        assert_eq!(stage.as_deref(), Some("design-interface"), "체인 머리 = interface(대회 채택 방법론)");
-        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "design 체인은 fact 전부 검증 후");
+        assert_eq!((id.as_str(), kind.as_str()), ("research-audit", "task"), "research 다음 = 완전성 감사(누락 ground 게이트)");
+        assert_eq!(stage.as_deref(), Some("research-audit"), "design 앞에 완전성 감사 — 누락 ground 를 사냥·완결 후 design 진입");
+        assert_eq!(blocked_by, &vec!["fact0".to_string(), "fact1".to_string()], "완전성 감사는 fact 전부 검증 후");
 
         // design 체인(M-B, 대회 실측 채택) — 각 스테이지: fact 발행 + 다음 task(blockedBy=자기 factIds).
         // 뒤 스테이지는 앞 산출을 {{facts}} 원장으로 계승(칸반 materializeFacts 가 전 fact 를 주입).
