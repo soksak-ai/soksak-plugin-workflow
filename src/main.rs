@@ -271,14 +271,14 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let model = model_override.or(input.model).unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
     let (env, profile) = auth_env()?;
-    eprintln!("[soksak] exec-one (model={model}, 프로필={profile}) → claude -p");
+    // effort = 노드가 실은 tier, 미지정이면 최고(품질우선 — under-fund 방지). 로그로 tier 관통 관측 가능.
+    let effort = input.effort.clone().unwrap_or_else(|| soksak_sidecar_workflow::provider::DEFAULT_EFFORT.to_string());
+    eprintln!("[soksak] exec-one (model={model}, effort={effort}, 프로필={profile}) → claude -p");
     let full = build_prompt_with_schema(&input.prompt, None, lang.as_ref()); // schema 는 --json-schema 강제로(prompt X)
     // 7200s(2h): provider 캡 = claude 무한 방지용. lease=프로세스-생존이라 천장 통일 불필요 — 정상은 provider 가
     // claude 종료→onExit→reply(검색 fan-out 1h+ 수용). register timeout_ms(zombie_backstop 3h)는 그것도 실패한
     // 좀비 전용(provider 캡보다 길게). 중복은 lease(도는 중 재발화 X)로 0 — 천장 일치 안 해도 안전.
     let has_schema = input.schema.is_some();
-    // effort = 노드가 실은 tier, 미지정이면 최고(품질우선 — under-fund 방지).
-    let effort = input.effort.clone().unwrap_or_else(|| soksak_sidecar_workflow::provider::DEFAULT_EFFORT.to_string());
     let req = AgentRequest { prompt: full, model: &model, allowed_tools: allow_tools, timeout_secs: 7200, system_prompt: None, schema: input.schema, effort, text_only: false };
     // schema 있으면 JSON 파싱(구조화 산출), 없으면 raw 텍스트.
     let result = if has_schema {
