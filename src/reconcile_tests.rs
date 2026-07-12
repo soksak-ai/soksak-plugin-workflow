@@ -332,6 +332,25 @@ fn build_add_params_item_body_is_exec_input() {
 }
 
 #[test]
+fn build_add_params_empty_tier_is_no_tier() {
+    // forEach 의 "or":"" 로 effort/model 미emit item → 빈 문자열. tier 아님 → params 에 키 없음.
+    // (삽입하면 node.effort=Some("") 가 with_routing 으로 exec body 를 오염 → 기본 최고를 덮는다.)
+    let ev = json!({ "id": "i1", "kind": "item", "title": "t", "prompt": "p", "effort": "", "model": "" });
+    let p = build_add_params(&ev, Some("k-1"), &[], None, &HashMap::new());
+    assert!(p.get("effort").is_none(), "빈 effort 는 tier 아님 → 미삽입(기본 최고 보존)");
+    assert!(p.get("model").is_none(), "빈 model 는 tier 아님 → 미삽입");
+}
+
+#[test]
+fn build_add_params_nonempty_tier_passthrough() {
+    // 저작이 실은 실제 tier → params 로 흐른다(reconcile 이 exec 에 honor).
+    let ev = json!({ "id": "i1", "kind": "item", "title": "t", "prompt": "p", "effort": "high", "model": "gpt-5.6-sol" });
+    let p = build_add_params(&ev, Some("k-1"), &[], None, &HashMap::new());
+    assert_eq!(p["effort"], "high");
+    assert_eq!(p["model"], "gpt-5.6-sol");
+}
+
+#[test]
 fn build_add_params_group_empty_body() {
     let ev = json!({ "id": "g0", "kind": "group", "title": "재고", "category": "재고" });
     let p = build_add_params(&ev, Some("chunk-7"), &[], None, &HashMap::new());

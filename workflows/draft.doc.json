@@ -70,6 +70,17 @@
                   "user",
                   "agent"
                 ]
+              },
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "description": "이 요건의 검증 난이도 tier(선택). 강한 신호 하나로 판정하고 평균으로 희석하지 마라 — 순수 기계적·되돌리기 쉬운 검증만 low/medium, 아키텍처·보안·프로덕션 위험이 걸린 검증은 high/max. 애매하면 높게. 생략 시 최고. (routing-skill.md)"
               }
             }
           }
@@ -309,6 +320,10 @@
                 "directive": {
                   "$": "args.directive"
                 }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
               }
             }
           }
