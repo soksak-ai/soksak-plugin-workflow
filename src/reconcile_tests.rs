@@ -1043,3 +1043,23 @@ fn stage_published_marker_variants() {
     let ns4 = nodes(vec![json!({ "id": "c1", "kind": "code", "parentId": "chunk", "category": "src/x.rs", "badge": "f" })]);
     assert!(!stage_published_marker(&bodyt, r#"{"args":{"file_path":"src/x.rs"}}"#, "body", &ns4));
 }
+
+#[test]
+fn with_routing_injects_node_effort_and_model() {
+    // 저작 LLM 이 노드에 실은 tier → exec 입력 JSON 에 effort/model 주입.
+    let n = node(json!({ "id": "i1", "kind": "item", "effort": "low", "model": "gpt-5.6-luna" }));
+    let out = with_routing(r#"{"prompt":"p","schema":{"type":"object"}}"#.to_string(), &n);
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["effort"], "low");
+    assert_eq!(v["model"], "gpt-5.6-luna");
+    assert_eq!(v["prompt"], "p", "기존 필드 보존");
+    assert!(v["schema"].is_object());
+}
+
+#[test]
+fn with_routing_noop_when_node_has_no_tier() {
+    // 미지정 노드는 무주입 → 실행자 기본(최고, 품질우선). 문자열 불변.
+    let n = node(json!({ "id": "i1", "kind": "item" }));
+    let body = r#"{"prompt":"p"}"#.to_string();
+    assert_eq!(with_routing(body.clone(), &n), body);
+}

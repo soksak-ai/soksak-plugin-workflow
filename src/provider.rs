@@ -233,6 +233,10 @@ fn normalize_schema_for_openai(v: &mut Value) {
 /// run_codex_once — codex exec 어댑터(claude -p 등가): 프롬프트=stdin, 스키마=--output-schema(파일),
 /// 스트림=--json(run catalog 보존), 결과=-o(최종 메시지 파일). 인증은 codex 자체 로그인(~/.codex) —
 /// ANTHROPIC env 불요. 하드캡·transient 계약은 claude 경로와 동일.
+/// 기본 reasoning effort — 미지정 시 실행자가 쓰는 값. **품질우선: 최고(claude `max`, codex 매핑 `ultra`)**.
+/// 라우팅은 저작 LLM 이 노드에 명시적으로 더 낮은 tier 를 실을 때만 하향한다(under-fund 방지 — 기본은 최고).
+pub const DEFAULT_EFFORT: &str = "max";
+
 /// codex_reasoning_effort — 추상 effort(우리 어휘, claude `--effort` 기준: low/medium/high/xhigh/max)를
 /// codex `model_reasoning_effort` 값으로 매핑. 두 provider 최고 tier 가 다름(claude `max` ↔ codex `ultra`)이라
 /// 최고만 정렬하고 나머지는 codex 도 수용하는 동명값(low/medium/high/xhigh)을 그대로 넘긴다. codex 는

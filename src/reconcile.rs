@@ -42,6 +42,12 @@ pub struct Node {
     /// 검증 결과(JSON 문자열 등) — issuerize 가 반려 사유(result.reason) 를 읽는다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
+    /// 라우팅(자기선택) — 저작 LLM 이 이 노드의 난이도로 실은 tier. exec 입력에 실려 실행자가 honor.
+    /// 미지정이면 실행자 기본(최고, 품질우선). model 은 provider 별 별칭/식별자.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl Node {
@@ -510,6 +516,27 @@ fn resolve_body(body: &str, deps: &dyn Deps, extra_vars: &Value) -> String {
     }
 }
 
+/// with_routing — 노드 라우팅(effort/model)을 exec 입력 JSON 에 주입한다. 저작 LLM 이 노드에 실은
+/// 난이도 tier 를 실행자에게 흘려보내는 통로 — 미지정이면 실행자 기본(최고, 품질우선)이라 무주입.
+fn with_routing(body: String, node: &Node) -> String {
+    if node.effort.is_none() && node.model.is_none() {
+        return body;
+    }
+    let mut v: Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(_) => return body,
+    };
+    if let Some(obj) = v.as_object_mut() {
+        if let Some(e) = &node.effort {
+            obj.insert("effort".into(), json!(e));
+        }
+        if let Some(m) = &node.model {
+            obj.insert("model".into(), json!(m));
+        }
+    }
+    v.to_string()
+}
+
 struct StageInput {
     stage_body: String,
     ledger: Option<Vec<Value>>,
@@ -724,7 +751,8 @@ fn reconcile_stage(deps: &dyn Deps, target: &Node, body: &str, nodes: &[Node]) -
         Ok(b) => b,
         Err(e) => return e,
     };
-    let staged = match deps.exec_stage(&built.stage_body) {
+    let stage_body = with_routing(built.stage_body, target);
+    let staged = match deps.exec_stage(&stage_body) {
         Ok(s) => s,
         Err(e) => return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INTERNAL", "message": e }),
     };
@@ -774,7 +802,7 @@ pub fn reconcile_tick(deps: &dyn Deps, state: &mut ReconcileState, now_ms: u64) 
     if let Some(c) = &node.category {
         field_vars.insert("category".into(), json!(c));
     }
-    let exec_body = resolve_body(&body, deps, &Value::Object(field_vars));
+    let exec_body = with_routing(resolve_body(&body, deps, &Value::Object(field_vars)), &node);
     let exec_out = match deps.exec_one(&exec_body) {
         Ok(o) => o,
         Err(e) => {

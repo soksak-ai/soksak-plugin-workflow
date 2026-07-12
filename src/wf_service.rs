@@ -50,6 +50,8 @@ fn auth_env() -> Result<Vec<(String, String)>, String> {
 fn exec_one_inprocess(body: &str) -> Result<Value, String> {
     let input = exec_one::parse_input(body)?;
     let model = input.model.clone().unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    // effort = 노드가 실은 tier, 미지정이면 최고(품질우선 — under-fund 방지).
+    let effort = input.effort.clone().unwrap_or_else(|| crate::provider::DEFAULT_EFFORT.to_string());
     let env = auth_env()?;
     let full = build_prompt_with_schema(&input.prompt, None, Some(&Language::parse("ko")));
     let has_schema = input.schema.is_some();
@@ -60,7 +62,7 @@ fn exec_one_inprocess(body: &str) -> Result<Value, String> {
         timeout_secs: 7200,
         system_prompt: None,
         schema: input.schema,
-        effort: "xhigh".into(),
+        effort,
         text_only: false,
     };
     let result = if has_schema { run_agent(&req, &env)? } else { Value::String(run_agent_text(&req, &env)?) };
@@ -124,10 +126,13 @@ fn exec_stage_inprocess(body: &str, mode: StageMode) -> Result<Value, String> {
         }
         StageMode::Normal => {
             let model = input.get("model").and_then(|m| m.as_str()).map(String::from).unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            // effort = stage 입력의 tier(저작 LLM 난이도), 미지정이면 최고(품질우선).
+            let effort = input.get("effort").and_then(|m| m.as_str()).filter(|s| !s.is_empty()).map(String::from)
+                .unwrap_or_else(|| crate::provider::DEFAULT_EFFORT.to_string());
             let env = auth_env()?;
             let mut agent_fn = |prompt: &str, schema: Option<&Value>, label: &str| -> Result<Value, String> {
                 let full = build_prompt_with_schema(prompt, None, Some(&lang));
-                let req = AgentRequest { prompt: full, model: &model, allowed_tools: vec![], timeout_secs: 3600, system_prompt: None, schema: schema.cloned(), effort: "xhigh".into(), text_only: false };
+                let req = AgentRequest { prompt: full, model: &model, allowed_tools: vec![], timeout_secs: 3600, system_prompt: None, schema: schema.cloned(), effort: effort.clone(), text_only: false };
                 if schema.is_some() {
                     run_agent(&req, &env).map_err(|e| format!("agent {label:?} 실패: {e}"))
                 } else {

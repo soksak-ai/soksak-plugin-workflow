@@ -11,9 +11,12 @@ pub struct ExecOneInput {
     pub prompt: String,
     pub schema: Option<Value>,
     pub model: Option<String>,
+    /// reasoning effort tier(우리 어휘: low/medium/high/xhigh/max). 노드가 난이도로 실어 보낸다.
+    /// 미지정이면 실행자가 기본(최고)로 — 품질우선: 명시 하향만 낮춘다(under-fund 방지).
+    pub effort: Option<String>,
 }
 
-/// parse_input — stdin JSON({prompt, schema?, model?}) 파싱. prompt 필수.
+/// parse_input — stdin JSON({prompt, schema?, model?, effort?}) 파싱. prompt 필수.
 pub fn parse_input(raw: &str) -> Result<ExecOneInput, String> {
     let v: Value = serde_json::from_str(raw.trim()).map_err(|e| format!("exec-one 입력 JSON 파싱: {e}"))?;
     let prompt = v
@@ -26,7 +29,8 @@ pub fn parse_input(raw: &str) -> Result<ExecOneInput, String> {
     }
     let schema = v.get("schema").filter(|s| s.is_object()).cloned();
     let model = v.get("model").and_then(|m| m.as_str()).filter(|s| !s.is_empty()).map(String::from);
-    Ok(ExecOneInput { prompt, schema, model })
+    let effort = v.get("effort").and_then(|m| m.as_str()).filter(|s| !s.is_empty()).map(String::from);
+    Ok(ExecOneInput { prompt, schema, model, effort })
 }
 
 /// extract_oxf — 검증 agent 결과에서 oxf 판정(o/x/f) 추출. 필드명 oxf|verdict 지원.
@@ -58,6 +62,7 @@ mod tests {
         assert_eq!(i.prompt, "검증하라");
         assert_eq!(i.schema, None);
         assert_eq!(i.model, None);
+        assert_eq!(i.effort, None, "미지정 effort=None → 실행자 기본(최고)");
     }
 
     #[test]
@@ -65,6 +70,16 @@ mod tests {
         let i = parse_input(r#"{"prompt":"p","schema":{"type":"object"},"model":"sonnet"}"#).unwrap();
         assert!(i.schema.is_some());
         assert_eq!(i.model.as_deref(), Some("sonnet"));
+    }
+
+    #[test]
+    fn parse_reads_effort_tier() {
+        // 노드가 실은 난이도 tier — 실행자가 provider 별로 honor.
+        let i = parse_input(r#"{"prompt":"p","model":"gpt-5.6-luna","effort":"low"}"#).unwrap();
+        assert_eq!(i.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(i.effort.as_deref(), Some("low"));
+        // 빈 문자열 effort 는 None(기본).
+        assert_eq!(parse_input(r#"{"prompt":"p","effort":""}"#).unwrap().effort, None);
     }
 
     #[test]
