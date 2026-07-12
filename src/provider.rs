@@ -31,7 +31,8 @@ pub struct AgentRequest<'a> {
     /// JSON Schema(claude `--json-schema`) — StructuredOutput 강제. agent 가 schema 준수 객체 반환(필수 필드 보장).
     /// api-reference 계약(schema → forced StructuredOutput → validated object). None 이면 raw 텍스트.
     pub schema: Option<Value>,
-    /// claude `--effort`. 추론 깊이. agent opts.effort 로 override, 기본 xhigh(최고 — 도출·검증·판정 품질 우선).
+    /// claude `--effort`(codex 는 `-c model_reasoning_effort` 로 매핑). 추론 깊이. 노드 tier 로 설정,
+    /// 미지정 경로는 DEFAULT_EFFORT(max=최고, codex 매핑 ultra)로 폴백 — 품질우선.
     pub effort: String,
     /// true 면 **순수 텍스트 반환 계약** — 파일/실행/검색 도구를 전면 차단(--disallowedTools 로).
     /// generate-skeleton(gen.js 저작)에만 씀: 도구가 열려 있으면 모델이 gen.js 를 파일로 쓰려다 실패(빈 --allowedTools
