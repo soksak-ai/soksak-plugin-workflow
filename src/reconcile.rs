@@ -464,6 +464,14 @@ pub fn build_add_params(
     if let Some(pd) = s("parent_draft_id") {
         params.insert("parentDraftId".into(), json!(pd));
     }
+    // 라우팅 tier(자기선택) — 저작이 노드에 실은 난이도. node.add 로 흘려 reconcile 이 exec 에 honor.
+    // 미emit 이면 미삽입 → 실행자 기본(최고, 품질우선). routing-skill.md.
+    if let Some(e) = s("effort") {
+        params.insert("effort".into(), json!(e));
+    }
+    if let Some(m) = s("model") {
+        params.insert("model".into(), json!(m));
+    }
     Value::Object(params)
 }
 
