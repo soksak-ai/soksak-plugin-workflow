@@ -360,6 +360,17 @@ impl ServiceHandler for WorkflowService {
         }
     }
     fn handle(&self, op: &str, params: Value, ctx: &OpCtx, emit: &Emit) -> Outcome {
+        // 라이브니스는 상태 락 밖에서 처리한다 — 다른 op 가 스테이지 LLM 으로 락을 오래(최대 캡) 쥐어도
+        // ping 은 즉시 응답해야 "서비스 살았나"를 판정할 수 있다. LLM·rate limit 과도 분리(스모크는 {llm:true}).
+        if op == "ping" {
+            if params.get("llm").and_then(|b| b.as_bool()) == Some(true) {
+                return match exec_one_inprocess(r#"{"prompt":"다음 항목을 판정하라: \"1 더하기 1은 2다\". 참이면 oxf=o."}"#) {
+                    Ok(o) => ok_outcome(json!({ "ok": true, "alive": true, "llm": true, "oxf": o.get("oxf") })),
+                    Err(e) => Outcome::err(ErrCode::Internal, &e),
+                };
+            }
+            return ok_outcome(json!({ "ok": true, "alive": true, "model": DEFAULT_MODEL }));
+        }
         let mut guard = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let (state, runtime) = &mut *guard;
         let deps = ProdDeps { emit, poke_schedule: self.poke_schedule.clone() };
@@ -416,19 +427,6 @@ impl ServiceHandler for WorkflowService {
                         ok_outcome(json!({ "ok": true, "published": published }))
                     }
                     Err(e) => Outcome::err(ErrCode::Internal, &e),
-                }
-            }
-            "ping" => {
-                // 라이브니스 = 서비스 루프가 응답하는 것 자체(즉시, LLM·rate limit 무관). LLM 이 걸린 ping 은
-                // 프로바이더가 느리거나 rate limit 이면 "서비스 죽음"으로 오인된다 — 두 관심사를 분리한다.
-                // 프로바이더 스모크(exec-one 실발화)는 {"llm":true} 로 옵트인.
-                if params.get("llm").and_then(|b| b.as_bool()) == Some(true) {
-                    match exec_one_inprocess(r#"{"prompt":"다음 항목을 판정하라: \"1 더하기 1은 2다\". 참이면 oxf=o."}"#) {
-                        Ok(o) => ok_outcome(json!({ "ok": true, "alive": true, "llm": true, "oxf": o.get("oxf") })),
-                        Err(e) => Outcome::err(ErrCode::Internal, &e),
-                    }
-                } else {
-                    ok_outcome(json!({ "ok": true, "alive": true, "model": DEFAULT_MODEL }))
                 }
             }
             "run" => run_publish(&deps, runtime, params),
