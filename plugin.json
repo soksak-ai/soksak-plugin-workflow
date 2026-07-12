@@ -9,6 +9,7 @@
     "service",
     "sidecar",
     "commands",
+    "commands:destructive",
     "schedule",
     "secrets",
     "data",
@@ -255,6 +256,13 @@
           "en": "Drops a ledger entry"
         },
         "danger": "destructive"
+      },
+      {
+        "name": "board.sync",
+        "title": {
+          "ko": "원장을 이슈 보드에 투영합니다",
+          "en": "Projects the ledger onto the issue board"
+        }
       },
       {
         "name": "gate.dispatch",

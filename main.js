@@ -146,8 +146,84 @@ function makeGit(processApi) {
   };
 }
 
+// js/board.js
+var BOARD_CONTRACT = "soksak-issue-board-spec@1";
+function cardOf(entry, leaseState2) {
+  const receipts = entry.receipts || [];
+  const status = entry.done ? "done" : leaseState2 === "live" ? "inprogress" : "backlog";
+  const parts = [];
+  if (entry.lease?.owner) parts.push(leaseState2 === "live" ? `held by ${entry.lease.owner}` : `lease lapsed (${entry.lease.owner})`);
+  else parts.push("unheld");
+  if (entry.branch) parts.push(entry.branch);
+  parts.push(receipts.length === 1 ? "1 receipt" : `${receipts.length} receipts`);
+  const commits = receipts.filter((r) => r.kind === "commit").map((r) => String(r.value).slice(0, 7));
+  if (commits.length > 0) parts.push(commits.join(" "));
+  return { title: entry.issue, description: parts.join(" \xB7 "), status };
+}
+var LEDGER_CARD = "workflow ledger";
+var ROOT_KEY = "\0root";
+function makeBoard(app, store) {
+  const exec = (name, params) => app.commands.execute(name, params);
+  async function implementer() {
+    const out = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
+    if (!out?.ok) return null;
+    const found = (out.data?.implementers || []).find((i) => i.status === "enabled");
+    return found ? found.id : null;
+  }
+  async function alive(id, nodeId) {
+    const got = await exec(`plugin.${id}.node.get`, { node: nodeId });
+    return !!got?.ok;
+  }
+  async function ledgerCard(id) {
+    const mapped = await store.get(ROOT_KEY);
+    if (mapped?.nodeId && await alive(id, mapped.nodeId)) return mapped.nodeId;
+    const added = await exec(`plugin.${id}.node.add`, { title: LEDGER_CARD, status: "backlog" });
+    if (!added?.ok) return null;
+    await store.put(ROOT_KEY, { nodeId: added.data?.nodeId, board: id });
+    return added.data?.nodeId;
+  }
+  return {
+    implementer,
+    ledgerCard,
+    /** Put the entry on the board (create or update). No board → nothing happens, and that is fine. */
+    async project(entry, leaseState2) {
+      const id = await implementer();
+      if (!id) return { projected: false, reason: "no board implements the contract" };
+      const card = cardOf(entry, leaseState2);
+      const mapped = await store.get(entry.issue);
+      if (mapped?.nodeId && await alive(id, mapped.nodeId)) {
+        const edited = await exec(`plugin.${id}.node.edit`, { node: mapped.nodeId, ...card });
+        if (edited?.ok) return { projected: true, nodeId: mapped.nodeId, card };
+      }
+      const parentId = await ledgerCard(id);
+      const added = await exec(`plugin.${id}.node.add`, parentId ? { ...card, parentId } : card);
+      if (!added?.ok) return { projected: false, reason: `${added?.code}: ${added?.message}` };
+      const nodeId = added.data?.nodeId;
+      await store.put(entry.issue, { nodeId, board: id });
+      return { projected: true, nodeId, card };
+    },
+    /** Withdraw the card. A dropped issue that keeps its card would be a leak on someone's screen —
+     *  so a refused withdrawal is reported, never swallowed: the mapping is kept, because forgetting
+     *  it while the card still stands would strand the card forever with nothing pointing at it. */
+    async unproject(issue) {
+      const mapped = await store.get(issue);
+      if (!mapped?.nodeId) return { withdrawn: false };
+      const id = await implementer();
+      if (!id) {
+        await store.del(issue);
+        return { withdrawn: false, reason: "no board implements the contract" };
+      }
+      const out = await exec(`plugin.${id}.node.remove`, { node: mapped.nodeId });
+      if (!out?.ok) return { withdrawn: false, nodeId: mapped.nodeId, reason: `${out?.code}: ${out?.message}` };
+      await store.del(issue);
+      return { withdrawn: true, nodeId: mapped.nodeId };
+    }
+  };
+}
+
 // js/index.js
 var COLL = "entry";
+var COLL_CARD = "card";
 var SCOPE = "index";
 var DEFAULT_TTL_MS = 30 * 60 * 1e3;
 function h(tag, style, text) {
@@ -185,7 +261,24 @@ var index_default = {
     const reg = (name, spec) => ctx.subscriptions.push(app.commands.register(name, spec));
     const git = makeGit(app.process);
     const now = () => Date.now();
+    const board = makeBoard(app, {
+      get: (issue) => app.data.get(COLL_CARD, String(issue), { scope: SCOPE }),
+      put: (issue, v) => app.data.put(COLL_CARD, { issue: String(issue), ...v }, { scope: SCOPE, id: String(issue) }),
+      del: (issue) => app.data.delete(COLL_CARD, String(issue), { scope: SCOPE })
+    });
+    const reproject = async (e) => {
+      try {
+        const r = await board.project(e, leaseState(e.lease, now()));
+        if (!r.projected && r.reason && !/no board/.test(r.reason)) {
+          console.warn(`[workflow] board projection failed for ${e.issue}: ${r.reason}`);
+        }
+      } catch (err2) {
+        console.warn(`[workflow] board projection threw for ${e.issue}: ${err2?.message || err2}`);
+      }
+      return e;
+    };
     void app.data.define(COLL, { indexes: ["issue", "owner", "done", "updatedAt"] });
+    void app.data.define(COLL_CARD, { indexes: ["issue"] });
     const load = async (issue) => await app.data.get(COLL, String(issue), { scope: SCOPE }) || null;
     const all = async () => {
       const rows = await app.data.query(COLL, { scope: SCOPE, order: "updatedAt" });
@@ -195,6 +288,7 @@ var index_default = {
     const save = async (e) => {
       const rec = { ...e, owner: e.lease?.owner ?? null, updatedAt: now() };
       await app.data.put(COLL, rec, { scope: SCOPE, id: rec.issue });
+      await reproject(rec);
       return rec;
     };
     const view = (e) => ({
@@ -348,7 +442,32 @@ var index_default = {
           return err("LEASE_HELD", msg(`issue is leased by ${e.lease.owner} \u2014 release it first`, `${e.lease.owner} \uAC00 \uC810\uC720 \uC911 \u2014 \uBA3C\uC800 \uD574\uC81C`));
         }
         await app.data.delete(COLL, issue, { scope: SCOPE });
-        return { issue, removed: true };
+        const card = await board.unproject(issue);
+        if (card.reason && !/no board/.test(card.reason)) {
+          console.warn(`[workflow] the board kept ${issue}'s card: ${card.reason}`);
+        }
+        return { issue, removed: true, card };
+      }
+    });
+    reg("board.sync", {
+      description: "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1) \u2014 this never names an implementer, so any board declaring that contract can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it.",
+      triggers: { ko: "\uBCF4\uB4DC \uD22C\uC601 \uCE78\uBC18 \uB3D9\uAE30\uD654 \uCE74\uB4DC" },
+      params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
+      returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",
+      examples: ["sok plugin.soksak-plugin-workflow.board.sync", `sok plugin.soksak-plugin-workflow.board.sync '{"issue":"i-42"}'`],
+      message: (d) => d.board ? msg(`${d.projected.length} projected onto ${d.board}`, `${d.board} \uC5D0 ${d.projected.length}\uAC74 \uD22C\uC601`) : msg("no board implements the contract", "\uACC4\uC57D \uAD6C\uD604 \uBCF4\uB4DC \uC5C6\uC74C"),
+      handler: async (p) => {
+        const id = await board.implementer();
+        const root = id ? await board.ledgerCard(id) : null;
+        const entries = p.issue ? [await load(p.issue)].filter(Boolean) : await all();
+        const projected = [];
+        const skipped = [];
+        for (const e of entries) {
+          const r = await board.project(e, leaseState(e.lease, now()));
+          if (r.projected) projected.push({ issue: e.issue, nodeId: r.nodeId, status: r.card.status });
+          else skipped.push({ issue: e.issue, reason: r.reason });
+        }
+        return { board: id, root, projected, skipped };
       }
     });
     reg("gate.dispatch", {

@@ -14,8 +14,10 @@ import {
   leaseState, checkDispatch, checkRenew, receiptVerifiable, checkEvidence, detectDrift,
 } from "./gate.js";
 import { makeGit } from "./git.js";
+import { makeBoard } from "./board.js";
 
 const COLL = "entry"; // one ledger entry per issue
+const COLL_CARD = "card"; // issue → the board card projecting it (the board issues the id, we remember it)
 const SCOPE = "index";
 const DEFAULT_TTL_MS = 30 * 60 * 1000; // a dispatch lease outlives a normal agent turn, not a nap
 
@@ -60,7 +62,31 @@ const index_default = {
     const git = makeGit(app.process);
     const now = () => Date.now();
 
+    // The board is discovered by contract (soksak-issue-board-spec@1), never named. No board is a
+    // lawful state: the ledger is the truth and the card is downstream of it, so a projection that
+    // cannot happen is not an error the loop should feel.
+    const board = makeBoard(app, {
+      get: (issue) => app.data.get(COLL_CARD, String(issue), { scope: SCOPE }),
+      put: (issue, v) => app.data.put(COLL_CARD, { issue: String(issue), ...v }, { scope: SCOPE, id: String(issue) }),
+      del: (issue) => app.data.delete(COLL_CARD, String(issue), { scope: SCOPE }),
+    });
+    // Awaited, never fired-and-forgotten: a projection promise left running after its handler has
+    // returned never reaches the host, and the card silently never appears. The ledger write still
+    // stands if the board refuses — the board is downstream, and its failure is not the ledger's.
+    const reproject = async (e) => {
+      try {
+        const r = await board.project(e, leaseState(e.lease, now()));
+        if (!r.projected && r.reason && !/no board/.test(r.reason)) {
+          console.warn(`[workflow] board projection failed for ${e.issue}: ${r.reason}`);
+        }
+      } catch (err) {
+        console.warn(`[workflow] board projection threw for ${e.issue}: ${err?.message || err}`);
+      }
+      return e;
+    };
+
     void app.data.define(COLL, { indexes: ["issue", "owner", "done", "updatedAt"] });
+    void app.data.define(COLL_CARD, { indexes: ["issue"] });
 
     const load = async (issue) => (await app.data.get(COLL, String(issue), { scope: SCOPE })) || null;
     const all = async () => {
@@ -71,6 +97,7 @@ const index_default = {
     const save = async (e) => {
       const rec = { ...e, owner: e.lease?.owner ?? null, updatedAt: now() };
       await app.data.put(COLL, rec, { scope: SCOPE, id: rec.issue });
+      await reproject(rec); // one write path, so the board can never miss a change the ledger made
       return rec;
     };
     // The public shape of an entry — the lease's live/expired verdict is computed, never stored, so
@@ -241,7 +268,39 @@ const index_default = {
           return err("LEASE_HELD", msg(`issue is leased by ${e.lease.owner} — release it first`, `${e.lease.owner} 가 점유 중 — 먼저 해제`));
         }
         await app.data.delete(COLL, issue, { scope: SCOPE });
-        return { issue, removed: true };
+        // a dropped issue must not keep a card on someone's screen — and if the board refused to
+        // take it down, say so rather than leaving a card nobody can account for
+        const card = await board.unproject(issue);
+        if (card.reason && !/no board/.test(card.reason)) {
+          console.warn(`[workflow] the board kept ${issue}'s card: ${card.reason}`);
+        }
+        return { issue, removed: true, card };
+      },
+    });
+
+    reg("board.sync", {
+      description:
+        "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1) — this never names an implementer, so any board declaring that contract can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it.",
+      triggers: { ko: "보드 투영 칸반 동기화 카드" },
+      params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
+      returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",
+      examples: ["sok plugin.soksak-plugin-workflow.board.sync", 'sok plugin.soksak-plugin-workflow.board.sync \'{"issue":"i-42"}\''],
+      message: (d) =>
+        d.board
+          ? msg(`${d.projected.length} projected onto ${d.board}`, `${d.board} 에 ${d.projected.length}건 투영`)
+          : msg("no board implements the contract", "계약 구현 보드 없음"),
+      handler: async (p) => {
+        const id = await board.implementer();
+        const root = id ? await board.ledgerCard(id) : null;
+        const entries = p.issue ? [await load(p.issue)].filter(Boolean) : await all();
+        const projected = [];
+        const skipped = [];
+        for (const e of entries) {
+          const r = await board.project(e, leaseState(e.lease, now()));
+          if (r.projected) projected.push({ issue: e.issue, nodeId: r.nodeId, status: r.card.status });
+          else skipped.push({ issue: e.issue, reason: r.reason });
+        }
+        return { board: id, root, projected, skipped };
       },
     });
 
