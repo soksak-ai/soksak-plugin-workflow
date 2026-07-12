@@ -4,13 +4,16 @@
   "name": "Workflow",
   "version": "0.0.1",
   "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 칸반 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
-  "entry": null,
+  "entry": "main.js",
   "permissions": [
     "service",
     "sidecar",
     "commands",
     "schedule",
-    "secrets"
+    "secrets",
+    "data",
+    "ui",
+    "process"
   ],
   "dependencies": {
     "soksak-plugin-kanban": "^0.1.0"
@@ -202,6 +205,70 @@
           }
         },
         "returns": "{ ok, written }"
+      },
+      {
+        "name": "lease.acquire",
+        "title": {
+          "ko": "이슈 디스패치 리스를 취득합니다",
+          "en": "Takes the dispatch lease on an issue"
+        }
+      },
+      {
+        "name": "lease.renew",
+        "title": {
+          "ko": "보유한 리스를 갱신합니다",
+          "en": "Extends a lease you hold"
+        }
+      },
+      {
+        "name": "lease.release",
+        "title": {
+          "ko": "보유한 리스를 해제합니다",
+          "en": "Releases a lease you hold"
+        }
+      },
+      {
+        "name": "lease.list",
+        "title": {
+          "ko": "원장 항목을 조회합니다",
+          "en": "Lists the ledger entries"
+        }
+      },
+      {
+        "name": "receipt.add",
+        "title": {
+          "ko": "검증 가능한 증적을 기록합니다",
+          "en": "Records verifiable evidence"
+        }
+      },
+      {
+        "name": "entry.remove",
+        "title": {
+          "ko": "원장 항목을 삭제합니다",
+          "en": "Drops a ledger entry"
+        },
+        "danger": "destructive"
+      },
+      {
+        "name": "gate.dispatch",
+        "title": {
+          "ko": "리스 보유를 디스패치 게이트로 검사합니다",
+          "en": "Gates a dispatch on a live lease"
+        }
+      },
+      {
+        "name": "gate.transition",
+        "title": {
+          "ko": "증적을 완료 전이 게이트로 검사합니다",
+          "en": "Gates a transition on evidence"
+        }
+      },
+      {
+        "name": "drift.check",
+        "title": {
+          "ko": "원장과 저장소의 어긋남을 보고합니다",
+          "en": "Reports ledger-vs-repository drift"
+        }
       }
     ],
     "schedules": [
@@ -217,6 +284,57 @@
     ],
     "skill": {
       "path": "skill/SKILL.md"
-    }
+    },
+    "views": [
+      {
+        "id": "ledger",
+        "title": {
+          "ko": "원장",
+          "en": "Ledger"
+        },
+        "icon": "▤",
+        "placements": [
+          "sidebar-right",
+          "content"
+        ],
+        "defaultPlacement": "content",
+        "status": [
+          "loading",
+          "empty",
+          "active",
+          "error"
+        ]
+      }
+    ],
+    "nodes": [
+      {
+        "id": "refresh",
+        "description": {
+          "ko": "새로고침 버튼",
+          "en": "Refresh button"
+        }
+      },
+      {
+        "id": "check",
+        "description": {
+          "ko": "드리프트 검사 버튼",
+          "en": "Drift check button"
+        }
+      },
+      {
+        "id": "entry",
+        "description": {
+          "ko": "원장 항목 행. data-node=\"entry/<키>\"",
+          "en": "Ledger entry row. data-node=\"entry/<key>\""
+        }
+      },
+      {
+        "id": "drift",
+        "description": {
+          "ko": "드리프트 행. data-node=\"drift/<키>\"",
+          "en": "Drift row. data-node=\"drift/<key>\""
+        }
+      }
+    ]
   }
 }
