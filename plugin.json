@@ -42,7 +42,7 @@
           "en": "Publishes the workflow"
         },
         "bind": "service",
-        "description": "Publish a workflow DAG to the kanban board from an idea or a pre-authored skeleton. Give `idea` to have the provider author a skeleton (LLM), or `skeleton` (a JSON-serialized workflow-doc) to publish directly with no LLM. Returns the published node summary.",
+        "description": "Publish a workflow DAG to the issue board from an idea or a pre-authored skeleton. Give `idea` to have the provider author a skeleton (LLM), or `skeleton` (a JSON-serialized workflow-doc) to publish directly with no LLM. Returns the published node summary.",
         "triggers": {
           "ko": "워크플로 발행 실행 아이디어 시작"
         },

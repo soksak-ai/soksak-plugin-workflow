@@ -7,7 +7,7 @@ not quietly relax it — correct this document in an explicit commit.
 ## 1. Directive single source of truth
 
 The refined directive that passed the authoring gate is canonical. The human-facing surface
-(kanban chunk description) and the machine-facing verification basis (the directive injected
+(the chunk's description on the board) and the machine-facing verification basis (the directive injected
 into exec) MUST be the same string. The only override is an explicit user-given `directive`.
 
 ## 2. Fail-loud
@@ -123,4 +123,4 @@ bounded discovery by mention (2026-07-10).
   (git history is the archive). NodeEvent is the wire contract.
 - research/plan/design run with no authoring LLM (rule 7): canonical docs under `workflows/`
   are instantiated statically. The role files under `references/` are explanations, not truth.
-- No polling. Triggers are: publish poke, self-poke, kanban:changed, activate boot poke.
+- No polling. Triggers are: publish poke, self-poke, issue-board:changed, activate boot poke.
