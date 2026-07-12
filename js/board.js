@@ -8,6 +8,19 @@
 // producer that fails without its board has made the board load-bearing, which the contract forbids.
 
 export const BOARD_CONTRACT = "soksak-issue-board-spec@1";
+export const PROMPT_CONTRACT = "soksak-prompt-store-spec@1";
+
+// The loop needs both contracts from *one* plugin: a node carries the address of the prompt it runs,
+// and an address minted by one store means nothing to another. So the implementer is the intersection
+// of the two discoveries — never the first board that answers.
+//
+// Pure, so the choice can be judged without an app: given what each discovery returned, this is the
+// plugin that can hold both the card and the text the card points at.
+export function pickImplementer(boards, stores) {
+  const enabled = (xs) => (Array.isArray(xs) ? xs : []).filter((i) => i?.status === "enabled").map((i) => i.id);
+  const holdsPrompts = new Set(enabled(stores));
+  return enabled(boards).find((id) => holdsPrompts.has(id)) ?? null;
+}
 
 // The card a ledger entry projects to. Pure: the same entry always yields the same card, so a
 // re-projection can be compared against what is already on the board.
@@ -39,11 +52,27 @@ const ROOT_KEY = "\u0000root"; // reserved: never an issue id
 export function makeBoard(app, store) {
   const exec = (name, params) => app.commands.execute(name, params);
 
+  // Resolved at call time, so a board that was installed, swapped, or disabled since the last
+  // projection is seen as it is now. The two answers below are different facts and must not be
+  // collapsed:
+  //   { id: null }                  nothing implements the board contract — lawful. The ledger is
+  //                                 the truth and the card is downstream of it; the loop runs on.
+  //   { id: null, code, reason }    a board IS running, but nothing implements both contracts. That
+  //                                 is not "no board", it is a board this loop cannot use, and
+  //                                 swallowing it as the lawful state would hide a misconfiguration.
   async function implementer() {
-    const out = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
-    if (!out?.ok) return null;
-    const found = (out.data?.implementers || []).find((i) => i.status === "enabled");
-    return found ? found.id : null;
+    const b = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
+    const p = await exec("plugin.implementers", { contract: PROMPT_CONTRACT });
+    if (!b?.ok || !p?.ok) return { id: null };
+    const boards = b.data?.implementers || [];
+    const id = pickImplementer(boards, p.data?.implementers);
+    if (id) return { id };
+    if (!boards.some((i) => i?.status === "enabled")) return { id: null };
+    return {
+      id: null,
+      code: "UNAVAILABLE",
+      reason: `a board is running, but none implements ${PROMPT_CONTRACT} — a card carries the address of the prompt its node runs, so the board holding the card must be the store holding the text`,
+    };
   }
 
   async function alive(id, nodeId) {
@@ -68,8 +97,8 @@ export function makeBoard(app, store) {
 
     /** Put the entry on the board (create or update). No board → nothing happens, and that is fine. */
     async project(entry, leaseState) {
-      const id = await implementer();
-      if (!id) return { projected: false, reason: "no board implements the contract" };
+      const { id, code, reason } = await implementer();
+      if (!id) return { projected: false, code, reason: reason ?? "no board implements the contract" };
       const card = cardOf(entry, leaseState);
       const mapped = await store.get(entry.issue);
 
@@ -91,9 +120,14 @@ export function makeBoard(app, store) {
     async unproject(issue) {
       const mapped = await store.get(issue);
       if (!mapped?.nodeId) return { withdrawn: false };
-      const id = await implementer();
+      const { id, code, reason } = await implementer();
       if (!id) {
-        await store.del(issue); // no board holds it any more; the mapping is meaningless
+        // A board that cannot run the loop is still a board, and it may still be showing this card.
+        // Forgetting the mapping would strand it there with nothing pointing at it — so the mapping
+        // is kept and the refusal is reported. Only when no board exists at all is the mapping
+        // meaningless, because the card went with it.
+        if (code) return { withdrawn: false, nodeId: mapped.nodeId, code, reason };
+        await store.del(issue);
         return { withdrawn: false, reason: "no board implements the contract" };
       }
       const out = await exec(`plugin.${id}.node.remove`, { node: mapped.nodeId });

@@ -148,6 +148,12 @@ function makeGit(processApi) {
 
 // js/board.js
 var BOARD_CONTRACT = "soksak-issue-board-spec@1";
+var PROMPT_CONTRACT = "soksak-prompt-store-spec@1";
+function pickImplementer(boards, stores) {
+  const enabled = (xs) => (Array.isArray(xs) ? xs : []).filter((i) => i?.status === "enabled").map((i) => i.id);
+  const holdsPrompts = new Set(enabled(stores));
+  return enabled(boards).find((id) => holdsPrompts.has(id)) ?? null;
+}
 function cardOf(entry, leaseState2) {
   const receipts = entry.receipts || [];
   const status = entry.done ? "done" : leaseState2 === "live" ? "inprogress" : "backlog";
@@ -165,10 +171,18 @@ var ROOT_KEY = "\0root";
 function makeBoard(app, store) {
   const exec = (name, params) => app.commands.execute(name, params);
   async function implementer() {
-    const out = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
-    if (!out?.ok) return null;
-    const found = (out.data?.implementers || []).find((i) => i.status === "enabled");
-    return found ? found.id : null;
+    const b = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
+    const p = await exec("plugin.implementers", { contract: PROMPT_CONTRACT });
+    if (!b?.ok || !p?.ok) return { id: null };
+    const boards = b.data?.implementers || [];
+    const id = pickImplementer(boards, p.data?.implementers);
+    if (id) return { id };
+    if (!boards.some((i) => i?.status === "enabled")) return { id: null };
+    return {
+      id: null,
+      code: "UNAVAILABLE",
+      reason: `a board is running, but none implements ${PROMPT_CONTRACT} \u2014 a card carries the address of the prompt its node runs, so the board holding the card must be the store holding the text`
+    };
   }
   async function alive(id, nodeId) {
     const got = await exec(`plugin.${id}.node.get`, { node: nodeId });
@@ -187,8 +201,8 @@ function makeBoard(app, store) {
     ledgerCard,
     /** Put the entry on the board (create or update). No board → nothing happens, and that is fine. */
     async project(entry, leaseState2) {
-      const id = await implementer();
-      if (!id) return { projected: false, reason: "no board implements the contract" };
+      const { id, code, reason } = await implementer();
+      if (!id) return { projected: false, code, reason: reason ?? "no board implements the contract" };
       const card = cardOf(entry, leaseState2);
       const mapped = await store.get(entry.issue);
       if (mapped?.nodeId && await alive(id, mapped.nodeId)) {
@@ -208,8 +222,9 @@ function makeBoard(app, store) {
     async unproject(issue) {
       const mapped = await store.get(issue);
       if (!mapped?.nodeId) return { withdrawn: false };
-      const id = await implementer();
+      const { id, code, reason } = await implementer();
       if (!id) {
+        if (code) return { withdrawn: false, nodeId: mapped.nodeId, code, reason };
         await store.del(issue);
         return { withdrawn: false, reason: "no board implements the contract" };
       }
@@ -450,14 +465,21 @@ var index_default = {
       }
     });
     reg("board.sync", {
-      description: "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1) \u2014 this never names an implementer, so any board declaring that contract can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it.",
+      description: "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1 for the cards, soksak-prompt-store-spec@1 for the text they point at) \u2014 this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
       triggers: { ko: "\uBCF4\uB4DC \uD22C\uC601 \uCE78\uBC18 \uB3D9\uAE30\uD654 \uCE74\uB4DC" },
       params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
       returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",
       examples: ["sok plugin.soksak-plugin-workflow.board.sync", `sok plugin.soksak-plugin-workflow.board.sync '{"issue":"i-42"}'`],
       message: (d) => d.board ? msg(`${d.projected.length} projected onto ${d.board}`, `${d.board} \uC5D0 ${d.projected.length}\uAC74 \uD22C\uC601`) : msg("no board implements the contract", "\uACC4\uC57D \uAD6C\uD604 \uBCF4\uB4DC \uC5C6\uC74C"),
       handler: async (p) => {
-        const id = await board.implementer();
+        const found = await board.implementer();
+        if (!found.id && found.code) {
+          return err(
+            found.code,
+            msg(found.reason, `\uBCF4\uB4DC\uB294 \uB5A0 \uC788\uC73C\uB098 ${PROMPT_CONTRACT} \uB97C \uAD6C\uD604\uD55C \uAC83\uC774 \uC5C6\uC2B5\uB2C8\uB2E4 \u2014 \uCE74\uB4DC\uAC00 \uC9C0\uB2CC \uD504\uB86C\uD504\uD2B8 \uC8FC\uC18C\uB97C \uADF8 \uBCF4\uB4DC\uAC00 \uC77D\uC9C0 \uBABB\uD55C\uB2E4`)
+          );
+        }
+        const id = found.id;
         const root = id ? await board.ledgerCard(id) : null;
         const entries = p.issue ? [await load(p.issue)].filter(Boolean) : await all();
         const projected = [];

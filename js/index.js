@@ -14,7 +14,7 @@ import {
   leaseState, checkDispatch, checkRenew, receiptVerifiable, checkEvidence, detectDrift,
 } from "./gate.js";
 import { makeGit } from "./git.js";
-import { makeBoard } from "./board.js";
+import { makeBoard, PROMPT_CONTRACT } from "./board.js";
 
 const COLL = "entry"; // one ledger entry per issue
 const COLL_CARD = "card"; // issue → the board card projecting it (the board issues the id, we remember it)
@@ -280,7 +280,7 @@ const index_default = {
 
     reg("board.sync", {
       description:
-        "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1) — this never names an implementer, so any board declaring that contract can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it.",
+        "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1 for the cards, soksak-prompt-store-spec@1 for the text they point at) — this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
       triggers: { ko: "보드 투영 칸반 동기화 카드" },
       params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
       returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",
@@ -290,7 +290,16 @@ const index_default = {
           ? msg(`${d.projected.length} projected onto ${d.board}`, `${d.board} 에 ${d.projected.length}건 투영`)
           : msg("no board implements the contract", "계약 구현 보드 없음"),
       handler: async (p) => {
-        const id = await board.implementer();
+        const found = await board.implementer();
+        // A board that cannot also hold the prompts its cards point at is a misconfiguration, and it
+        // is refused out loud. "No board at all" stays lawful — that is the line between the two.
+        if (!found.id && found.code) {
+          return err(
+            found.code,
+            msg(found.reason, `보드는 떠 있으나 ${PROMPT_CONTRACT} 를 구현한 것이 없습니다 — 카드가 지닌 프롬프트 주소를 그 보드가 읽지 못한다`),
+          );
+        }
+        const id = found.id;
         const root = id ? await board.ledgerCard(id) : null;
         const entries = p.issue ? [await load(p.issue)].filter(Boolean) : await all();
         const projected = [];

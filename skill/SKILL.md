@@ -5,7 +5,7 @@ description: Use when turning an idea into a certified, developable backlog insi
 
 # soksak workflow — from idea to certified code, and you can be an executor
 
-The workflow plugin turns one idea into a **certified backlog chunk** on the kanban board and
+The workflow plugin turns one idea into a **certified backlog chunk** on the issue board and
 carries it to **per-file real code**. Every LLM output lands as a node with a badge
 (검수전 → o/x/f); the core scheduler (reconcile) drives ready nodes; gates are deterministic.
 
@@ -68,5 +68,5 @@ scheduler reclaims the node.
   stays on the node).
 - `reconcile` — manually drive one ready node (the scheduler normally does this).
 
-Progress is visible on the kanban board (every node, badge, and result) and in the run
+Progress is visible on the issue board (every node, badge, and result) and in the run
 catalog (`$SOKSAK_HOME/runs/soksak-sidecar-workflow/latest.jsonl`, raw event stream).

@@ -1,6 +1,6 @@
-//! emit_host — 칸반 노드 발행 이벤트(NodeEvent) wire 정본.
+//! emit_host — 보드 노드 발행 이벤트(NodeEvent) wire 정본.
 //!
-//! doc_exec(publish op)가 이 이벤트를 생산하고, stdout JSON line → 서비스 relay → soksak-plugin-kanban
+//! doc_exec(publish op)가 이 이벤트를 생산하고, stdout JSON line → 서비스 relay → 보드 계약의
 //! node.add 로 흐른다. 경로(doc/레거시)가 바뀌어도 이 wire 는 불변 계약이다 — 레거시 interp Host 구현
 //! (EmitHost/ClaudeEmitHost)은 doc 단일화(M5e)로 backup/legacy-interp/ 에 보존.
 //!
@@ -10,7 +10,7 @@
 //! - 규칙 C: 발행은 실행이 아니다 — 실행은 코어 스케줄러(reconcile → exec-one/exec-stage).
 use serde_json::Value as Json;
 
-/// 발행되는 칸반 노드 이벤트(→ JSON line → 서비스 relay → soksak-plugin-kanban node.add).
+/// 발행되는 보드 노드 이벤트(→ JSON line → 서비스 relay → 발견된 구현체의 node.add).
 /// 발행 전용: Add 만(실행 lifecycle status 없음 — 실행은 스케줄러+exec-one 의 몫).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(tag = "ev", rename_all = "lowercase")]

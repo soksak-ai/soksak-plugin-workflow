@@ -2,7 +2,7 @@
 // care when there is none.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cardOf, makeBoard, BOARD_CONTRACT, LEDGER_CARD } from "../js/board.js";
+import { cardOf, makeBoard, pickImplementer, BOARD_CONTRACT, PROMPT_CONTRACT, LEDGER_CARD } from "../js/board.js";
 
 const entry = (o = {}) => ({ issue: "i-42", lease: null, branch: null, receipts: [], done: false, ...o });
 const commit = (v) => ({ kind: "commit", value: v, at: 1 });
@@ -38,14 +38,18 @@ test("done, with the receipts that earned it visible on the card", () => {
 
 // ── discovery + upsert ──────────────────────────────────────────────────────
 
-function harness({ implementers = [{ id: "some-board", status: "enabled" }], nodeGetOk = true, removeOk = true } = {}) {
+// `stores` = who implements the prompt store. It defaults to the same plugins that implement the
+// board, which is the ordinary case: one plugin holds the cards and the text the cards point at.
+function harness({ implementers = [{ id: "some-board", status: "enabled" }], stores = implementers, nodeGetOk = true, removeOk = true } = {}) {
   const calls = [];
   const map = new Map();
   const app = {
     commands: {
       async execute(name, params) {
         calls.push({ name, params });
-        if (name === "plugin.implementers") return { ok: true, data: { implementers } };
+        if (name === "plugin.implementers") {
+          return { ok: true, data: { implementers: params.contract === PROMPT_CONTRACT ? stores : implementers } };
+        }
         if (name.endsWith(".node.add")) return { ok: true, data: { nodeId: "n-1" } };
         if (name.endsWith(".node.edit")) return { ok: true, data: {} };
         if (name.endsWith(".node.get")) return nodeGetOk ? { ok: true, data: {} } : { ok: false, code: "NOT_FOUND" };
@@ -76,6 +80,54 @@ test("the board is found by contract, and addressed by whatever id that discover
     calls.some((c) => c.name === "plugin.a-completely-different-board.node.add"),
     "the projection must address the implementer discovery returned, not a board it had in mind",
   );
+});
+
+// ── the implementer must satisfy both contracts ─────────────────────────────
+// A card carries the address of the prompt its node runs. If the cards went to one plugin and the
+// prompts to another, the card would name an address the board it sits on has never heard of.
+
+test("the pick is the intersection — a board that is not also a prompt store is not this loop's board", () => {
+  const boards = [{ id: "board-only", status: "enabled" }, { id: "both", status: "enabled" }];
+  const stores = [{ id: "both", status: "enabled" }, { id: "store-only", status: "enabled" }];
+  assert.equal(pickImplementer(boards, stores), "both", "the first board found is not automatically the right one");
+});
+
+test("no implementer satisfies both — the pick is nothing, never a half-fitting board", () => {
+  assert.equal(
+    pickImplementer([{ id: "board-only", status: "enabled" }], [{ id: "store-only", status: "enabled" }]),
+    null,
+  );
+});
+
+test("a disabled plugin cannot satisfy either contract", () => {
+  assert.equal(pickImplementer([{ id: "b", status: "disabled" }], [{ id: "b", status: "enabled" }]), null);
+  assert.equal(pickImplementer([{ id: "b", status: "enabled" }], [{ id: "b", status: "disabled" }]), null);
+});
+
+test("a decoy board that holds no prompts is passed over for the one that does", async () => {
+  const { board, calls } = harness({
+    implementers: [{ id: "decoy-board", status: "enabled" }, { id: "real-board", status: "enabled" }],
+    stores: [{ id: "real-board", status: "enabled" }],
+  });
+  const r = await board.project(entry(), "absent");
+  assert.equal(r.projected, true);
+  assert.ok(
+    calls.some((c) => c.name === "plugin.real-board.node.add"),
+    "the projection must go to the implementer that can also hold the prompts its cards point at",
+  );
+  assert.equal(named(calls, ".node.add").filter((c) => c.name.includes("decoy")).length, 0, "nothing may reach the decoy");
+});
+
+test("a board exists but none of them holds prompts — that is a misconfiguration, and it is said out loud", async () => {
+  const { board, calls } = harness({
+    implementers: [{ id: "board-only", status: "enabled" }],
+    stores: [],
+  });
+  const r = await board.project(entry(), "absent");
+  assert.equal(r.projected, false);
+  assert.equal(r.code, "UNAVAILABLE", "a board that cannot run the loop is not the lawful 'no board' state");
+  assert.match(r.reason, /soksak-prompt-store-spec@1/, "the refusal must name the contract nobody implements");
+  assert.equal(named(calls, ".node.add").length, 0);
 });
 
 test("a disabled implementer is not a board — projecting into it would go nowhere", async () => {

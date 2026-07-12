@@ -58,7 +58,10 @@ fn serve_hello_req_shutdown_roundtrip() {
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert!(subs.iter().any(|s| s.contains("kanban")), "subscribe 에 kanban bus(PS15)");
+    // 구독 토픽은 보드 계약이 소유한다. 구현체 이름이 박힌 토픽은 이름-핀이고, 보드를 갈아끼우면
+    // 에러 하나 없이 구독이 끊긴다 — 그래서 여기서 이름의 부재까지 함께 못박는다.
+    assert!(subs.iter().any(|s| s == "bus:issue-board:changed"), "subscribe 에 보드 계약 토픽(PS15)");
+    assert!(!subs.iter().any(|s| s.contains("kanban")), "구독 토픽에 구현체 이름이 있으면 이름-핀이다");
 
     // ── ready → 서비스는 req 수신 개시 ──
     writeln!(stdin, "{}", json!({"t":"ready"})).unwrap();

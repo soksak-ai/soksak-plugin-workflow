@@ -3,7 +3,7 @@
   "id": "soksak-plugin-workflow",
   "name": "Workflow",
   "version": "0.0.1",
-  "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 칸반 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
+  "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 이슈 보드의 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
   "entry": "main.js",
   "permissions": [
     "service",
@@ -16,9 +16,10 @@
     "ui",
     "process"
   ],
-  "dependencies": {
-    "soksak-plugin-kanban": "^0.1.0"
-  },
+  "consumes": [
+    "soksak-issue-board-spec@1",
+    "soksak-prompt-store-spec@1"
+  ],
   "sidecars": [
     {
       "name": "workflow",
@@ -29,7 +30,7 @@
     "sidecar": "workflow",
     "interface": "soksak-service-spec@1",
     "subscribe": [
-      "bus:kanban:changed"
+      "bus:issue-board:changed"
     ]
   },
   "contributes": {
