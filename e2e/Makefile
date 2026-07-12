@@ -27,7 +27,7 @@ MODEL     ?= glm-5.2
 OUT_LANG  ?= ko
 SLUG      ?= pharmacy
 
-.PHONY: test build e2e exec-stage exec-classify emit-replay commit-fixture check clean
+.PHONY: test build e2e exec-stage exec-pull exec-classify emit-replay commit-fixture check clean
 
 build:
 	cd $(SOKSAK) && cargo build --release --bin soksak-sidecar-workflow
@@ -67,6 +67,42 @@ exec-stage: build
 	  const bad=reqs.filter(r=>("schema"in r)||("directive"in r)||("category"in r)||("vars"in r)||("promptRole"in r)); \
 	  if(bad.length){console.error("[exec-stage] FAIL: 요건에 군더더기 인라인",bad.length);process.exit(1)} \
 	  console.log("[exec-stage] 요건 군더더기(schema/directive/category/vars 인라인): 0 ✓ | 크기:",fs.statSync("$(OUT)/stage.jsonl").size,"B");'
+
+# exec-pull — TUI(pull) 경로 실측 + push 대조. 같은 generate stage 를 두 경로로:
+#   push=exec-stage(사이드카가 claude 내부 spawn) / pull=assemble(LLM0)→외부 실행자(claude TUI=$(MODEL)) 턴→with-output(LLM0) 재생.
+#   두 DraftDoc 의 구조·effort 배선 동치를 단언(내용은 LLM 턴차로 상이=정상). 인증 env 필요: run-e2e.zsh exec-stage exec-pull
+exec-pull: build
+	@test -s $(OUT)/stage.jsonl || { echo "먼저 make exec-stage (push 대조군 stage.jsonl)"; exit 1; }
+	@# 1) assemble — agent 턴 {prompt,schema} 패키지(LLM 0, 인증 불요)
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
+	  process.stdout.write(JSON.stringify({skeleton:doc,stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --assemble > $(OUT)/pull-pkg.json
+	@node -e 'const p=JSON.parse(require("fs").readFileSync("$(OUT)/pull-pkg.json","utf8")); \
+	  fs=require("fs");fs.writeFileSync("$(OUT)/pull-prompt.txt",p.prompt);fs.writeFileSync("$(OUT)/pull-schema.json",JSON.stringify(p.schema)); \
+	  if(!p.schema.properties.requirements.items.properties.effort){console.error("[exec-pull] FAIL: assemble 패키지 schema 에 effort 없음(라우팅 교육 미전파)");process.exit(1)} \
+	  console.log("[exec-pull] assemble OK — 패키지 schema.requirements.effort 존재(LLM 0)");'
+	@# 2) TUI 턴 — 외부 실행자(claude=$(MODEL))가 패키지 프롬프트 수행(구조화 산출)
+	claude -p "$$(cat $(OUT)/pull-prompt.txt)" --output-format json --json-schema "$$(cat $(OUT)/pull-schema.json)" --model $(MODEL) --strict-mcp-config --disallowedTools Task > $(OUT)/pull-tui-raw.json
+	@node -e 'const a=JSON.parse(require("fs").readFileSync("$(OUT)/pull-tui-raw.json","utf8")); \
+	  const m=a.find(x=>x.type==="result");let r=m&&m.result;if(typeof r==="string")r=JSON.parse(r); \
+	  if(!r||!r.requirements){console.error("[exec-pull] FAIL: TUI 산출에 requirements 없음");process.exit(1)} \
+	  require("fs").writeFileSync("$(OUT)/pull-result.json",JSON.stringify(r)); \
+	  console.log("[exec-pull] TUI 턴(외부 실행자=claude) 산출 requirements:",r.requirements.length);'
+	@# 3) with-output — 외부 산출 주입·발행 재생(LLM 0, 인증 불요) → pull DraftDoc
+	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
+	  process.stdout.write(JSON.stringify({skeleton:doc,stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
+	  | $(BIN) exec-stage --lang $(OUT_LANG) --with-output "$$(cat $(OUT)/pull-result.json)" > $(OUT)/stage-pull.jsonl
+	@# 4) push vs pull DraftDoc 대조 — 구조·effort 배선 동치 단언
+	@node -e 'const fs=require("fs"); \
+	  const push=JSON.parse(fs.readFileSync("$(OUT)/stage.jsonl","utf8")),pull=JSON.parse(fs.readFileSync("$(OUT)/stage-pull.jsonl","utf8")); \
+	  const S=d=>{const rq=d.requirements||[];const eff={};for(const r of rq)eff[r.effort||"(없음)"]=(eff[r.effort||"(없음)"]||0)+1; \
+	    return {kind:d.kind,reqs:rq.length,tagged:rq.filter(r=>"effort"in r).length,eff,tasks:(d.tasks||[]).map(t=>t.stage).join(","), \
+	    vc:Object.keys(d.verify_contract||{}).length,junk:rq.filter(r=>("schema"in r)||("directive"in r)||("category"in r)||("vars"in r)).length};}; \
+	  const P=S(push),Q=S(pull); \
+	  console.log("[exec-pull] push:",JSON.stringify(P)); console.log("[exec-pull] pull:",JSON.stringify(Q)); \
+	  const ok=P.kind===Q.kind&&P.kind==="draft-chunk"&&P.tasks===Q.tasks&&P.vc===Q.vc&&P.junk===0&&Q.junk===0&&P.tagged===P.reqs&&Q.tagged===Q.reqs; \
+	  if(!ok){console.error("[exec-pull] FAIL: push↔pull DraftDoc 구조/effort 배선 불일치");process.exit(1)} \
+	  console.log("[exec-pull] ✓ push(CLI/사이드카) ↔ pull(TUI/외부실행자) DraftDoc 구조·effort(100% 태그) 동치 · 군더더기 0 · 내용차=LLM 턴차(정상)");'
 
 # exec-verify — verify(항목 검증) 실측(LLM): 요건 1개를 exec-one 으로 — 소비 시점 조립(템플릿 {{}} 치환) 후 oxf 판정.
 exec-verify: build
@@ -218,7 +254,8 @@ check:
 	@echo "self-contained: 외부 런타임 불요(doc 단일 경로). 인증 e2e = run-e2e.zsh"
 
 clean:
-	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/verify.json $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl
+	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/verify.json $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl \
+	  $(OUT)/pull-pkg.json $(OUT)/pull-prompt.txt $(OUT)/pull-schema.json $(OUT)/pull-tui-raw.json $(OUT)/pull-result.json $(OUT)/stage-pull.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build
