@@ -187,6 +187,14 @@ async function cmdStatus() {
   process.exit(0);
 }
 
+/** 한 이슈의 잔재를 원장이 정한 순서대로 걷는다: 리스를 놓고, 그 다음에 항목을 지운다. 원장은 점유
+ *  중인 항목의 삭제를 LEASE_HELD 로 거절한다 — 그 게이트는 옳으므로 우회하지 않고 따른다. 항목이
+ *  없으면 두 호출 다 무해한 no-op 다. */
+async function reclaim(issue) {
+  await call(`${WF}.lease.release`, { issue, owner: "e2e" }).catch(() => {});
+  await call(`${WF}.entry.remove`, { issue }).catch(() => {});
+}
+
 /** contract — 계약-핀 e2e(LLM 0·멱등·자기회수). 이름-핀을 지운 뒤에도 워크플로가 보드에 닿는지,
  *  그리고 그 접촉이 계약 발견을 거쳐 일어나는지 실앱에서 본다. 하니스는 구현체 이름을 모른다.
  *
@@ -200,6 +208,12 @@ async function cmdContract() {
   const boardId = await resolveBoard();
   if (!boardId) fail("두 계약을 모두 구현한 보드 없음");
   log(`① 발견: ${BOARD_CONTRACT} ∩ ${PROMPT_CONTRACT} → ${boardId}`);
+
+  // 자기 잔재부터 회수한다 — 앞선 실행이 중간에 죽었다면 그 원장 항목·리스·카드가 남아 있고, 그것을
+  // 그대로 둔 채 시작하면 다음 실행은 "갓 등록한 이슈"를 검사하면서 지난 실행의 상태를 본다. 시나리오는
+  // 자기 것만 지운다(다른 이슈·다른 카드는 건드리지 않는다). 리스를 먼저 놓는다 — 원장은 점유 중인
+  // 항목의 삭제를 거절한다(LEASE_HELD). 그 게이트를 우회하지 않고 지킨다.
+  await reclaim(ISSUE);
 
   // baseline — 이 시나리오가 남기는 것이 0 임을 끝에서 이 수로 판정한다. 원장 그룹 카드는 이 시나리오의
   // 산물이 아니라 원장이 보드에 두는 상설 픽스처다: 먼저 만들어 놓고 재야 cold 첫 실행과 warm 재실행이
@@ -236,10 +250,12 @@ async function cmdContract() {
   //    밖이라 idle 로 끝난다(LLM 0·리스 0) — 그래도 해소 게이트는 통과해야 한다. 교집합이 비면
   //    여기서 UNAVAILABLE 로 거절된다.
   const nx = unwrap(await call(`${WF}.next`, { chunk: "e2e-contract-pin-nonexistent-scope" }, 60_000));
-  if (!nx.idle) fail(`서비스 next 가 idle 이 아님(공유 보드 부작용 우려): ${JSON.stringify(nx).slice(0, 120)}`);
-  log("⑤ 서비스: 계약 해소 통과 → next idle (LLM 0)");
+  if (nx.node) fail(`서비스 next 가 노드를 발급함(공유 보드 부작용 우려): ${JSON.stringify(nx).slice(0, 120)}`);
+  log("⑤ 서비스: 계약 해소 통과 → next 유휴, 노드 미발급 (LLM 0)");
 
-  // ⑥ 회수 — 원장에서 지우면 카드도 걷힌다. 남으면 남의 화면에 유령 카드가 선다.
+  // ⑥ 회수 — 리스를 놓고(원장은 점유 중인 항목의 삭제를 거절한다) 항목을 지우면 카드도 걷힌다.
+  //    남으면 남의 화면에 유령 카드가 선다.
+  unwrap(await call(`${WF}.lease.release`, { issue: ISSUE, owner: "e2e" }));
   unwrap(await call(`${WF}.entry.remove`, { issue: ISSUE }));
   const after = await board();
   if (after.some((n) => n.id === nodeId)) fail("회수 실패 — 카드가 보드에 남음");
