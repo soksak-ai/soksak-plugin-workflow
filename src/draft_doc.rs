@@ -336,6 +336,8 @@ mod tests {
             badge: Some(badge.into()),
             is_draft: false,
             parent_draft_id: None,
+            effort: None,
+            model: None,
         }
     }
     /// task Add 이벤트(hunt/classify/audit).
@@ -360,6 +362,8 @@ mod tests {
             badge: None,
             is_draft: false,
             parent_draft_id: None,
+            effort: None,
+            model: None,
         }
     }
     fn schema_json() -> Json {

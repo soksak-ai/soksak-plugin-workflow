@@ -55,6 +55,12 @@ pub enum NodeEvent {
         is_draft: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         parent_draft_id: Option<String>,
+        // ── 라우팅 tier(자기선택): 저작이 노드 난이도로 실어 보낸다. reconcile 이 wire 를 읽어 exec 에
+        // honor(claude --effort, codex -c model_reasoning_effort). 미emit = 실행자 기본(최고, 품질우선). routing-skill.md.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
 }
 

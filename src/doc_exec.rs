@@ -641,6 +641,9 @@ fn build_event(node: &Map<String, Json>, scope: &Scope, st: &mut RunState, for_i
         badge: s("badge"),
         is_draft: node.get("isDraft").map(|v| scope.eval(v) == Json::Bool(true)).unwrap_or(false),
         parent_draft_id: s("parentDraftId"),
+        // 라우팅 tier — s() 가 빈 문자열("or":"" 폴백)을 None 으로 걸러 미emit=기본 최고 보존.
+        effort: s("effort"),
+        model: s("model"),
     })
 }
 
@@ -685,6 +688,7 @@ mod tests {
                         { "op": "publish", "node": { "id": { "auto": "i" }, "kind": "item", "parent": { "$": "args.chunkRef", "or": "chunk" },
                             "title": { "$": "item.title" }, "description": { "$": "item.description", "or": "" },
                             "origin": { "$": "item.origin" }, "badge": { "$": "values.PENDING" },
+                            "effort": { "$": "item.effort", "or": "" }, "model": { "$": "item.model", "or": "" },
                             "schema": "VERIFY_SCHEMA", "promptRole": "verify",
                             "vars": { "title": { "$": "item.title" }, "description": { "$": "item.description", "or": "" } },
                             "varRefs": { "directive": "directive" },
@@ -838,6 +842,26 @@ mod tests {
     fn unknown_stage_is_loud() {
         let err = run(&mini_doc(), "classify", &json!({}), &mut no_agent).unwrap_err();
         assert!(err.contains("stage") && err.contains("classify"), "{err}");
+    }
+
+    #[test]
+    fn foreach_carries_routing_tier_to_wire() {
+        // 저작이 실은 난이도 tier(effort/model)가 NodeEvent wire 까지 관통해야 한다 —
+        // reconcile 이 그 wire 를 읽어 exec 에 honor. 여기서 끊기면 자기선택 라우팅이 무음 no-op.
+        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| -> Result<Json, String> {
+            Ok(json!({ "title": "T", "titleOrigin": "agent", "requirements": [
+                { "title": "auth 경계", "description": "d", "origin": "agent", "effort": "max", "model": "gpt-5.6-sol" },
+                { "title": "날짜 포맷", "description": "d", "origin": "user" }
+            ] }))
+        };
+        let (events, _) = run(&mini_doc(), "generate", &json!({ "directive": "d", "chunkRef": "k" }), &mut agent).unwrap();
+        let w0 = serde_json::to_string(&events[0]).unwrap();
+        assert!(w0.contains(r#""effort":"max""#), "tier 가 wire 까지 관통: {w0}");
+        assert!(w0.contains(r#""model":"gpt-5.6-sol""#), "model tier 관통: {w0}");
+        // tier 미emit 항목 = wire 에 effort/model 키 없음(기본 최고 보존, 군더더기 0).
+        let w1 = serde_json::to_string(&events[1]).unwrap();
+        assert!(!w1.contains("\"effort\""), "미지정 = wire 에 effort 생략: {w1}");
+        assert!(!w1.contains("\"model\""), "미지정 = wire 에 model 생략: {w1}");
     }
 
     /// [계약 스냅샷] gen.pharmacy.doc.json — draft fixture 의 wire 계약 고정.
