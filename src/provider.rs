@@ -175,6 +175,15 @@ fn provider_kind() -> &'static str {
     }
 }
 
+/// provider_label — 실행자 CLI 표기(로그용). exec-one/exec-stage 가 "→ claude -p" 를 하드코딩하면
+/// codex 경로에서 오표기 — 실행자를 실제로 반영한다.
+pub fn provider_label() -> &'static str {
+    match provider_kind() {
+        "codex" => "codex exec",
+        _ => "claude -p",
+    }
+}
+
 /// normalize_schema_for_openai — OpenAI strict structured-output 방언으로 결정적 정규화(의미 보존):
 /// 모든 object 에 additionalProperties=false, properties 전 키를 required 로(원래 선택이던 키는
 /// type 에 "null" 을 더해 nullable 로 — 선택성의 등가 표현). Anthropic 스키마는 관대해 이 변환의
@@ -265,7 +274,10 @@ fn run_codex_once(req: &AgentRequest) -> Result<String, String> {
     // `-c model_reasoning_effort=<v>` config override(STEP 0 실측: CLI 미검증). effort 어휘가 provider
     // 마다 달라 최고를 정렬한다(claude `max` ↔ codex `ultra`). 미지정("")이면 codex config 기본에 맡김.
     if !req.effort.is_empty() {
-        cmd.arg("-c").arg(format!("model_reasoning_effort={}", codex_reasoning_effort(&req.effort)));
+        let mapped = codex_reasoning_effort(&req.effort);
+        let m = if req.model.is_empty() || req.model == "default" { "default" } else { req.model };
+        eprintln!("[soksak] codex exec (model={m}, effort={}→{mapped}) via -c model_reasoning_effort", req.effort);
+        cmd.arg("-c").arg(format!("model_reasoning_effort={mapped}"));
     }
     let schema_file = if let Some(sc) = &req.schema {
         let f = tmp.join(format!("schema-{}.json", std::process::id()));

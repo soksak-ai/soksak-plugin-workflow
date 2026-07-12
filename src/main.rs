@@ -273,7 +273,7 @@ fn run_exec_one(argv: &[String]) -> Result<(), String> {
     let (env, profile) = auth_env()?;
     // effort = 노드가 실은 tier, 미지정이면 최고(품질우선 — under-fund 방지). 로그로 tier 관통 관측 가능.
     let effort = input.effort.clone().unwrap_or_else(|| soksak_sidecar_workflow::provider::DEFAULT_EFFORT.to_string());
-    eprintln!("[soksak] exec-one (model={model}, effort={effort}, 프로필={profile}) → claude -p");
+    eprintln!("[soksak] exec-one (model={model}, effort={effort}, 프로필={profile}) → {}", soksak_sidecar_workflow::provider::provider_label());
     let full = build_prompt_with_schema(&input.prompt, None, lang.as_ref()); // schema 는 --json-schema 강제로(prompt X)
     // 7200s(2h): provider 캡 = claude 무한 방지용. lease=프로세스-생존이라 천장 통일 불필요 — 정상은 provider 가
     // claude 종료→onExit→reply(검색 fan-out 1h+ 수용). register timeout_ms(zombie_backstop 3h)는 그것도 실패한
@@ -421,7 +421,7 @@ fn run_exec_stage_doc(
     // agent 러너 — ClaudeHost.agent 동형(빌드 프롬프트+언어 계약, schema 는 --json-schema 강제, 실패는 전파).
     let mut agent_fn = |prompt: &str, schema: Option<&Value>, label: &str| -> Result<Value, String> {
         let full = build_prompt_with_schema(prompt, None, lang.as_ref());
-        eprintln!("[soksak] agent {label:?} (model={model}, effort={effort}) → claude -p");
+        eprintln!("[soksak] agent {label:?} (model={model}, effort={effort}) → {}", soksak_sidecar_workflow::provider::provider_label());
         let req = AgentRequest {
             prompt: full,
             model: &model,
