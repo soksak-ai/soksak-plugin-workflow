@@ -43,35 +43,61 @@ pub struct AgentRequest<'a> {
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 /// run_agent_text 가 timeout 래퍼로 이 args 를 `claude` 에 적용한다. system_prompt 가 Some 이면
 /// `--append-system-prompt <내용>` 추가(user prompt 와 분리 — claude CLI 공식 플래그).
-/// search_mcp — 리서치/검증 에이전트의 검색 기질(substrate). 규칙: 프롬프트가 요구하는 도구를 실제로
-/// 노출한다고 프로브(tools/mcp-verify.mjs)로 검증된 서버만 배선한다. "노출할 것이다" 가정 배선 금지 —
-/// z.ai 패키지를 검색으로 착각한 오류의 재발 방지. 기본 = 키 없는 2종(실증 완료):
-///   context7(@upstash/context7-mcp) — 라이브러리 docs·버전·호환성(resolve-library-id, query-docs).
-///   ddg-search(@oevortex/ddg_search) — 웹검색·현재 사실(web-search, 실데이터 반환 확인).
-/// 키 있는 프리미엄(Tavily/Brave)은 env 있을 때만 옵트인. 반환 = (--mcp-config JSON, allowedTools 토큰
-/// mcp__<서버>). SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override(서버명 파싱해 grant).
+/// zai_token — z.ai API 키(= glm 인증 토큰 재사용, 별도 키 불요). Z_AI_API_KEY 우선, 없으면 ANTHROPIC_AUTH_TOKEN.
+fn zai_token() -> Option<String> {
+    std::env::var("Z_AI_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|k| !k.is_empty()))
+}
+
+/// default_search_servers — 검색 substrate 기본 배선(순수, 테스트 가능). 규칙: 프롬프트가 요구하는 도구를
+/// 실제로 노출한다고 프로브(tools/mcp-verify.mjs)로 검증된 서버만 배선한다. "노출할 것이다" 가정 배선 금지.
+///   context7 — 라이브러리 docs·버전·호환(키 없음, 실증: resolve-library-id·query-docs).
+///   웹검색 — z.ai web_search_prime(정식 원격 API·유료 쿼터·실데이터 반환 확인) 우선; z.ai 토큰 없으면
+///            ddg(@oevortex/ddg_search, 키 없는 best-effort, HTTP 202 간헐). z.ai 패키지 @z_ai/mcp-server 는
+///            비전 전용(웹검색 0)이라 배선 금지.
+///   tavily/brave — 키 있을 때만 추가 소스.
+fn default_search_servers(zai: Option<&str>, tavily: Option<&str>, brave: Option<&str>) -> Value {
+    let mut servers = serde_json::Map::new();
+    servers.insert("context7".into(), serde_json::json!({
+        "type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }));
+    match zai {
+        Some(k) => {
+            servers.insert("web-search-prime".into(), serde_json::json!({
+                "type": "http",
+                "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
+                "headers": { "Authorization": format!("Bearer {k}") } }));
+        }
+        None => {
+            servers.insert("ddg-search".into(), serde_json::json!({
+                "type": "stdio", "command": "npx", "args": ["-y", "@oevortex/ddg_search"] }));
+        }
+    }
+    if let Some(k) = tavily {
+        servers.insert("tavily".into(), serde_json::json!({
+            "type": "stdio", "command": "npx", "args": ["-y", "tavily-mcp"], "env": { "TAVILY_API_KEY": k } }));
+    }
+    if let Some(k) = brave {
+        servers.insert("brave".into(), serde_json::json!({
+            "type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": k } }));
+    }
+    serde_json::json!({ "mcpServers": servers })
+}
+
+/// search_mcp — 발굴/판정 에이전트의 --mcp-config + allowedTools 토큰(mcp__<서버>) 생성. 기본 배선은
+/// default_search_servers. SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override(서버명 파싱해 grant).
 fn search_mcp() -> Option<(String, Vec<String>)> {
     let cfg: Value = match std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG").ok().filter(|v| !v.trim().is_empty()) {
         Some(v) => {
             let raw = if std::path::Path::new(&v).is_file() { std::fs::read_to_string(&v).ok()? } else { v };
             serde_json::from_str(&raw).ok()?
         }
-        None => {
-            let mut servers = serde_json::Map::new();
-            servers.insert("context7".into(), serde_json::json!({
-                "type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }));
-            servers.insert("ddg-search".into(), serde_json::json!({
-                "type": "stdio", "command": "npx", "args": ["-y", "@oevortex/ddg_search"] }));
-            if let Some(k) = std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.is_empty()) {
-                servers.insert("tavily".into(), serde_json::json!({
-                    "type": "stdio", "command": "npx", "args": ["-y", "tavily-mcp"], "env": { "TAVILY_API_KEY": k } }));
-            }
-            if let Some(k) = std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()) {
-                servers.insert("brave".into(), serde_json::json!({
-                    "type": "stdio", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-brave-search"], "env": { "BRAVE_API_KEY": k } }));
-            }
-            serde_json::json!({ "mcpServers": servers })
-        }
+        None => default_search_servers(
+            zai_token().as_deref(),
+            std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.is_empty()).as_deref(),
+            std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()).as_deref(),
+        ),
     };
     let tokens: Vec<String> = cfg
         .get("mcpServers")
@@ -742,25 +768,37 @@ mod tests {
         }
     }
 
-    /// 규칙: 발굴/판정 에이전트는 프로브 검증된 검색 MCP(context7 docs·ddg 웹검색)만 배선하고, 그 도구를
-    /// 명시 grant 한다. z.ai 비전 서버는 검색이 아니므로 배선 안 한다(가정 배선 오류 재발 방지 회귀 테스트).
+    /// 규칙(회귀): 프로브 검증된 서버만 배선. z.ai 토큰 있으면 context7(docs) + z.ai web_search_prime
+    /// (정식 웹검색), ddg/비전 아님. 토큰 없으면 ddg 폴백. 키 프리미엄은 옵트인. z.ai 비전 패키지 배선 금지.
     #[test]
-    fn search_mcp_wires_probe_verified_servers_only() {
-        // SOKSAK_WORKFLOW_MCP_CONFIG 가 세팅돼 있으면 기본 배선 단언이 무의미 — 기본 경로에서만 검증.
-        if std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG").is_ok_and(|v| !v.trim().is_empty()) {
-            return;
-        }
+    fn default_search_servers_wires_probe_verified_only() {
+        let with = default_search_servers(Some("TOK"), None, None);
+        let s = with["mcpServers"].as_object().unwrap();
+        assert!(s.contains_key("context7"), "context7(docs/버전) 배선");
+        assert!(s.contains_key("web-search-prime"), "z.ai 정식 웹검색 배선");
+        assert_eq!(with["mcpServers"]["web-search-prime"]["url"], "https://api.z.ai/api/mcp/web_search_prime/mcp");
+        assert_eq!(with["mcpServers"]["web-search-prime"]["headers"]["Authorization"], "Bearer TOK");
+        assert!(!s.contains_key("ddg-search"), "토큰 있으면 불안정 ddg 미사용");
+        assert!(!with.to_string().contains("@z_ai/mcp-server"), "z.ai 비전 패키지는 검색 아님 — 배선 금지");
+        // 토큰 없음 → ddg 폴백(키 없는 best-effort).
+        let without = default_search_servers(None, None, None);
+        let s2 = without["mcpServers"].as_object().unwrap();
+        assert!(s2.contains_key("context7") && s2.contains_key("ddg-search"), "토큰 없으면 context7+ddg 폴백");
+        assert!(!s2.contains_key("web-search-prime"), "토큰 없으면 z.ai 웹검색 없음");
+        // 키 프리미엄 옵트인.
+        let prem = default_search_servers(Some("T"), Some("TAV"), Some("BR"));
+        let s3 = prem["mcpServers"].as_object().unwrap();
+        assert!(s3.contains_key("tavily") && s3.contains_key("brave"), "키 있으면 프리미엄 추가");
+    }
+
+    /// claude_args 통합: 발굴 에이전트는 --mcp-config(context7 포함) 배선 + MCP 도구 grant + WebSearch·Bash 차단.
+    #[test]
+    fn claude_args_wires_search_and_blocks_wandering() {
         let args = claude_args(&req(false));
-        let mi = args.iter().position(|a| a == "--mcp-config").expect("검색 에이전트엔 --mcp-config 배선");
-        let cfg = &args[mi + 1];
-        assert!(cfg.contains("@upstash/context7-mcp"), "context7(docs/버전) 배선: {cfg}");
-        assert!(cfg.contains("@oevortex/ddg_search"), "ddg(웹검색) 배선: {cfg}");
-        assert!(!cfg.contains("z_ai") && !cfg.contains("zai"), "z.ai 비전 서버는 검색 아님 — 배선 금지: {cfg}");
+        let mi = args.iter().position(|a| a == "--mcp-config").expect("검색 에이전트엔 --mcp-config");
+        assert!(args[mi + 1].contains("@upstash/context7-mcp"), "context7 배선: {}", args[mi + 1]);
         let ai = args.iter().position(|a| a == "--allowedTools").expect("allowedTools");
-        let allowed = &args[ai + 1];
-        assert!(allowed.contains("mcp__context7") && allowed.contains("mcp__ddg-search"),
-            "배선 서버 도구를 명시 grant(권한 프롬프트 hang 방지): {allowed}");
-        // Anthropic WebSearch/Bash 는 -p 배회·hang 원인 → 차단.
+        assert!(args[ai + 1].contains("mcp__context7"), "MCP 도구 명시 grant(권한 hang 방지): {}", args[ai + 1]);
         let di = args.iter().position(|a| a == "--disallowedTools").expect("disallowedTools");
         assert!(args[di + 1].contains("WebSearch") && args[di + 1].contains("Bash"), "WebSearch·Bash 차단");
     }
