@@ -206,6 +206,26 @@ var index_default = {
       done: !!e.done
     });
     const repoPath = (p) => (typeof p.path === "string" && p.path ? p.path : void 0) ?? app.project?.current?.()?.root ?? void 0;
+    reg("entry.add", {
+      description: "Put an issue on the ledger, unleased and unreceipted. This is where an issue enters the loop: it exists, nobody holds it, and it carries no evidence \u2014 so a dispatch of it refuses LEASE_STALE and a completion of it refuses EVIDENCE_REQUIRED until someone earns both. Idempotent \u2014 re-adding an issue already on the ledger returns it untouched.",
+      triggers: { ko: "\uC774\uC288 \uC6D0\uC7A5 \uB4F1\uB85D \uC0DD\uC131" },
+      params: {
+        issue: { type: "string", description: "Issue id", required: true },
+        branch: { type: "string", description: "Branch the work is expected on (recorded for drift)" }
+      },
+      returns: "{ issue, lease:null, leaseState:'absent', branch, receipts:[], done:false }",
+      examples: [`sok plugin.soksak-plugin-workflow.entry.add '{"issue":"i-42","branch":"feat/x"}'`],
+      message: (d) => msg(`${d.issue} is on the ledger`, `${d.issue} \uC6D0\uC7A5 \uB4F1\uB85D`),
+      handler: async (p) => {
+        const issue = String(p.issue ?? "").trim();
+        if (!issue) return err("INVALID_PARAMS", msg("issue is required", "issue \uD544\uC694"));
+        const existing = await load(issue);
+        if (existing) return view(existing);
+        const e = blank(issue);
+        if (typeof p.branch === "string" && p.branch) e.branch = p.branch;
+        return view(await save(e));
+      }
+    });
     reg("lease.acquire", {
       description: "Take the dispatch lease on an issue: an owner and an expiry. A live lease held by someone else refuses (LEASE_HELD) \u2014 two agents on one issue is the accident this prevents. An absent or expired lease is free to take. Idempotent for the same owner (re-acquiring extends).",
       triggers: { ko: "\uC774\uC288 \uB9AC\uC2A4 \uCDE8\uB4DD \uC810\uC720 \uC18C\uC720" },

@@ -85,6 +85,29 @@ const index_default = {
     });
     const repoPath = (p) => (typeof p.path === "string" && p.path ? p.path : undefined) ?? app.project?.current?.()?.root ?? undefined;
 
+    // ── the entry ───────────────────────────────────────────────────────────
+    reg("entry.add", {
+      description:
+        "Put an issue on the ledger, unleased and unreceipted. This is where an issue enters the loop: it exists, nobody holds it, and it carries no evidence — so a dispatch of it refuses LEASE_STALE and a completion of it refuses EVIDENCE_REQUIRED until someone earns both. Idempotent — re-adding an issue already on the ledger returns it untouched.",
+      triggers: { ko: "이슈 원장 등록 생성" },
+      params: {
+        issue: { type: "string", description: "Issue id", required: true },
+        branch: { type: "string", description: "Branch the work is expected on (recorded for drift)" },
+      },
+      returns: "{ issue, lease:null, leaseState:'absent', branch, receipts:[], done:false }",
+      examples: ['sok plugin.soksak-plugin-workflow.entry.add \'{"issue":"i-42","branch":"feat/x"}\''],
+      message: (d) => msg(`${d.issue} is on the ledger`, `${d.issue} 원장 등록`),
+      handler: async (p) => {
+        const issue = String(p.issue ?? "").trim();
+        if (!issue) return err("INVALID_PARAMS", msg("issue is required", "issue 필요"));
+        const existing = await load(issue);
+        if (existing) return view(existing); // idempotent — never clobber a live lease or its receipts
+        const e = blank(issue);
+        if (typeof p.branch === "string" && p.branch) e.branch = p.branch;
+        return view(await save(e));
+      },
+    });
+
     // ── lease ───────────────────────────────────────────────────────────────
     reg("lease.acquire", {
       description:

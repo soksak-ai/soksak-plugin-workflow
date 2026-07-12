@@ -207,6 +207,13 @@
         "returns": "{ ok, written }"
       },
       {
+        "name": "entry.add",
+        "title": {
+          "ko": "이슈를 원장에 등록합니다",
+          "en": "Puts an issue on the ledger"
+        }
+      },
+      {
         "name": "lease.acquire",
         "title": {
           "ko": "이슈 디스패치 리스를 취득합니다",

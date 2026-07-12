@@ -108,6 +108,27 @@ test("the lease survives in the store — the state is read back, never held in 
   assert.equal(listed.entries[0].leaseState, "live", "the state is computed on read, so it can never go stale");
 });
 
+test("an issue enters the loop unleased and unreceipted — and both gates still refuse it", async () => {
+  const m = boot();
+  const added = await run(m, "entry.add", { issue: "i-42", branch: "feat/x" });
+  assert.equal(added.leaseState, "absent");
+  assert.deepEqual(added.receipts, []);
+  assert.equal(added.done, false);
+  // existing on the ledger is not the same as earned: both gates must still refuse
+  assert.equal((await run(m, "gate.dispatch", { issue: "i-42", owner: "agent-1" })).code, "LEASE_STALE");
+  assert.equal((await run(m, "gate.transition", { issue: "i-42" })).code, "EVIDENCE_REQUIRED");
+});
+
+test("entry.add never clobbers what an issue already earned", async () => {
+  const m = boot();
+  await run(m, "lease.acquire", { issue: "i-42", owner: "agent-1", branch: "feat/x" });
+  await run(m, "receipt.add", { issue: "i-42", kind: "commit", value: "0dc2d14" });
+  const again = await run(m, "entry.add", { issue: "i-42", branch: "feat/other" });
+  assert.equal(again.lease.owner, "agent-1", "a re-add must not drop a live lease");
+  assert.equal(again.receipts.length, 1, "a re-add must not drop receipts");
+  assert.equal(again.branch, "feat/x");
+});
+
 test("an entry can be dropped, and dropping it twice is a no-op", async () => {
   const m = boot();
   await run(m, "lease.acquire", { issue: "i-42", owner: "agent-1" });
