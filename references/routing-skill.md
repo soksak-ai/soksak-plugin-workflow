@@ -10,7 +10,7 @@
 
 - **명확성**: 원하는 동작과 구현 경로가 이미 정해졌는가.
 - **범위**: 국소·기계적인가, 교차모듈·아키텍처인가.
-- **위험**: 폭발 반경·되돌림 가능성·보안·프로덕션 노출.
+- **위험**: 폭발 반경·되돌림 가능성·보안·프로덕션 노출·규제/법정 의무·불가역성.
 - **검증 난이도**: 결과 검증과 상충 증거 해소가 얼마나 어려운가.
 
 ## provider 별 선택표 (실측, 2026-07-12)
@@ -21,13 +21,15 @@
 |---|---|---|---|---|
 | 기계적·저위험·되돌리기 쉬움 | `gpt-5.6-luna` | low (±minimal) | haiku/sonnet | low/medium |
 | 일반 구현·탐색·교차모듈 | `gpt-5.6-terra` | medium/high | sonnet | medium/high |
-| 아키텍처·보안·프로덕션위험·개방형 판단 | `gpt-5.6-sol` | high~ultra | opus | high/max |
+| 아키텍처·보안·프로덕션위험·규제/법정 의무·개방형 판단 | `gpt-5.6-sol` | high~ultra | opus | high/max |
 | 한턴에 고민하는 저작(JSON·플랜) | `gpt-5.6-sol` | **ultra** | opus | **max** |
 
 - codex effort 값 = `low·medium·high·xhigh·max·ultra`(+minimal/none). `-c model_reasoning_effort=<v>`.
 - claude effort 값 = `low·medium·high·xhigh·max`. `--effort <v>`.
 - **미지정 = 최고**(품질우선). 낮추는 것은 순수 기계적 작업에 대해서만, 명시적으로. 되돌리기 비싼 실수가
   더 큰 재작업을 부르는 곳에 추론을 굶기지 마라.
+- **규제 준수·법정 기록 보존·불가역 데이터 무결성 = max(claude)/ultra(codex)** — 되돌릴 수 없고 법적 책임이
+  걸린다. 이 부류를 high 로 눌러 앉히지 마라.
 
 ## 병렬 규율
 
