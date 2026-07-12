@@ -26,6 +26,13 @@ IDEA_FILE ?= $(HERE)/idea.txt
 MODEL     ?= glm-5.2
 OUT_LANG  ?= ko
 SLUG      ?= pharmacy
+# PROVIDER — 실행자 전환. claude(기본, --model + ANTHROPIC env) | codex(SOKSAK_WORKFLOW_PROVIDER=codex,
+#   인증=codex 자체 로그인 ~/.codex, ANTHROPIC env 불요). codex 경로는 run-e2e.zsh 없이 직접 실행 가능.
+#   예) PROVIDER=codex MODEL=gpt-5.6-luna make -C e2e exec-verify
+PROVIDER  ?= claude
+ifeq ($(PROVIDER),codex)
+export SOKSAK_WORKFLOW_PROVIDER := codex
+endif
 
 .PHONY: test build e2e exec-stage exec-pull exec-classify emit-replay commit-fixture check clean
 
@@ -78,16 +85,18 @@ exec-pull: build
 	  process.stdout.write(JSON.stringify({skeleton:doc,stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
 	  | $(BIN) exec-stage --lang $(OUT_LANG) --assemble > $(OUT)/pull-pkg.json
 	@node -e 'const p=JSON.parse(require("fs").readFileSync("$(OUT)/pull-pkg.json","utf8")); \
-	  fs=require("fs");fs.writeFileSync("$(OUT)/pull-prompt.txt",p.prompt);fs.writeFileSync("$(OUT)/pull-schema.json",JSON.stringify(p.schema)); \
 	  if(!p.schema.properties.requirements.items.properties.effort){console.error("[exec-pull] FAIL: assemble 패키지 schema 에 effort 없음(라우팅 교육 미전파)");process.exit(1)} \
 	  console.log("[exec-pull] assemble OK — 패키지 schema.requirements.effort 존재(LLM 0)");'
-	@# 2) TUI 턴 — 외부 실행자(claude=$(MODEL))가 패키지 프롬프트 수행(구조화 산출)
-	claude -p "$$(cat $(OUT)/pull-prompt.txt)" --output-format json --json-schema "$$(cat $(OUT)/pull-schema.json)" --model $(MODEL) --strict-mcp-config --disallowedTools Task > $(OUT)/pull-tui-raw.json
-	@node -e 'const a=JSON.parse(require("fs").readFileSync("$(OUT)/pull-tui-raw.json","utf8")); \
-	  const m=a.find(x=>x.type==="result");let r=m&&m.result;if(typeof r==="string")r=JSON.parse(r); \
-	  if(!r||!r.requirements){console.error("[exec-pull] FAIL: TUI 산출에 requirements 없음");process.exit(1)} \
+	@# 2) 외부 턴 — exec-one(provider 중립 turn 러너)이 패키지 {prompt,schema} 를 자기 턴에 수행.
+	@#    provider 별 arg 차이(claude --json-schema/--effort ↔ codex --output-schema/-c model_reasoning_effort,
+	@#    스키마 방언 Anthropic↔OpenAI-strict)는 provider.rs 한 곳이 흡수 — 테스트는 중립. PROVIDER=codex 로 전환.
+	@node -e 'const p=JSON.parse(require("fs").readFileSync("$(OUT)/pull-pkg.json","utf8")); \
+	  process.stdout.write(JSON.stringify({prompt:p.prompt,schema:p.schema,model:"$(MODEL)"}));' \
+	  | $(BIN) exec-one --lang $(OUT_LANG) > $(OUT)/pull-oneout.json
+	@node -e 'const o=JSON.parse(require("fs").readFileSync("$(OUT)/pull-oneout.json","utf8"));const r=o.result; \
+	  if(!r||!r.requirements){console.error("[exec-pull] FAIL: 외부 턴 산출에 requirements 없음");process.exit(1)} \
 	  require("fs").writeFileSync("$(OUT)/pull-result.json",JSON.stringify(r)); \
-	  console.log("[exec-pull] TUI 턴(외부 실행자=claude) 산출 requirements:",r.requirements.length);'
+	  console.log("[exec-pull] 외부 턴(exec-one, provider="+(process.env.SOKSAK_WORKFLOW_PROVIDER||"claude")+", model=$(MODEL)) 산출 requirements:",r.requirements.length);'
 	@# 3) with-output — 외부 산출 주입·발행 재생(LLM 0, 인증 불요) → pull DraftDoc
 	@node -e 'const fs=require("fs");const doc=JSON.parse(fs.readFileSync("$(OUT)/doc.json","utf8")); \
 	  process.stdout.write(JSON.stringify({skeleton:doc,stage:"generate",args:{directive:fs.readFileSync("$(IDEA_FILE)","utf8").trim()}}));' \
@@ -255,7 +264,7 @@ check:
 
 clean:
 	rm -f $(OUT)/gen.js $(OUT)/skeleton.json $(OUT)/doc.json $(OUT)/authored.txt $(OUT)/emit.jsonl $(OUT)/stage.jsonl $(OUT)/classify.jsonl $(OUT)/verify.json $(OUT)/hunt.jsonl $(OUT)/audit.jsonl $(OUT)/research.jsonl $(OUT)/plan.jsonl \
-	  $(OUT)/pull-pkg.json $(OUT)/pull-prompt.txt $(OUT)/pull-schema.json $(OUT)/pull-tui-raw.json $(OUT)/pull-result.json $(OUT)/stage-pull.jsonl
+	  $(OUT)/pull-pkg.json $(OUT)/pull-oneout.json $(OUT)/pull-result.json $(OUT)/stage-pull.jsonl
 
 # exec-classify — classify stage(LLM): make exec-stage 요건 → {dimension, assignments}. 전 요건 정확히 1회 배정 검증.
 exec-classify: build
