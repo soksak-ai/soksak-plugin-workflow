@@ -543,6 +543,28 @@ fn reconcile_tick_task_publish() {
 }
 
 #[test]
+fn apply_draft_doc_emits_routing_tier_on_item() {
+    // draft(주 워크플로) 요건이 실은 tier 가 item 노드 발행 params 까지 흘러야 reconcile 이 exec 에 honor.
+    let doc = json!({
+        "kind": "draft-chunk", "chunk_ref": "chunk",
+        "verify_contract": { "template": "T {{title}}", "directive": "D", "schema": { "type": "object" }, "initial_badge": "검수전" },
+        "requirements": [
+            { "id": "i0", "title": "auth 경계", "description": "d", "origin": "agent", "badge": "검수전", "effort": "max", "model": "gpt-5.6-sol" },
+            { "id": "i1", "title": "날짜 포맷", "description": "d", "origin": "user", "badge": "검수전" }
+        ],
+        "tasks": []
+    });
+    let d = FakeDeps::new(vec![]);
+    let n = crate::reconcile::draft::apply_draft_doc(&d, &doc, Some("chunk-k"), None).unwrap();
+    assert_eq!(n, 2, "요건 2개 발행");
+    let add = &d.c().add;
+    assert_eq!(add[0]["effort"], "max", "tier 실은 요건 → item 노드 effort");
+    assert_eq!(add[0]["model"], "gpt-5.6-sol");
+    assert!(add[1].get("effort").is_none(), "미지정 요건 = item 노드 effort 없음(기본 최고 보존)");
+    assert!(add[1].get("model").is_none());
+}
+
+#[test]
 fn reconcile_tick_hunt_ledger_injected() {
     let ns = nodes(vec![json!({ "id": "hunt", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"skeleton\":{},\"stage\":\"hunt\",\"args\":{\"directive\":\"약국\"}}" })]);
     let d = FakeDeps::new(ns).stage(staged_children(vec![], Value::Null)).ledger(vec![json!({ "title": "재고 차감", "badge": "o" })]);

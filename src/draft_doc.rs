@@ -41,6 +41,12 @@ pub struct Requirement {
     pub description: String,
     pub origin: String, // user|agent|search
     pub badge: String,
+    // 라우팅 tier(자기선택) — 저작이 요건별 검증 난이도로 실어 보낸다. apply_draft_doc 이 item 노드에
+    // 실어 exec 이 honor. 미지정 = 실행자 기본(최고, 품질우선). routing-skill.md.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub model: Option<String>,
 }
 
 /// stage 작업(task 이벤트: hunt/classify/audit) — id + blockedBy(id 참조).
@@ -86,6 +92,8 @@ pub fn build(events: &[NodeEvent]) -> Result<DraftDoc, String> {
             schema: ev_schema,
             stage,
             blocked_by,
+            effort,
+            model,
             ..
         } = ev;
         match kind.as_str() {
@@ -129,6 +137,8 @@ pub fn build(events: &[NodeEvent]) -> Result<DraftDoc, String> {
                     description: description.clone(),
                     origin: origin.clone().unwrap_or_default(),
                     badge: badge.clone().unwrap_or_default(),
+                    effort: effort.clone(),
+                    model: model.clone(),
                 });
             }
             "task" => {
@@ -391,6 +401,24 @@ mod tests {
         assert_eq!(doc.requirements[0].id, "i0");
         assert_eq!(doc.requirements[0].origin, "user");
         assert_eq!(doc.tasks.len(), 3, "hunt+classify+audit");
+    }
+
+    #[test]
+    fn build_carries_routing_tier_to_requirement() {
+        // 저작이 실은 노드 tier(effort/model)가 NodeEvent→DraftDoc 요건까지 관통해야 apply_draft_doc 이
+        // item 노드에 싣고 exec 이 honor. 여기서 끊기면 draft(주 워크플로) 경로 라우팅이 무음 no-op.
+        let mut ev = item_ev("i0", "chunk", "auth 경계", "d", "agent", "검수전", Some(schema_json()), Some(json!({ "verify": "T {{title}}", "directive": "D" })));
+        if let NodeEvent::Add { effort, model, .. } = &mut ev {
+            *effort = Some("max".into());
+            *model = Some("gpt-5.6-sol".into());
+        }
+        let doc = build(&[ev]).unwrap();
+        let w = serde_json::to_string(&doc.requirements[0]).unwrap();
+        assert!(w.contains(r#""effort":"max""#), "tier 가 요건까지 관통: {w}");
+        assert!(w.contains(r#""model":"gpt-5.6-sol""#), "model tier 관통: {w}");
+        // tier 미지정 요건 = 직렬화에 effort 키 없음(기본 최고 보존, 군더더기 0).
+        let plain = serde_json::to_string(&build(&good_events()).unwrap().requirements[0]).unwrap();
+        assert!(!plain.contains("\"effort\""), "미지정 = effort 생략: {plain}");
     }
 
     #[test]

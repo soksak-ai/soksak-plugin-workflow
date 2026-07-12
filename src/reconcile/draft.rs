@@ -66,6 +66,14 @@ pub fn apply_draft_doc(deps: &dyn Deps, doc: &Value, chunk_kanban_id: Option<&st
             if let Some(o) = r.get("origin").and_then(|v| v.as_str()) {
                 params.insert("origin".into(), json!(o));
             }
+            // 라우팅 tier — 요건이 실은 난이도를 item 노드에 싣는다. reconcile 이 exec 시 with_routing 으로
+            // 실행자에 honor. 빈문자/부재 = 미삽입(기본 최고 보존).
+            if let Some(e) = r.get("effort").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                params.insert("effort".into(), json!(e));
+            }
+            if let Some(m) = r.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                params.insert("model".into(), json!(m));
+            }
             if let Some(id) = deps.add_node(Value::Object(params)) {
                 if let Some(rid) = r.get("id").and_then(|v| v.as_str()) {
                     key_of.insert(rid.to_string(), id);
