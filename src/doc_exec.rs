@@ -1031,12 +1031,12 @@ mod tests {
         let NodeEvent::Add { id, kind, badge, category, prompt_role, register_prompts, .. } = &dev[0];
         assert_eq!(kind.as_str(), "fact");
         assert!(id.starts_with("design-interface"), "auto id prefix: {id}");
-        assert_eq!(badge.as_deref(), Some("검수전"), "design fact 도 같은 검증 파이프");
+        // 적재적소: design fact 는 검증된 ground(research fact)의 투영(파생물) — 개별 반박 생략, set-레벨
+        // design-audit 가 완전성·정합 담당. badge=o(수용), verify 미부착. 원본 주장(research fact)만 개별 반박.
+        assert_eq!(badge.as_deref(), Some("o"), "design fact = 파생물 → 개별 반박 생략(badge o), design-audit 가 커버");
         assert_eq!(category.as_deref(), Some("interface"));
-        assert_eq!(prompt_role.as_deref(), Some("design-verify"));
-        let reg = register_prompts.as_ref().expect("첫 design fact 에 registerPromptsOnce");
-        assert!(reg.get("design-verify").is_some_and(|t| t.as_str().is_some_and(|s| s.starts_with("SHARED CONCEPTS (design)"))),
-            "DESIGN_VERIFY_TMPL = DESIGN_COMMON concat 조성");
+        assert!(prompt_role.is_none(), "design fact 는 개별 verify 안 함(파생물)");
+        assert!(register_prompts.is_none(), "design fact 는 verify 템플릿 미등록");
         let NodeEvent::Add { id, kind, stage, blocked_by, .. } = &dev[1];
         assert_eq!((id.as_str(), kind.as_str(), stage.as_deref()), ("design-domain", "task", Some("design-domain")));
         assert_eq!(blocked_by.len(), 1, "domain 은 interface fact 전부 검증 후");
@@ -1071,9 +1071,11 @@ mod tests {
         assert_eq!(parent.as_deref(), Some("K-7"));
         assert_eq!(title, "재고 차감 구현");
         assert!(description.contains("acceptance"), "슈도코드 전문(검증 방법 포함) = description");
-        assert_eq!(badge.as_deref(), Some("검수전"), "plan-unit 도 badge 검증 파이프(plan-verify)");
+        // 적재적소: plan-unit 은 검증된 요건+fact 의 구현 투영(파생물) — 개별 반박 생략, set-레벨 plan-audit 가
+        // 파일셋 완전성·정합 담당. badge=o, verify 미부착.
+        assert_eq!(badge.as_deref(), Some("o"), "plan-unit = 파생물 → 개별 반박 생략(badge o), plan-audit 가 커버");
         assert_eq!(category.as_deref(), Some("src/inventory/deduct.ts"), "category = file_path(원장에 파일경로 렌더)");
-        assert_eq!(prompt_role.as_deref(), Some("plan-verify"));
+        assert!(prompt_role.is_none(), "plan-unit 은 개별 verify 안 함(파생물)");
 
         // body stage — 유닛 1개 실코드화 → code 노드(코드 전문+PROOF 블록 한 표면, badge 검증 파이프).
         let mut body_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {

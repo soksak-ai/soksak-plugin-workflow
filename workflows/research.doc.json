@@ -573,30 +573,7 @@
                 "$": "item.file_path",
                 "or": ""
               },
-              "badge": {
-                "$": "values.PENDING"
-              },
-              "schema": "VERIFY_SCHEMA",
-              "promptRole": "plan-verify",
-              "vars": {
-                "title": {
-                  "$": "item.title"
-                },
-                "description": {
-                  "$": "item.pseudocode"
-                }
-              },
-              "varRefs": {
-                "directive": "directive"
-              },
-              "registerPromptsOnce": {
-                "plan-verify": {
-                  "$": "values.PLAN_VERIFY_TMPL"
-                },
-                "directive": {
-                  "$": "args.directive"
-                }
-              },
+              "badge": "o",
               "effort": {
                 "$": "item.effort",
                 "or": ""
@@ -734,31 +711,7 @@
                 "or": "agent"
               },
               "category": "interface",
-              "badge": {
-                "$": "values.PENDING"
-              },
-              "schema": "VERIFY_SCHEMA",
-              "promptRole": "design-verify",
-              "vars": {
-                "title": {
-                  "$": "item.title"
-                },
-                "description": {
-                  "$": "item.description",
-                  "or": ""
-                }
-              },
-              "varRefs": {
-                "directive": "directive"
-              },
-              "registerPromptsOnce": {
-                "design-verify": {
-                  "$": "values.DESIGN_VERIFY_TMPL"
-                },
-                "directive": {
-                  "$": "args.directive"
-                }
-              },
+              "badge": "o",
               "effort": {
                 "$": "item.effort",
                 "or": ""
@@ -827,31 +780,7 @@
                 "or": "agent"
               },
               "category": "domain-model",
-              "badge": {
-                "$": "values.PENDING"
-              },
-              "schema": "VERIFY_SCHEMA",
-              "promptRole": "design-verify",
-              "vars": {
-                "title": {
-                  "$": "item.title"
-                },
-                "description": {
-                  "$": "item.description",
-                  "or": ""
-                }
-              },
-              "varRefs": {
-                "directive": "directive"
-              },
-              "registerPromptsOnce": {
-                "design-verify": {
-                  "$": "values.DESIGN_VERIFY_TMPL"
-                },
-                "directive": {
-                  "$": "args.directive"
-                }
-              },
+              "badge": "o",
               "effort": {
                 "$": "item.effort",
                 "or": ""
@@ -920,31 +849,7 @@
                 "or": "agent"
               },
               "category": "criterion",
-              "badge": {
-                "$": "values.PENDING"
-              },
-              "schema": "VERIFY_SCHEMA",
-              "promptRole": "design-verify",
-              "vars": {
-                "title": {
-                  "$": "item.title"
-                },
-                "description": {
-                  "$": "item.description",
-                  "or": ""
-                }
-              },
-              "varRefs": {
-                "directive": "directive"
-              },
-              "registerPromptsOnce": {
-                "design-verify": {
-                  "$": "values.DESIGN_VERIFY_TMPL"
-                },
-                "directive": {
-                  "$": "args.directive"
-                }
-              },
+              "badge": "o",
               "effort": {
                 "$": "item.effort",
                 "or": ""
