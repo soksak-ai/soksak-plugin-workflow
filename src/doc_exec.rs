@@ -1105,66 +1105,61 @@ mod tests {
         assert_eq!(br, json!({ "file": "src/inventory/deduct.ts" }));
     }
 
-    /// [번들 정본] research-audit = 경계 있는 완전성 수렴 루프. 갭 있으면 재감사(누적 ground 위),
-    /// 갭 0 이면 design 진행, 상한(R3) 도달 시 갭 잔존해도 진행(무한루프 금지). 편차를 죽이는 종료 조건.
+    /// [번들 정본] research-audit = 고정 3-렌즈 스윕(velog "함대" 이식). R1 격자 5축 → R2 joins/order/reverse
+    /// → R3 자유 렌즈. 자유 렌즈(R3)가 갭 0 이어도 반드시 돌아 "첫 0 = 거짓 마름"을 근치(새 렌즈가 광맥 재개방).
+    /// 라운드마다 프롬프트(렌즈)가 회전한다.
     #[test]
-    fn bundled_research_audit_converges_or_bounds() {
+    fn bundled_research_audit_rotates_lenses_and_always_runs_free() {
         let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
         let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
             "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
         let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        // 갭 있음 → 재감사(research-audit-2) 발행, design 보류.
-        let mut gap = |p: &str, _s: Option<&Json>, _l: &str| {
-            assert!(p.contains("정련 지시"), "{{{{directive}}}} 렌더");
-            assert!(p.contains("SQLite 채택"), "{{{{facts}}}} 렌더(누적 ground 감사 대상)");
-            Ok(json!({ "additions": [
-                { "title": "누락: 캐시·세션 전략", "description": "조회·세션 캐시 미확정 — plan 재발명 위험",
-                  "area": "framework", "origin": "agent", "reason": "downstream 재결정 차단" } ] }))
+        // R1 = 고정 격자(5축). 갭 0 이어도 R2 로 — 첫 0 에서 수렴 금지(자유 렌즈까지 필히).
+        let mut r1 = |p: &str, _s: Option<&Json>, _l: &str| {
+            assert!(p.contains("STACK COMPLETENESS"), "R1 = 고정 5축 격자 렌즈");
+            assert!(p.contains("SQLite 채택"), "{{{{facts}}}} 렌더");
+            Ok(json!({ "additions": [] }))
         };
-        let (ev, _) = run(&doc, "research-audit", &args, &mut gap).expect("audit R1(gap)");
-        let s = stages(&ev);
-        assert!(s.iter().any(|x| x == "research-audit-2"), "갭 있으면 재감사 발행: {s:?}");
-        assert!(!s.iter().any(|x| x == "design-interface"), "갭 있으면 design 보류: {s:?}");
-        // 갭 0 → design 진행, 재감사 없음(수렴·종료).
-        let mut nogap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
-        let (ev2, _) = run(&doc, "research-audit", &args, &mut nogap).expect("audit R1(no gap)");
-        let s2 = stages(&ev2);
-        assert!(s2.iter().any(|x| x == "design-interface"), "갭 0 이면 design 진행: {s2:?}");
-        assert!(!s2.iter().any(|x| x.starts_with("research-audit")), "갭 0 이면 재감사 없음(수렴): {s2:?}");
-        // 상한 라운드(R3) — 갭 잔존해도 design 진행, R4 없음(무한루프 경계).
-        let (ev3, _) = run(&doc, "research-audit-3", &args, &mut gap).expect("audit R3(gap)");
-        let s3 = stages(&ev3);
-        assert!(s3.iter().any(|x| x == "design-interface"), "상한 라운드는 갭 잔존해도 진행: {s3:?}");
-        assert!(!s3.iter().any(|x| x == "research-audit-4"), "R4 없음(상한 3): {s3:?}");
+        let (ev, _) = run(&doc, "research-audit", &args, &mut r1).expect("R1");
+        assert!(stages(&ev).iter().any(|x| x == "research-audit-2"), "R1 갭0 이어도 R2 진행: {:?}", stages(&ev));
+        assert!(!stages(&ev).iter().any(|x| x == "design-interface"), "R1 에서 바로 수렴 금지");
+        // R2 = 재-렌즈(joins/order/reverse) — R1 격자와 다른 렌즈.
+        let mut r2 = |p: &str, _s: Option<&Json>, _l: &str| {
+            assert!(p.contains("SECOND LENS") && p.contains("THE JOINS"), "R2 = 재-렌즈(joins)");
+            assert!(!p.contains("STACK COMPLETENESS"), "R2 는 R1 격자 반복 아님(렌즈 회전)");
+            Ok(json!({ "additions": [] }))
+        };
+        let (ev2, _) = run(&doc, "research-audit-2", &args, &mut r2).expect("R2");
+        assert!(stages(&ev2).iter().any(|x| x == "research-audit-3"), "R2 → R3(자유): {:?}", stages(&ev2));
+        // R3 = 자유 렌즈(새 각도 발명) → design.
+        let mut r3 = |p: &str, _s: Option<&Json>, _l: &str| {
+            assert!(p.contains("FREE LENS"), "R3 = 자유 렌즈");
+            Ok(json!({ "additions": [] }))
+        };
+        let (ev3, _) = run(&doc, "research-audit-3", &args, &mut r3).expect("R3");
+        assert!(stages(&ev3).iter().any(|x| x == "design-interface"), "R3(자유) 후 design 진행: {:?}", stages(&ev3));
+        assert!(!stages(&ev3).iter().any(|x| x == "research-audit-4"), "R4 없음(상한 3)");
     }
 
-    /// [번들 정본] design-audit = design 뒤 보완/감사 수렴 루프(research-audit 와 동형). 갭 있으면 재감사,
-    /// 갭 0 이면 plan 진행, 상한(R3) 도달 시 갭 잔존해도 plan(무한루프 금지). 각 스테이지가 자기 층 갭을 만든다.
+    /// [번들 정본] design-audit = design 뒤 3-렌즈 스윕(research-audit 프롬프트 재사용). R1→R2→R3(자유)→plan.
+    /// 자유 렌즈 필히 실행, 라운드별 렌즈 회전.
     #[test]
-    fn bundled_design_audit_converges_or_bounds() {
+    fn bundled_design_audit_rotates_lenses_and_always_runs_free() {
         let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
         let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
             "facts": [{ "id": "fact0", "title": "SessionAuthority 인터페이스", "badge": "o", "category": "interface" }] });
         let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        // 갭 있음 → 재감사(design-audit-2), plan 보류.
-        let mut gap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [
-            { "title": "누락: 동시 재고갱신 충돌 제어(설계 미반영)", "description": "낙관적 잠금 설계 부재 — 구현 재발명",
-              "area": "methodology", "origin": "agent", "reason": "운영 견고성 갭" } ] }));
-        let (ev, _) = run(&doc, "design-audit", &args, &mut gap).expect("design-audit R1(gap)");
-        let s = stages(&ev);
-        assert!(s.iter().any(|x| x == "design-audit-2"), "갭 있으면 재감사 발행: {s:?}");
-        assert!(!s.iter().any(|x| x == "plan"), "갭 있으면 plan 보류: {s:?}");
-        // 갭 0 → plan 진행, 재감사 없음(수렴).
-        let mut nogap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
-        let (ev2, _) = run(&doc, "design-audit", &args, &mut nogap).expect("design-audit R1(no gap)");
-        let s2 = stages(&ev2);
-        assert!(s2.iter().any(|x| x == "plan"), "갭 0 이면 plan 진행: {s2:?}");
-        assert!(!s2.iter().any(|x| x.starts_with("design-audit")), "갭 0 이면 재감사 없음(수렴): {s2:?}");
-        // 상한(R3) — 갭 잔존해도 plan, R4 없음.
-        let (ev3, _) = run(&doc, "design-audit-3", &args, &mut gap).expect("design-audit R3(gap)");
-        let s3 = stages(&ev3);
-        assert!(s3.iter().any(|x| x == "plan"), "상한은 갭 잔존해도 plan: {s3:?}");
-        assert!(!s3.iter().any(|x| x == "design-audit-4"), "R4 없음(상한 3): {s3:?}");
+        let mut r1 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("STACK COMPLETENESS"), "R1 격자"); Ok(json!({ "additions": [] })) };
+        let (ev, _) = run(&doc, "design-audit", &args, &mut r1).expect("R1");
+        assert!(stages(&ev).iter().any(|x| x == "design-audit-2"), "R1 갭0 이어도 R2: {:?}", stages(&ev));
+        assert!(!stages(&ev).iter().any(|x| x == "plan"), "R1 바로 수렴 금지");
+        let mut r2 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("SECOND LENS"), "R2 재-렌즈"); Ok(json!({ "additions": [] })) };
+        let (ev2, _) = run(&doc, "design-audit-2", &args, &mut r2).expect("R2");
+        assert!(stages(&ev2).iter().any(|x| x == "design-audit-3"), "R2 → R3: {:?}", stages(&ev2));
+        let mut r3 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("FREE LENS"), "R3 자유"); Ok(json!({ "additions": [] })) };
+        let (ev3, _) = run(&doc, "design-audit-3", &args, &mut r3).expect("R3");
+        assert!(stages(&ev3).iter().any(|x| x == "plan"), "R3(자유) 후 plan: {:?}", stages(&ev3));
+        assert!(!stages(&ev3).iter().any(|x| x == "design-audit-4"), "R4 없음(상한 3)");
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
