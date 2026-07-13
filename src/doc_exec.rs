@@ -558,15 +558,24 @@ fn exec_ops(
                 }
             }
             Some("publish") => {
-                // when/unless 조건부 발행 — 수렴 루프 게이트. when: 값 truthy 일 때만(갭 있으면 재감사),
-                // unless: 값 falsy 일 때만(갭 0 이면 다음 스테이지). 둘 다 없으면 무조건. (빈 배열=falsy — truthy 참조)
-                let gated = match (
-                    op.get("when").and_then(|x| x.as_str()),
-                    op.get("unless").and_then(|x| x.as_str()),
-                ) {
-                    (Some(w), _) => truthy(&scope.lookup(w).unwrap_or(Json::Null)),
-                    (None, Some(u)) => !truthy(&scope.lookup(u).unwrap_or(Json::Null)),
-                    (None, None) => true,
+                // when/unless 조건부 발행 — 수렴 루프 게이트. 값 = 경로 문자열 | 경로 배열(배열 = OR: 하나라도
+                // truthy 면 truthy). when: truthy 면 발행(변경 있으면 재감사). unless: 전부 falsy 면 발행(add·remove
+                // 둘 다 0 = 이견 없음 → 다음 스테이지). 둘 다 없으면 무조건. 빈 배열/누락 = falsy.
+                let any_truthy = |cond: &Json| -> bool {
+                    match cond {
+                        Json::Array(ps) => ps
+                            .iter()
+                            .any(|p| p.as_str().is_some_and(|s| truthy(&scope.lookup(s).unwrap_or(Json::Null)))),
+                        Json::String(s) => truthy(&scope.lookup(s).unwrap_or(Json::Null)),
+                        _ => false,
+                    }
+                };
+                let gated = if let Some(w) = op.get("when") {
+                    any_truthy(w)
+                } else if let Some(u) = op.get("unless") {
+                    !any_truthy(u)
+                } else {
+                    true
                 };
                 if gated {
                     let node = op.get("node").and_then(|x| x.as_object()).ok_or("publish.node 누락")?;
@@ -1164,8 +1173,8 @@ mod tests {
             Ok(json!({ "additions": [] }))
         };
         let (ev3, _) = run(&doc, "research-audit-3", &args, &mut r3).expect("R3");
-        assert!(stages(&ev3).iter().any(|x| x == "design-interface"), "R3(자유) 후 design 진행: {:?}", stages(&ev3));
-        assert!(!stages(&ev3).iter().any(|x| x == "research-audit-4"), "R4 없음(상한 3)");
+        assert!(stages(&ev3).iter().any(|x| x == "design-interface"), "R3(자유) 이견0 → design 수렴: {:?}", stages(&ev3));
+        assert!(!stages(&ev3).iter().any(|x| x == "research-audit-4"), "이견0 이면 재루프 없음(수렴)");
     }
 
     /// [번들 정본] design-audit = design 뒤 3-렌즈 스윕(research-audit 프롬프트 재사용). R1→R2→R3(자유)→plan.
@@ -1185,8 +1194,8 @@ mod tests {
         assert!(stages(&ev2).iter().any(|x| x == "design-audit-3"), "R2 → R3: {:?}", stages(&ev2));
         let mut r3 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("FREE LENS"), "R3 자유"); Ok(json!({ "additions": [] })) };
         let (ev3, _) = run(&doc, "design-audit-3", &args, &mut r3).expect("R3");
-        assert!(stages(&ev3).iter().any(|x| x == "plan"), "R3(자유) 후 plan: {:?}", stages(&ev3));
-        assert!(!stages(&ev3).iter().any(|x| x == "design-audit-4"), "R4 없음(상한 3)");
+        assert!(stages(&ev3).iter().any(|x| x == "plan"), "R3(자유) 이견0 → plan 수렴: {:?}", stages(&ev3));
+        assert!(!stages(&ev3).iter().any(|x| x == "design-audit-4"), "이견0 이면 재루프 없음(수렴)");
     }
 
     /// [번들 정본] 합의 루프 remove — audit reviewer 가 removals 를 내면 stage return 이 그대로 통과한다
@@ -1208,6 +1217,38 @@ mod tests {
             assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
             assert_eq!(removals[0]["reason"], "지시서 범위밖 — 자기교정", "{stage}: 사유 보존");
         }
+    }
+
+    /// [번들 정본] 합의 루프 수렴 — 이견 없을 때(add·remove 둘 다 0)만 다음 스테이지. 변경 있으면 다음 자유
+    /// 렌즈 라운드(이견0까지 루프). R5 = 상한(변경 있어도 무조건 진행 — 자초 무한/과부하 방지).
+    #[test]
+    fn audit_converges_on_no_change_else_loops_until_cap() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "K-7",
+            "facts": [{ "id": "f0", "title": "t", "badge": "o", "category": "framework" }] });
+        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
+
+        // 이견0(add·remove 둘 다 0) → design 수렴, 재루프 없음.
+        let mut clean = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
+        let (e, _) = run(&doc, "research-audit-3", &args, &mut clean).unwrap();
+        assert!(stages(&e).contains(&"design-interface".to_string()), "이견0 → design 수렴: {:?}", stages(&e));
+        assert!(!stages(&e).iter().any(|s| s == "research-audit-4"), "이견0 이면 재루프 안 함");
+
+        // additions 있음 → R4 재감사, 진행 금지.
+        let mut dirty_add = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "새 갭", "description": "", "area": "framework", "origin": "agent" }], "removals": [] }));
+        let (e2, _) = run(&doc, "research-audit-3", &args, &mut dirty_add).unwrap();
+        assert!(stages(&e2).contains(&"research-audit-4".to_string()), "add 있으면 다음 자유 렌즈: {:?}", stages(&e2));
+        assert!(!stages(&e2).iter().any(|s| s == "design-interface"), "변경 있으면 진행 금지");
+
+        // removals 만 있어도 이견 → R4(OR 결합).
+        let mut dirty_rm = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "f0", "reason": "범위밖" }] }));
+        let (e3, _) = run(&doc, "research-audit-3", &args, &mut dirty_rm).unwrap();
+        assert!(stages(&e3).contains(&"research-audit-4".to_string()), "remove 만 있어도 재감사: {:?}", stages(&e3));
+
+        // R5 = 상한 — 변경 있어도 무조건 진행(무한 루프 방지).
+        let (e5, _) = run(&doc, "research-audit-5", &args, &mut dirty_add).unwrap();
+        assert!(stages(&e5).contains(&"design-interface".to_string()), "R5 상한: 변경 있어도 진행: {:?}", stages(&e5));
+        assert!(!stages(&e5).iter().any(|s| s == "research-audit-6"), "R6 없음(상한 5)");
     }
 
     /// [번들 정본] plan-audit 도 remove 통과(4번째 완전성 지점). return {complete,gaps,verdict} 였던 것에

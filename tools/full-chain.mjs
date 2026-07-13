@@ -79,8 +79,8 @@ const researchOut = execStage({ workflow: "research", stage: "research", args: {
 let facts = factsLedger(researchOut);
 log(`   research fact ${facts.length}개`);
 
-// research-audit 수렴 루프 — 갭 있으면 재감사(상한 3). 각 라운드 산출의 fact 를 누적.
-for (let round = 1; round <= 3; round++) {
+// research-audit 수렴 루프 — 이견(add·remove) 있으면 다음 자유 렌즈 라운드, 이견0이면 수렴(상한 5). fact 누적.
+for (let round = 1; round <= 5; round++) {
   const stage = round === 1 ? "research-audit" : `research-audit-${round}`;
   const aOut = execStage({ workflow: "research", stage, args: { directive, facts, chunkRef: "chunk" } }, `06-audit-r${round}.jsonl`);
   const added = factsLedger(aOut);
@@ -100,8 +100,8 @@ for (const s of ["design-interface", "design-domain", "design-criteria"]) {
   log(`   ${s}: 누적 fact ${facts.length}개`);
 }
 
-// design 보완/감사 수렴 루프 — design 이 낳은 갭(설계 미반영 운영 견고성 등)을 잡고 수렴 시 plan.
-for (let round = 1; round <= 3; round++) {
+// design 보완/감사 수렴 루프 — design 이 낳은 갭을 잡고, 이견0이면 수렴 시 plan(상한 5).
+for (let round = 1; round <= 5; round++) {
   const stage = round === 1 ? "design-audit" : `design-audit-${round}`;
   const aOut = execStage({ workflow: "research", stage, args: { directive, facts, chunkRef: "chunk" } }, `07b-design-audit-r${round}.jsonl`);
   const added = factsLedger(aOut);

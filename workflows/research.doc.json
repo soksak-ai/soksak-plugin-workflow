@@ -1294,6 +1294,10 @@
       },
       {
         "op": "publish",
+        "unless": [
+          "a.additions",
+          "a.removals"
+        ],
         "node": {
           "id": "design-interface",
           "kind": "task",
@@ -1303,6 +1307,28 @@
             "or": "chunk"
           },
           "title": "구조 확정 — 인터페이스",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "when": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "research-audit-4",
+          "kind": "task",
+          "stage": "research-audit-4",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "보완/감사 R4(자유 렌즈·수렴)",
           "blockedBy": [
             {
               "$": "auditIds"
@@ -1537,6 +1563,480 @@
             "node": {
               "id": {
                 "auto": "da3f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "unless": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "plan",
+          "kind": "task",
+          "stage": "plan",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "파일 계획",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "when": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "design-audit-4",
+          "kind": "task",
+          "stage": "design-audit-4",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "보완/감사 R4(자유 렌즈·수렴)",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "removals": {
+            "$": "a.removals",
+            "or": []
+          }
+        }
+      }
+    ],
+    "research-audit-4": [
+      {
+        "op": "agent",
+        "prompt": "research-audit-r3",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "보완/감사 R4(자유 렌즈·수렴)",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a4f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "unless": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "design-interface",
+          "kind": "task",
+          "stage": "design-interface",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "구조 확정 — 인터페이스",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "when": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "research-audit-5",
+          "kind": "task",
+          "stage": "research-audit-5",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "보완/감사 R5(자유 렌즈·상한)",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "removals": {
+            "$": "a.removals",
+            "or": []
+          }
+        }
+      }
+    ],
+    "research-audit-5": [
+      {
+        "op": "agent",
+        "prompt": "research-audit-r3",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "보완/감사 R5(자유 렌즈·상한 — 무조건 진행)",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a5f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "node": {
+          "id": "design-interface",
+          "kind": "task",
+          "stage": "design-interface",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "구조 확정 — 인터페이스",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "removals": {
+            "$": "a.removals",
+            "or": []
+          }
+        }
+      }
+    ],
+    "design-audit-4": [
+      {
+        "op": "agent",
+        "prompt": "research-audit-r3",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "보완/감사 R4(자유 렌즈·수렴)",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a4f"
+              },
+              "kind": "fact",
+              "parent": {
+                "$": "args.chunkRef",
+                "or": "chunk"
+              },
+              "title": {
+                "$": "item.title"
+              },
+              "description": {
+                "$": "item.description",
+                "or": ""
+              },
+              "origin": {
+                "$": "item.origin"
+              },
+              "category": {
+                "$": "item.area"
+              },
+              "badge": {
+                "$": "values.PENDING"
+              },
+              "schema": "VERIFY_SCHEMA",
+              "promptRole": "fact-verify",
+              "vars": {
+                "title": {
+                  "$": "item.title"
+                },
+                "description": {
+                  "$": "item.description",
+                  "or": ""
+                }
+              },
+              "varRefs": {
+                "directive": "directive"
+              },
+              "registerPromptsOnce": {
+                "fact-verify": {
+                  "$": "values.FACT_VERIFY_TMPL"
+                },
+                "directive": {
+                  "$": "args.directive"
+                }
+              },
+              "effort": {
+                "$": "item.effort",
+                "or": ""
+              }
+            }
+          }
+        ]
+      },
+      {
+        "op": "publish",
+        "unless": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "plan",
+          "kind": "task",
+          "stage": "plan",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "파일 계획",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "publish",
+        "when": [
+          "a.additions",
+          "a.removals"
+        ],
+        "node": {
+          "id": "design-audit-5",
+          "kind": "task",
+          "stage": "design-audit-5",
+          "parent": {
+            "$": "args.chunkRef",
+            "or": "chunk"
+          },
+          "title": "보완/감사 R5(자유 렌즈·상한)",
+          "blockedBy": [
+            {
+              "$": "auditIds"
+            }
+          ]
+        }
+      },
+      {
+        "op": "return",
+        "value": {
+          "removals": {
+            "$": "a.removals",
+            "or": []
+          }
+        }
+      }
+    ],
+    "design-audit-5": [
+      {
+        "op": "agent",
+        "prompt": "research-audit-r3",
+        "schema": "RESEARCH_AUDIT_SCHEMA",
+        "label": "보완/감사 R5(자유 렌즈·상한 — 무조건 진행)",
+        "bind": "a"
+      },
+      {
+        "op": "forEach",
+        "in": "a.additions",
+        "when": "item.title",
+        "collect": "auditIds",
+        "do": [
+          {
+            "op": "publish",
+            "node": {
+              "id": {
+                "auto": "a5f"
               },
               "kind": "fact",
               "parent": {
