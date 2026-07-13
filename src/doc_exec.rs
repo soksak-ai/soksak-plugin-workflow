@@ -1251,6 +1251,57 @@ mod tests {
         assert!(!stages(&e5).iter().any(|s| s == "research-audit-6"), "R6 없음(상한 5)");
     }
 
+    /// [번들 정본] 번들 스키마가 Ajv strict(claude --json-schema)를 통과 — 스키마 객체 최상위에 미지 키가
+    /// 없어야 한다. properties 밖에 프로퍼티를 두면(예: removals 오배치) 사이드카 검증은 통과하나 claude 가
+    /// 런타임에 거부(exit 1). "테스트 그린≠런타임 정확" 방어.
+    #[test]
+    fn bundled_schemas_have_no_stray_top_level_keys() {
+        use std::collections::HashSet;
+        let known: HashSet<&str> = [
+            "type", "properties", "required", "items", "enum", "additionalProperties", "description",
+            "title", "anyOf", "oneOf", "allOf", "not", "format", "minimum", "maximum", "minItems",
+            "maxItems", "minLength", "maxLength", "pattern", "default", "const", "$schema",
+        ]
+        .into_iter()
+        .collect();
+        fn check(s: &Json, name: &str, known: &HashSet<&str>) {
+            let Some(obj) = s.as_object() else { return };
+            for (k, v) in obj {
+                match k.as_str() {
+                    "properties" => {
+                        if let Some(p) = v.as_object() {
+                            for (_pk, pv) in p {
+                                check(pv, name, known);
+                            }
+                        }
+                    }
+                    "items" => check(v, name, known),
+                    "anyOf" | "oneOf" | "allOf" => {
+                        if let Some(a) = v.as_array() {
+                            for e in a {
+                                check(e, name, known);
+                            }
+                        }
+                    }
+                    other => assert!(known.contains(other), "{name}: 스키마 최상위 미지 키 {other:?} — Ajv strict 거부(properties 밖 프로퍼티?)"),
+                }
+            }
+        }
+        for (label, src) in [
+            ("research", include_str!("../workflows/research.doc.json")),
+            ("draft", include_str!("../workflows/draft.doc.json")),
+        ] {
+            let doc: Json = serde_json::from_str(src).unwrap();
+            if let Some(values) = doc.get("values").and_then(|v| v.as_object()) {
+                for (vk, vv) in values {
+                    if vv.get("type").and_then(|t| t.as_str()) == Some("object") || vv.get("properties").is_some() {
+                        check(vv, &format!("{label}/{vk}"), &known);
+                    }
+                }
+            }
+        }
+    }
+
     /// [번들 정본] plan-audit 도 remove 통과(4번째 완전성 지점). return {complete,gaps,verdict} 였던 것에
     /// removals 추가 — reconcile 이 대상 unit badge→x.
     #[test]
