@@ -41,7 +41,7 @@ fn serve_hello_req_shutdown_roundtrip() {
     stdout.read_line(&mut line).expect("hello read");
     let hello: Value = serde_json::from_str(line.trim()).expect("hello JSON");
     assert_eq!(hello["t"], "hello", "첫 줄 = hello");
-    assert_eq!(hello["interface"], "soksak-service-spec@1", "와이어 interface");
+    assert_eq!(hello["interface"], "soksak-spec-service@0.0.1", "와이어 interface");
     assert_eq!(hello["version"], 1, "프로토콜 판");
     let ops: Vec<String> = hello["ops"]
         .as_array()

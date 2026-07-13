@@ -126,7 +126,7 @@ test("a board exists but none of them holds prompts — that is a misconfigurati
   const r = await board.project(entry(), "absent");
   assert.equal(r.projected, false);
   assert.equal(r.code, "UNAVAILABLE", "a board that cannot run the loop is not the lawful 'no board' state");
-  assert.match(r.reason, /soksak-prompt-store-spec@1/, "the refusal must name the contract nobody implements");
+  assert.match(r.reason, /soksak-spec-plugin-prompt-store/, "the refusal must name the contract nobody implements");
   assert.equal(named(calls, ".node.add").length, 0);
 });
 

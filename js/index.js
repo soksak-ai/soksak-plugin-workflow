@@ -62,7 +62,7 @@ const index_default = {
     const git = makeGit(app.process);
     const now = () => Date.now();
 
-    // The board is discovered by contract (soksak-issue-board-spec@1), never named. No board is a
+    // The board is discovered by contract (soksak-spec-plugin-issue-board), never named. No board is a
     // lawful state: the ledger is the truth and the card is downstream of it, so a projection that
     // cannot happen is not an error the loop should feel.
     const board = makeBoard(app, {
@@ -280,7 +280,7 @@ const index_default = {
 
     reg("board.sync", {
       description:
-        "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1 for the cards, soksak-prompt-store-spec@1 for the text they point at) — this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
+        "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-spec-plugin-issue-board for the cards, soksak-spec-plugin-prompt-store for the text they point at) — this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
       triggers: { ko: "보드 투영 칸반 동기화 카드" },
       params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
       returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",

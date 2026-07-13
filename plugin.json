@@ -17,8 +17,8 @@
     "process"
   ],
   "consumes": [
-    "soksak-issue-board-spec@1",
-    "soksak-prompt-store-spec@1"
+    "soksak-spec-plugin-issue-board",
+    "soksak-spec-plugin-prompt-store"
   ],
   "sidecars": [
     {
@@ -28,7 +28,7 @@
   ],
   "service": {
     "sidecar": "workflow",
-    "interface": "soksak-service-spec@1",
+    \"interface\": { \"id\": \"soksak-spec-service\", \"range\": \"0.0.1\" },
     "subscribe": [
       "bus:issue-board:changed"
     ]

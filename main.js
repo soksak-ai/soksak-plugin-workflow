@@ -147,8 +147,8 @@ function makeGit(processApi) {
 }
 
 // js/board.js
-var BOARD_CONTRACT = "soksak-issue-board-spec@1";
-var PROMPT_CONTRACT = "soksak-prompt-store-spec@1";
+var BOARD_CONTRACT = "soksak-spec-plugin-issue-board";
+var PROMPT_CONTRACT = "soksak-spec-plugin-prompt-store";
 function pickImplementer(boards, stores) {
   const enabled = (xs) => (Array.isArray(xs) ? xs : []).filter((i) => i?.status === "enabled").map((i) => i.id);
   const holdsPrompts = new Set(enabled(stores));
@@ -465,7 +465,7 @@ var index_default = {
       }
     });
     reg("board.sync", {
-      description: "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-issue-board-spec@1 for the cards, soksak-prompt-store-spec@1 for the text they point at) \u2014 this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
+      description: "Project the ledger onto the issue board and report what happened. The board is discovered by contract (soksak-spec-plugin-issue-board for the cards, soksak-spec-plugin-prompt-store for the text they point at) \u2014 this never names an implementer, so any plugin declaring both can take over. No board is a lawful answer, not an error: the ledger is the truth and the card is downstream of it. A board that implements only one of the two is refused, not silently skipped.",
       triggers: { ko: "\uBCF4\uB4DC \uD22C\uC601 \uCE78\uBC18 \uB3D9\uAE30\uD654 \uCE74\uB4DC" },
       params: { issue: { type: "string", description: "Issue id (omit = every entry)" } },
       returns: "{ board, root, projected: [{issue, nodeId, status}], skipped: [{issue, reason}] }",

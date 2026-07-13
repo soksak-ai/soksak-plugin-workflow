@@ -1,4 +1,4 @@
-// Projecting the ledger onto an issue board — soksak-issue-board-spec@1.
+// Projecting the ledger onto an issue board — soksak-spec-plugin-issue-board.
 //
 // The board is discovered by contract, never by name: the ledger must not know which plugin draws
 // its cards, and a different board must be able to take over by declaring the same contract.
@@ -7,8 +7,8 @@
 // ledger, and a missing board is not an error — the loop runs, unwatched, exactly as before. A
 // producer that fails without its board has made the board load-bearing, which the contract forbids.
 
-export const BOARD_CONTRACT = "soksak-issue-board-spec@1";
-export const PROMPT_CONTRACT = "soksak-prompt-store-spec@1";
+export const BOARD_CONTRACT = "soksak-spec-plugin-issue-board";
+export const PROMPT_CONTRACT = "soksak-spec-plugin-prompt-store";
 
 // The loop needs both contracts from *one* plugin: a node carries the address of the prompt it runs,
 // and an address minted by one store means nothing to another. So the implementer is the intersection

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The loop's state, on a board — reached by contract, never by name.
 //
-// The ledger never says "kanban". It asks the core who implements soksak-issue-board-spec@1 and
+// The ledger never says "kanban". It asks the core who implements soksak-spec-plugin-issue-board and
 // projects onto whatever comes back. This run proves the card is really there (a human can see the
 // issue, who holds it, what it carries, and that it finished) and that the ledger does not depend
 // on the board existing at all.
@@ -25,7 +25,7 @@ const SNAP = join(FIXTURE, "snapshot-board.png");
 
 const WF = "plugin.soksak-plugin-workflow";
 const WF_ID = "soksak-plugin-workflow";
-const CONTRACT = "soksak-issue-board-spec@1";
+const CONTRACT = "soksak-spec-plugin-issue-board";
 
 const ISSUE = "board-1";
 // A fixed owner: this issue is this test's own, and a run must always be able to reclaim what a

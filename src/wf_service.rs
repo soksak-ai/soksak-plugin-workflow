@@ -25,8 +25,8 @@ use crate::reconcile::{
 const DEFAULT_MODEL: &str = "opus";
 
 // 소비하는 계약(plugin.json consumes). 구현체 id 는 어디에도 적지 않는다 — 런타임에 발견한다.
-const BOARD_CONTRACT: &str = "soksak-issue-board-spec@1";
-const PROMPT_CONTRACT: &str = "soksak-prompt-store-spec@1";
+const BOARD_CONTRACT: &str = "soksak-spec-plugin-issue-board";
+const PROMPT_CONTRACT: &str = "soksak-spec-plugin-prompt-store";
 /// 보드 변경 신호 — 토픽 이름은 보드 계약이 정한다(서비스는 버스 축에서 `bus:` 접두로 구독).
 const BOARD_CHANGED: &str = "issue-board:changed";
 
