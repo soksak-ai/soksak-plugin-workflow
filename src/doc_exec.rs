@@ -138,7 +138,8 @@ pub fn validate(doc: &Json) -> Result<(), Vec<String>> {
                 let known = values.is_some_and(|m| m.contains_key(&ph))
                     || args_decl.is_some_and(|m| m.contains_key(&ph))
                     || ph == "ledger"
-                    || ph == "facts";
+                    || ph == "facts"
+                    || ph == "removed";
                 if !known {
                     v.push(format!("[prompts] {pname:?} 플레이스홀더 {{{{{ph}}}}} 미해석(values/args/ledger 아님)"));
                 }
@@ -364,6 +365,8 @@ impl Scope<'_> {
                 Some(ledger_view(&self.args, "ledger"))
             } else if ph == "facts" {
                 Some(ledger_view(&self.args, "facts"))
+            } else if ph == "removed" {
+                Some(removed_view(&self.args))
             } else {
                 self.lookup(&ph)
                     .or_else(|| self.lookup(&format!("args.{ph}")))
@@ -404,6 +407,28 @@ fn ledger_view(args: &Json, key: &str) -> String {
                 g("title"),
                 if desc.is_empty() { String::new() } else { format!(" — {desc}") },
                 if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// removed_view — 합의 루프 히스토리 채널({{removed}}=args.removed). 이미 뺀 fact 를 사유와 함께 렌더해
+/// 다음 라운드가 되돌려 넣지(re-add) 않게 한다. 없으면 빈 문자열(첫 라운드·미주입 안전).
+fn removed_view(args: &Json) -> String {
+    let Some(items) = args.get("removed").and_then(|l| l.as_array()) else {
+        return String::new();
+    };
+    items
+        .iter()
+        .map(|t| {
+            let g = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            let reason = g("reason");
+            format!(
+                "- [{}] {}{}",
+                g("id"),
+                g("title"),
+                if reason.is_empty() { String::new() } else { format!(" — 제거 사유: {reason}") }
             )
         })
         .collect::<Vec<_>>()
@@ -1183,6 +1208,27 @@ mod tests {
             assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
             assert_eq!(removals[0]["reason"], "지시서 범위밖 — 자기교정", "{stage}: 사유 보존");
         }
+    }
+
+    /// [번들 정본] 합의 루프 히스토리 채널 — audit 프롬프트의 {{removed}} 가 이미 뺀 fact 를 사유와 함께
+    /// 렌더한다(다음 라운드가 되돌려 넣지 않게). 미주입(첫 라운드)이면 빈 문자열로 안전.
+    #[test]
+    fn bundled_audit_removed_history_renders_into_prompt() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "K-7",
+            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }],
+            "removed": [{ "id": "fact9", "title": "역할 경계 중복 사실", "reason": "fact3 과 중복 — 자기교정" }] });
+        let mut agent = |p: &str, _s: Option<&Json>, _l: &str| {
+            assert!(p.contains("역할 경계 중복 사실"), "{{{{removed}}}} 가 뺀 fact 제목 렌더: {p}");
+            assert!(p.contains("fact3 과 중복"), "제거 사유도 렌더(진동 차단 근거)");
+            assert!(p.contains("do NOT re-add"), "되돌림 금지 지시 존재");
+            Ok(json!({ "additions": [], "removals": [] }))
+        };
+        run(&doc, "research-audit", &args, &mut agent).expect("render");
+        // 미주입(첫 라운드)이어도 안전 — {{removed}} 빈 문자열, 에러 없음.
+        let args0 = json!({ "directive": "d", "chunkRef": "K-7", "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
+        let mut agent0 = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
+        run(&doc, "research-audit", &args0, &mut agent0).expect("미주입도 렌더 성공");
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.

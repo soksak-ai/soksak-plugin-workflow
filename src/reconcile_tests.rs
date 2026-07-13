@@ -695,6 +695,29 @@ fn reconcile_tick_audit_no_removals_field_noop() {
 }
 
 #[test]
+fn build_stage_input_injects_facts_and_removed_for_audit() {
+    // audit 라운드는 board 의 o-fact 를 받아야 앱에서 감사가 실효(없으면 빈 facts 무의미 감사).
+    // 이미 뺀 x-fact 는 removed 히스토리 채널로 실려 다음 라운드 진동(re-add)을 막는다.
+    let n = node(json!({ "id": "research-audit", "kind": "task", "parentId": "chunk", "status": "todo",
+        "body": "{\"workflow\":\"research\",\"stage\":\"research-audit\",\"args\":{\"directive\":\"d\"}}" }));
+    let d = FakeDeps::new(vec![])
+        .facts(vec![
+            json!({ "id": "f1", "title": "o-fact", "badge": "o" }),
+            json!({ "id": "f2", "title": "뺀-fact", "badge": "x", "result": "지시서 범위밖" }),
+        ])
+        .ledger(vec![]);
+    let si = build_stage_input(&d, &n, n.body_str(), "research-audit").expect("build_stage_input");
+    let body: Value = serde_json::from_str(&si.stage_body).unwrap();
+    let facts = body.pointer("/args/facts").and_then(|v| v.as_array()).expect("audit 에 facts 주입");
+    assert_eq!(facts.len(), 1, "o-fact 만(o_only 필터)");
+    assert_eq!(facts[0]["id"], "f1");
+    let removed = body.pointer("/args/removed").and_then(|v| v.as_array()).expect("audit 에 removed 히스토리 주입");
+    assert_eq!(removed.len(), 1, "x-fact 만");
+    assert_eq!(removed[0]["id"], "f2");
+    assert_eq!(removed[0]["reason"], "지시서 범위밖", "제거 사유 보존(진동 차단)");
+}
+
+#[test]
 fn reconcile_tick_audit_f_propagate() {
     let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
     let d = FakeDeps::new(ns)
