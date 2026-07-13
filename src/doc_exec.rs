@@ -1210,6 +1210,23 @@ mod tests {
         }
     }
 
+    /// [번들 정본] plan-audit 도 remove 통과(4번째 완전성 지점). return {complete,gaps,verdict} 였던 것에
+    /// removals 추가 — reconcile 이 대상 unit badge→x.
+    #[test]
+    fn bundled_plan_audit_returns_removals() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "K-7", "ledger": [{ "id": "u1", "title": "t", "badge": "o" }] });
+        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({
+            "complete": true, "verdict": "1 유닛 제거", "gaps": [],
+            "removals": [{ "id": "u1", "reason": "지시서 범위밖 유닛 — 자기교정" }]
+        }));
+        let (_ev, ret) = run(&doc, "plan-audit", &args, &mut agent).expect("plan-audit");
+        let removals = ret.get("removals").and_then(|r| r.as_array()).expect("plan-audit removals 통과");
+        assert_eq!(removals.len(), 1);
+        assert_eq!(removals[0]["id"], "u1");
+        assert_eq!(removals[0]["reason"], "지시서 범위밖 유닛 — 자기교정");
+    }
+
     /// [번들 정본] 합의 루프 히스토리 채널 — audit 프롬프트의 {{removed}} 가 이미 뺀 fact 를 사유와 함께
     /// 렌더한다(다음 라운드가 되돌려 넣지 않게). 미주입(첫 라운드)이면 빈 문자열로 안전.
     #[test]
