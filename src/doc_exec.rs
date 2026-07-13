@@ -1141,114 +1141,72 @@ mod tests {
         assert_eq!(br, json!({ "file": "src/inventory/deduct.ts" }));
     }
 
-    /// [번들 정본] research-audit = 고정 3-렌즈 스윕(velog "함대" 이식). R1 격자 5축 → R2 joins/order/reverse
-    /// → R3 자유 렌즈. 자유 렌즈(R3)가 갭 0 이어도 반드시 돌아 "첫 0 = 거짓 마름"을 근치(새 렌즈가 광맥 재개방).
-    /// 라운드마다 프롬프트(렌즈)가 회전한다.
+    /// [번들 정본] 합의 루프 = 자기반복 단일 review. 이견(add·remove 어느 하나) 있으면 같은 스테이지를
+    /// 재발행(루프), add·remove 둘 다 0이면 다음 스테이지(수렴). research-audit·design-audit 동형(하나 재사용).
     #[test]
-    fn bundled_research_audit_rotates_lenses_and_always_runs_free() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
-            "facts": [{ "id": "fact0", "title": "저장소: SQLite 채택", "badge": "o", "category": "framework" }] });
-        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        // R1 = 고정 격자(5축). 갭 0 이어도 R2 로 — 첫 0 에서 수렴 금지(자유 렌즈까지 필히).
-        let mut r1 = |p: &str, _s: Option<&Json>, _l: &str| {
-            assert!(p.contains("STACK COMPLETENESS"), "R1 = 고정 5축 격자 렌즈");
-            assert!(p.contains("SQLite 채택"), "{{{{facts}}}} 렌더");
-            Ok(json!({ "additions": [] }))
-        };
-        let (ev, _) = run(&doc, "research-audit", &args, &mut r1).expect("R1");
-        assert!(stages(&ev).iter().any(|x| x == "research-audit-2"), "R1 갭0 이어도 R2 진행: {:?}", stages(&ev));
-        assert!(!stages(&ev).iter().any(|x| x == "design-interface"), "R1 에서 바로 수렴 금지");
-        // R2 = 재-렌즈(joins/order/reverse) — R1 격자와 다른 렌즈.
-        let mut r2 = |p: &str, _s: Option<&Json>, _l: &str| {
-            assert!(p.contains("SECOND LENS") && p.contains("THE JOINS"), "R2 = 재-렌즈(joins)");
-            assert!(!p.contains("STACK COMPLETENESS"), "R2 는 R1 격자 반복 아님(렌즈 회전)");
-            Ok(json!({ "additions": [] }))
-        };
-        let (ev2, _) = run(&doc, "research-audit-2", &args, &mut r2).expect("R2");
-        assert!(stages(&ev2).iter().any(|x| x == "research-audit-3"), "R2 → R3(자유): {:?}", stages(&ev2));
-        // R3 = 자유 렌즈(새 각도 발명) → design.
-        let mut r3 = |p: &str, _s: Option<&Json>, _l: &str| {
-            assert!(p.contains("FREE LENS"), "R3 = 자유 렌즈");
-            Ok(json!({ "additions": [] }))
-        };
-        let (ev3, _) = run(&doc, "research-audit-3", &args, &mut r3).expect("R3");
-        assert!(stages(&ev3).iter().any(|x| x == "design-interface"), "R3(자유) 이견0 → design 수렴: {:?}", stages(&ev3));
-        assert!(!stages(&ev3).iter().any(|x| x == "research-audit-4"), "이견0 이면 재루프 없음(수렴)");
-    }
-
-    /// [번들 정본] design-audit = design 뒤 3-렌즈 스윕(research-audit 프롬프트 재사용). R1→R2→R3(자유)→plan.
-    /// 자유 렌즈 필히 실행, 라운드별 렌즈 회전.
-    #[test]
-    fn bundled_design_audit_rotates_lenses_and_always_runs_free() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
-            "facts": [{ "id": "fact0", "title": "SessionAuthority 인터페이스", "badge": "o", "category": "interface" }] });
-        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        let mut r1 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("STACK COMPLETENESS"), "R1 격자"); Ok(json!({ "additions": [] })) };
-        let (ev, _) = run(&doc, "design-audit", &args, &mut r1).expect("R1");
-        assert!(stages(&ev).iter().any(|x| x == "design-audit-2"), "R1 갭0 이어도 R2: {:?}", stages(&ev));
-        assert!(!stages(&ev).iter().any(|x| x == "plan"), "R1 바로 수렴 금지");
-        let mut r2 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("SECOND LENS"), "R2 재-렌즈"); Ok(json!({ "additions": [] })) };
-        let (ev2, _) = run(&doc, "design-audit-2", &args, &mut r2).expect("R2");
-        assert!(stages(&ev2).iter().any(|x| x == "design-audit-3"), "R2 → R3: {:?}", stages(&ev2));
-        let mut r3 = |p: &str, _s: Option<&Json>, _l: &str| { assert!(p.contains("FREE LENS"), "R3 자유"); Ok(json!({ "additions": [] })) };
-        let (ev3, _) = run(&doc, "design-audit-3", &args, &mut r3).expect("R3");
-        assert!(stages(&ev3).iter().any(|x| x == "plan"), "R3(자유) 이견0 → plan 수렴: {:?}", stages(&ev3));
-        assert!(!stages(&ev3).iter().any(|x| x == "design-audit-4"), "이견0 이면 재루프 없음(수렴)");
-    }
-
-    /// [번들 정본] 합의 루프 remove — audit reviewer 가 removals 를 내면 stage return 이 그대로 통과한다
-    /// (reconcile 가 result.removals 로 대상 badge→x 자기교정). 6 audit 스테이지 전부 재사용. return {} 였으면 유실.
-    #[test]
-    fn bundled_audit_returns_removals_for_consensus_remove() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "d", "chunkRef": "K-7",
-            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
-        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({
-            "additions": [],
-            "removals": [{ "id": "fact0", "reason": "지시서 범위밖 — 자기교정" }]
-        }));
-        for stage in ["research-audit", "research-audit-2", "research-audit-3", "design-audit", "design-audit-2", "design-audit-3"] {
-            let (_ev, ret) = run(&doc, stage, &args, &mut agent).expect(stage);
-            let removals = ret.get("removals").and_then(|r| r.as_array())
-                .unwrap_or_else(|| panic!("{stage}: return 에 removals 없음(유실): {ret}"));
-            assert_eq!(removals.len(), 1, "{stage}: removals 통과");
-            assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
-            assert_eq!(removals[0]["reason"], "지시서 범위밖 — 자기교정", "{stage}: 사유 보존");
-        }
-    }
-
-    /// [번들 정본] 합의 루프 수렴 — 이견 없을 때(add·remove 둘 다 0)만 다음 스테이지. 변경 있으면 다음 자유
-    /// 렌즈 라운드(이견0까지 루프). R5 = 상한(변경 있어도 무조건 진행 — 자초 무한/과부하 방지).
-    #[test]
-    fn audit_converges_on_no_change_else_loops_until_cap() {
+    fn bundled_review_loop_selfloops_until_consensus() {
         let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
         let args = json!({ "directive": "d", "chunkRef": "K-7",
             "facts": [{ "id": "f0", "title": "t", "badge": "o", "category": "framework" }] });
         let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
+        for (stage, onconv) in [("research-audit", "design-interface"), ("design-audit", "plan")] {
+            // 이견0(add·remove 둘 다 0) → 다음 스테이지 수렴, 자기재발행 없음.
+            let mut ac = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
+            let (e, _) = run(&doc, stage, &args, &mut ac).unwrap();
+            assert!(stages(&e).iter().any(|x| x == onconv), "{stage}: 이견0 → {onconv} 수렴: {:?}", stages(&e));
+            assert!(!stages(&e).iter().any(|x| x == stage), "{stage}: 이견0 이면 자기재발행 없음");
+            // add 있음 → 같은 스테이지 자기재발행(루프), 진행 금지.
+            let mut aa = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "새 갭", "description": "", "area": "framework", "origin": "agent" }], "removals": [] }));
+            let (e2, _) = run(&doc, stage, &args, &mut aa).unwrap();
+            assert!(stages(&e2).iter().any(|x| x == stage), "{stage}: add 있으면 자기재발행(루프): {:?}", stages(&e2));
+            assert!(!stages(&e2).iter().any(|x| x == onconv), "{stage}: 변경 있으면 진행 금지");
+            // remove 만 있어도 이견 → 자기재발행(when 배열 OR 결합).
+            let mut ar = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "f0", "reason": "범위밖" }] }));
+            let (e3, _) = run(&doc, stage, &args, &mut ar).unwrap();
+            assert!(stages(&e3).iter().any(|x| x == stage), "{stage}: remove 만 있어도 자기재발행: {:?}", stages(&e3));
+        }
+    }
 
-        // 이견0(add·remove 둘 다 0) → design 수렴, 재루프 없음.
-        let mut clean = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
-        let (e, _) = run(&doc, "research-audit-3", &args, &mut clean).unwrap();
-        assert!(stages(&e).contains(&"design-interface".to_string()), "이견0 → design 수렴: {:?}", stages(&e));
-        assert!(!stages(&e).iter().any(|s| s == "research-audit-4"), "이견0 이면 재루프 안 함");
+    /// [번들 정본] draft 도 동일 자기반복 루프 — generate 뒤 draft-review 가 이견0까지 자기재발행, 수렴 시 classify.
+    /// hunt+audit(단일 패스) 를 대체.
+    #[test]
+    fn bundled_draft_review_selfloops_until_consensus() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/draft.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "chunk",
+            "ledger": [{ "id": "i0", "title": "t", "badge": "o" }] });
+        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
+        // 이견0 → classify 수렴, 자기재발행 없음.
+        let mut ac = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
+        let (e, _) = run(&doc, "draft-review", &args, &mut ac).unwrap();
+        assert!(stages(&e).iter().any(|x| x == "classify"), "이견0 → classify 수렴: {:?}", stages(&e));
+        assert!(!stages(&e).iter().any(|x| x == "draft-review"), "이견0 이면 자기재발행 없음");
+        // add 있음 → draft-review 자기재발행, classify 진행 금지.
+        let mut aa = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "약 등록면", "description": "", "origin": "agent" }], "removals": [] }));
+        let (e2, _) = run(&doc, "draft-review", &args, &mut aa).unwrap();
+        assert!(stages(&e2).iter().any(|x| x == "draft-review"), "add 있으면 자기재발행: {:?}", stages(&e2));
+        assert!(!stages(&e2).iter().any(|x| x == "classify"), "변경 있으면 진행 금지");
+        // remove 만 있어도 자기재발행.
+        let mut ar = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "i0", "reason": "범위밖" }] }));
+        let (e3, _) = run(&doc, "draft-review", &args, &mut ar).unwrap();
+        assert!(stages(&e3).iter().any(|x| x == "draft-review"), "remove 만 있어도 자기재발행: {:?}", stages(&e3));
+    }
 
-        // additions 있음 → R4 재감사, 진행 금지.
-        let mut dirty_add = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "새 갭", "description": "", "area": "framework", "origin": "agent" }], "removals": [] }));
-        let (e2, _) = run(&doc, "research-audit-3", &args, &mut dirty_add).unwrap();
-        assert!(stages(&e2).contains(&"research-audit-4".to_string()), "add 있으면 다음 자유 렌즈: {:?}", stages(&e2));
-        assert!(!stages(&e2).iter().any(|s| s == "design-interface"), "변경 있으면 진행 금지");
-
-        // removals 만 있어도 이견 → R4(OR 결합).
-        let mut dirty_rm = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "f0", "reason": "범위밖" }] }));
-        let (e3, _) = run(&doc, "research-audit-3", &args, &mut dirty_rm).unwrap();
-        assert!(stages(&e3).contains(&"research-audit-4".to_string()), "remove 만 있어도 재감사: {:?}", stages(&e3));
-
-        // R5 = 상한 — 변경 있어도 무조건 진행(무한 루프 방지).
-        let (e5, _) = run(&doc, "research-audit-5", &args, &mut dirty_add).unwrap();
-        assert!(stages(&e5).contains(&"design-interface".to_string()), "R5 상한: 변경 있어도 진행: {:?}", stages(&e5));
-        assert!(!stages(&e5).iter().any(|s| s == "research-audit-6"), "R6 없음(상한 5)");
+    /// [번들 정본] 합의 루프 remove — reviewer removals 를 stage return 이 통과(reconcile 가 badge→x). research·design.
+    #[test]
+    fn bundled_review_loop_returns_removals() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "K-7",
+            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
+        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({
+            "additions": [], "removals": [{ "id": "fact0", "reason": "지시서 범위밖 — 자기교정" }]
+        }));
+        for stage in ["research-audit", "design-audit"] {
+            let (_ev, ret) = run(&doc, stage, &args, &mut agent).expect(stage);
+            let removals = ret.get("removals").and_then(|r| r.as_array())
+                .unwrap_or_else(|| panic!("{stage}: return 에 removals 없음: {ret}"));
+            assert_eq!(removals.len(), 1, "{stage}: removals 통과");
+            assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
+        }
     }
 
     /// [번들 정본] 번들 스키마가 Ajv strict(claude --json-schema)를 통과 — 스키마 객체 최상위에 미지 키가

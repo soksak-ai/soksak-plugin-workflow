@@ -46,6 +46,37 @@ function nodes(text, kind) {
 }
 const factsLedger = (text) => nodes(text, "fact").map((f) => ({ id: f.id, title: f.title, description: f.description, badge: "o", category: f.category }));
 
+// {ev:"result",value:{…}} 라인 → 스테이지 return 값(removals 등). 없으면 {}.
+function resultOf(text) {
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let o;
+    try { o = JSON.parse(t); } catch { continue; }
+    if (o.ev === "result") return o.value || {};
+  }
+  return {};
+}
+
+// 합의 루프 하나 — 같은 review 스테이지를 이견0까지 반복 호출. 매 라운드 add/remove 를 apply 로 원장에 반영,
+// review 가 onConverge 스테이지를 발행하면(이견0 수렴) 종료. 상한 cap(자초 무한 방지). draft·research·design 재사용.
+function reviewLoop({ stage, onConverge, addKind, buildArgs, apply, outPrefix, cap = 8 }) {
+  for (let round = 1; round <= cap; round++) {
+    const out = execStage(buildArgs(), `${outPrefix}-r${round}.jsonl`);
+    const added = nodes(out, addKind);
+    const removals = resultOf(out).removals || [];
+    const nextStages = nodes(out).filter((n) => n.kind === "task").map((n) => n.stage);
+    apply(added, removals);
+    log(`   ${stage} R${round}: +${added.length} 추가 · −${removals.length} 제거`);
+    added.forEach((a) => log(`      + ${a.title}`));
+    removals.forEach((r) => log(`      − 제거 [${r.id}]: ${r.reason}`));
+    const converged = nextStages.includes(onConverge);
+    if (converged) { log(`      ⇒ 이견0 수렴(${round}R) → ${onConverge}`); break; }
+    if (round === cap) { log(`      ⇒ 상한 ${cap} 도달 — 강제 진행 → ${onConverge}`); break; }
+    log(`      ⇒ 이견 잔존 → 재검(R${round + 1})`);
+  }
+}
+
 // ── DRAFT: generate(LLM 저작 skeleton) → generate stage(DraftDoc) → hunt → classify → audit ──
 log(`START — idea: ${directive.slice(0, 40)}… | model ${MODEL}`);
 
@@ -60,18 +91,27 @@ const draftChunk = JSON.parse(genOut);
 let requirements = (draftChunk.requirements || []).map((r) => ({ id: r.id, title: r.title, badge: "o" }));
 log(`   요건 ${requirements.length}개`);
 
-log("③ hunt stage (누락 탐색 루프)");
-const huntOut = execStage({ skeleton: draftDoc, stage: "hunt", args: { directive, ledger: requirements, chunkRef: "chunk" } }, "02-hunt.jsonl");
-const huntAdds = nodes(huntOut, "item");
-log(`   hunt 추가 요건 ${huntAdds.length}개`);
-requirements = requirements.concat(huntAdds.map((a) => ({ id: a.id, title: a.title, badge: "o" })));
+log("③ draft-review (완전성 합의 루프 — hunt+audit 대체)");
+reviewLoop({
+  stage: "draft-review", onConverge: "classify", addKind: "item", outPrefix: "02-draft-review",
+  buildArgs: () => ({ skeleton: draftDoc, stage: "draft-review", args: { directive, ledger: requirements, chunkRef: "chunk" } }),
+  apply: (added, removals) => {
+    requirements = requirements.concat(added.map((a) => ({ id: a.id, title: a.title, badge: "o" })));
+    const rem = new Map(removals.map((r) => [r.id, r.reason]));
+    // 제거는 삭제 아님 — badge x 로 원장에 남겨 다음 라운드 reviewer 가 [x] 로 봄(진동 차단).
+    requirements = requirements.map((r) => (rem.has(r.id) ? { ...r, badge: "x", result: rem.get(r.id) } : r));
+  },
+});
+const liveReq = requirements.filter((r) => r.badge !== "x");
+log(`   요건(수렴 후, x 제외) ${liveReq.length}개`);
 
 log("④ classify stage");
-execStage({ skeleton: draftDoc, stage: "classify", args: { directive, ledger: requirements, chunkRef: "chunk" } }, "03-classify.jsonl");
+execStage({ skeleton: draftDoc, stage: "classify", args: { directive, ledger: liveReq, chunkRef: "chunk" } }, "03-classify.jsonl");
 
-log("⑤ audit stage (완결 인증)");
-const auditOut = execStage({ skeleton: draftDoc, stage: "audit", args: { directive, ledger: requirements, chunkRef: "chunk" } }, "04-audit.jsonl");
+log("⑤ audit stage (완결 인증 seal)");
+const auditOut = execStage({ skeleton: draftDoc, stage: "audit", args: { directive, ledger: liveReq, chunkRef: "chunk" } }, "04-audit.jsonl");
 log(`   audit 산출 ${auditOut.length}B`);
+requirements = liveReq; // downstream(research/design/plan)은 수렴한 live 요건만
 
 // ── PLAN: research → research-audit 수렴루프 → design(if/dom/crit) → plan ──
 log("⑥ research stage");
@@ -79,19 +119,18 @@ const researchOut = execStage({ workflow: "research", stage: "research", args: {
 let facts = factsLedger(researchOut);
 log(`   research fact ${facts.length}개`);
 
-// research-audit 수렴 루프 — 이견(add·remove) 있으면 다음 자유 렌즈 라운드, 이견0이면 수렴(상한 5). fact 누적.
-for (let round = 1; round <= 5; round++) {
-  const stage = round === 1 ? "research-audit" : `research-audit-${round}`;
-  const aOut = execStage({ workflow: "research", stage, args: { directive, facts, chunkRef: "chunk" } }, `06-audit-r${round}.jsonl`);
-  const added = factsLedger(aOut);
-  const nextTasks = nodes(aOut).filter((n) => n.kind === "task").map((n) => n.stage);
-  facts = facts.concat(added);
-  log(`   research 보완/감사 R${round}: ${added.length}개 발견`);
-  added.forEach((a) => log(`      + [${a.category}] ${a.title}`));
-  const proceed = !nextTasks.some((s) => s && s.startsWith("research-audit"));
-  log(proceed ? `      ⇒ 수렴 — ${round}라운드로 종료 → design 진행` : `      ⇒ 갭 잔존 → R${round + 1} 재감사`);
-  if (proceed) break;
-}
+// research-audit 합의 루프 (동일 헬퍼 재사용). add=fact 누적, remove=회수 + removed 히스토리 주입.
+let removed = [];
+reviewLoop({
+  stage: "research-audit", onConverge: "design-interface", addKind: "fact", outPrefix: "06-research-audit",
+  buildArgs: () => ({ workflow: "research", stage: "research-audit", args: { directive, facts, removed, chunkRef: "chunk" } }),
+  apply: (added, removals) => {
+    facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
+    const rem = new Set(removals.map((r) => r.id));
+    removed = removed.concat(removals.map((r) => ({ id: r.id, title: (facts.find((f) => f.id === r.id) || {}).title || "", reason: r.reason })));
+    facts = facts.filter((f) => !rem.has(f.id));
+  },
+});
 
 log("⑦ design (interface/domain/criteria)");
 for (const s of ["design-interface", "design-domain", "design-criteria"]) {
@@ -100,19 +139,18 @@ for (const s of ["design-interface", "design-domain", "design-criteria"]) {
   log(`   ${s}: 누적 fact ${facts.length}개`);
 }
 
-// design 보완/감사 수렴 루프 — design 이 낳은 갭을 잡고, 이견0이면 수렴 시 plan(상한 5).
-for (let round = 1; round <= 5; round++) {
-  const stage = round === 1 ? "design-audit" : `design-audit-${round}`;
-  const aOut = execStage({ workflow: "research", stage, args: { directive, facts, chunkRef: "chunk" } }, `07b-design-audit-r${round}.jsonl`);
-  const added = factsLedger(aOut);
-  const nextTasks = nodes(aOut).filter((n) => n.kind === "task").map((n) => n.stage);
-  facts = facts.concat(added);
-  log(`   design 보완/감사 R${round}: ${added.length}개 발견`);
-  added.forEach((a) => log(`      + [${a.category}] ${a.title}`));
-  const proceed = !nextTasks.some((s) => s && s.startsWith("design-audit"));
-  log(proceed ? `      ⇒ 수렴 — ${round}라운드로 종료 → plan 진행` : `      ⇒ 갭 잔존 → R${round + 1} 재감사`);
-  if (proceed) break;
-}
+// design-audit 합의 루프 (동일 헬퍼 재사용) — 이견0이면 plan.
+let removedD = [];
+reviewLoop({
+  stage: "design-audit", onConverge: "plan", addKind: "fact", outPrefix: "07b-design-audit",
+  buildArgs: () => ({ workflow: "research", stage: "design-audit", args: { directive, facts, removed: removedD, chunkRef: "chunk" } }),
+  apply: (added, removals) => {
+    facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
+    const rem = new Set(removals.map((r) => r.id));
+    removedD = removedD.concat(removals.map((r) => ({ id: r.id, title: (facts.find((f) => f.id === r.id) || {}).title || "", reason: r.reason })));
+    facts = facts.filter((f) => !rem.has(f.id));
+  },
+});
 
 log("⑧ plan stage");
 const planOut = execStage({ workflow: "research", stage: "plan", args: { directive, ledger: requirements, facts, chunkRef: "chunk" } }, "08-plan.jsonl");
