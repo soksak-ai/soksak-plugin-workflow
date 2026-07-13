@@ -666,6 +666,35 @@ fn reconcile_tick_audit_certify() {
 }
 
 #[test]
+fn reconcile_tick_audit_applies_removals() {
+    // 합의 루프의 remove — audit reviewer 가 removals 로 지목한 현재 항목을 badge→x(자기교정). 삭제 아님.
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns)
+        .stage(staged_children(vec![], json!({
+            "verdict": "1건 범위밖 제거",
+            "complete": true,
+            "removals": [{ "id": "i1", "reason": "지시서가 명시 배제한 범위 — 범위밖" }]
+        })))
+        .ledger(vec![json!({ "id": "i0", "badge": "o" }), json!({ "id": "i1", "badge": "o" })]);
+    let r = tick(&d);
+    assert_eq!(r["ok"], true);
+    assert_eq!(d.c().edit_of("i1").unwrap()["badge"], "x", "removals 대상 → badge x");
+    assert_eq!(d.c().edit_of("i1").unwrap()["result"], "지시서가 명시 배제한 범위 — 범위밖", "사유 기록(ledger 잔존→히스토리)");
+    assert!(d.c().edit_of("i0").is_none(), "지목 안 된 항목 불변");
+}
+
+#[test]
+fn reconcile_tick_audit_no_removals_field_noop() {
+    // removals 필드 없는 기존 audit 은 remove 무발생(회귀 없음).
+    let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
+    let d = FakeDeps::new(ns)
+        .stage(staged_children(vec![], json!({ "verdict": "완결", "complete": true })))
+        .ledger(vec![json!({ "id": "i0", "badge": "o" })]);
+    tick(&d);
+    assert!(d.c().edit_of("i0").is_none(), "removals 없으면 항목 badge 불변");
+}
+
+#[test]
 fn reconcile_tick_audit_f_propagate() {
     let ns = nodes(vec![json!({ "id": "audit", "kind": "task", "status": "todo", "blockedBy": [], "parentId": "chunk", "body": "{\"stage\":\"audit\"}" })]);
     let d = FakeDeps::new(ns)

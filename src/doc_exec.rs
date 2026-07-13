@@ -1164,6 +1164,27 @@ mod tests {
         assert!(!stages(&ev3).iter().any(|x| x == "design-audit-4"), "R4 없음(상한 3)");
     }
 
+    /// [번들 정본] 합의 루프 remove — audit reviewer 가 removals 를 내면 stage return 이 그대로 통과한다
+    /// (reconcile 가 result.removals 로 대상 badge→x 자기교정). 6 audit 스테이지 전부 재사용. return {} 였으면 유실.
+    #[test]
+    fn bundled_audit_returns_removals_for_consensus_remove() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "d", "chunkRef": "K-7",
+            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
+        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({
+            "additions": [],
+            "removals": [{ "id": "fact0", "reason": "지시서 범위밖 — 자기교정" }]
+        }));
+        for stage in ["research-audit", "research-audit-2", "research-audit-3", "design-audit", "design-audit-2", "design-audit-3"] {
+            let (_ev, ret) = run(&doc, stage, &args, &mut agent).expect(stage);
+            let removals = ret.get("removals").and_then(|r| r.as_array())
+                .unwrap_or_else(|| panic!("{stage}: return 에 removals 없음(유실): {ret}"));
+            assert_eq!(removals.len(), 1, "{stage}: removals 통과");
+            assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
+            assert_eq!(removals[0]["reason"], "지시서 범위밖 — 자기교정", "{stage}: 사유 보존");
+        }
+    }
+
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
     /// 저작 LLM 은 {directive, description}만 내고 상수는 이 템플릿이 정본(재타이핑 0 — PRINCIPLES §7).
     #[test]

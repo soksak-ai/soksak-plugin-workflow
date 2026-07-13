@@ -711,6 +711,13 @@ fn consume_stage_output(deps: &dyn Deps, target: &Node, body: &str, stage_name: 
                 return json!({ "ok": false, "processed": 0, "id": target.id, "code": "INVALID_RESULT", "message": "audit 결과 없음(verdict/complete 미반환)" });
             }
             if res.is_object() {
+                // 합의 루프의 remove 연산 — 어느 audit(draft·research·design·plan)든 result.removals[{id,reason}]
+                // 로 현재 항목을 badge→x(반박·중복·범위밖 자기교정). 이 한 경로로 네 완전성 지점이 같은 remove 를 재사용.
+                // 삭제 아님 — x 항목은 사유와 함께 ledger 에 남아 다음 라운드 reviewer 가 "이미 뺀 것"을 본다(보드=히스토리→진동 차단).
+                let review = crate::consensus::apply_review(res, 1);
+                for (id, reason) in &review.badge_edits {
+                    deps.edit_node(id, json!({ "badge": "x", "result": reason }));
+                }
                 if let Some(parent_id) = &target.parent_id {
                     let mut chunk_edit = serde_json::Map::new();
                     if let Some(t) = res.get("chunkTitle").and_then(|v| v.as_str()) {
