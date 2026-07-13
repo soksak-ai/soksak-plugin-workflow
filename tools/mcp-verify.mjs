@@ -15,15 +15,14 @@ const SUBSTRATE = [
   { name: "context7", transport: "stdio", pkg: "@upstash/context7-mcp",
     expect: ["resolve-library-id", "query-docs"],
     probe: { tool: "resolve-library-id", args: { query: "next.js", libraryName: "next.js" } } },
+  // z.ai/glm 프로필만 z.ai 웹검색을 배선한다(Anthropic WebSearch 미지원 대체). real claude 는 native
+  // WebSearch 를 쓰므로 웹검색 MCP 가 없다(프로브 대상 아님) — provider.rs default_search_servers 와 동기.
   ...(ZAI ? [{
     name: "web-search-prime", transport: "http",
     url: "https://api.z.ai/api/mcp/web_search_prime/mcp", auth: `Bearer ${ZAI}`,
     expect: ["web_search_prime"],
     probe: { tool: "web_search_prime", args: { search_query: "Node.js current LTS version 2026" } },
-  }] : [{
-    name: "ddg-search", transport: "stdio", pkg: "@oevortex/ddg_search",
-    expect: ["web-search"], probe: { tool: "web-search", args: { query: "Node.js current LTS version" } },
-  }]),
+  }] : []),
 ];
 
 function stdioSession(pkg, want) {

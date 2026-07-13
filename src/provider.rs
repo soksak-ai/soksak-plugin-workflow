@@ -51,27 +51,39 @@ fn zai_token() -> Option<String> {
         .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|k| !k.is_empty()))
 }
 
+/// is_zai_url — Anthropic-compat base URL 이 z.ai(glm) 프로필인가(순수). z.ai 는 Anthropic 의 native WebSearch
+/// 를 지원하지 않으므로 검색을 z.ai MCP 로 돌리고, real Anthropic(claude)은 native WebSearch 를 쓴다.
+fn is_zai_url(base_url: Option<&str>) -> bool {
+    base_url
+        .map(|u| {
+            let u = u.to_ascii_lowercase();
+            u.contains("z.ai") || u.contains("bigmodel") || u.contains("zhipu")
+        })
+        .unwrap_or(false)
+}
+
+/// is_zai_profile — 실행 프로필 판별(env). ccglm 등 z.ai 프로필은 ANTHROPIC_BASE_URL 로 구별된다.
+fn is_zai_profile() -> bool {
+    is_zai_url(std::env::var("ANTHROPIC_BASE_URL").ok().as_deref())
+}
+
 /// default_search_servers — 검색 substrate 기본 배선(순수, 테스트 가능). 규칙: 프롬프트가 요구하는 도구를
 /// 실제로 노출한다고 프로브(tools/mcp-verify.mjs)로 검증된 서버만 배선한다. "노출할 것이다" 가정 배선 금지.
-///   context7 — 라이브러리 docs·버전·호환(키 없음, 실증: resolve-library-id·query-docs).
-///   웹검색 — z.ai web_search_prime(정식 원격 API·유료 쿼터·실데이터 반환 확인) 우선; z.ai 토큰 없으면
-///            ddg(@oevortex/ddg_search, 키 없는 best-effort, HTTP 202 간헐). z.ai 패키지 @z_ai/mcp-server 는
-///            비전 전용(웹검색 0)이라 배선 금지.
-///   tavily/brave — 키 있을 때만 추가 소스.
-fn default_search_servers(zai: Option<&str>, tavily: Option<&str>, brave: Option<&str>) -> Value {
+///   context7 — 라이브러리 docs·버전·호환(키 없음, 두 프로필 공용 — claude 도 native docs 도구는 없다).
+///   웹검색 — z.ai 프로필일 때만 z.ai web_search_prime(정식 원격 API·유료 쿼터·실데이터 반환 확인). real
+///            claude 는 native WebSearch 를 쓰므로 웹검색 MCP 를 배선하지 않는다(claude_args 가 WebSearch 허용).
+///            z.ai 패키지 @z_ai/mcp-server 는 비전 전용(웹검색 0)이라 절대 배선 금지.
+///   tavily/brave — 키 있을 때만 추가 소스(두 프로필 공용).
+fn default_search_servers(zai: bool, zai_key: Option<&str>, tavily: Option<&str>, brave: Option<&str>) -> Value {
     let mut servers = serde_json::Map::new();
     servers.insert("context7".into(), serde_json::json!({
         "type": "stdio", "command": "npx", "args": ["-y", "@upstash/context7-mcp"] }));
-    match zai {
-        Some(k) => {
+    if zai {
+        if let Some(k) = zai_key {
             servers.insert("web-search-prime".into(), serde_json::json!({
                 "type": "http",
                 "url": "https://api.z.ai/api/mcp/web_search_prime/mcp",
                 "headers": { "Authorization": format!("Bearer {k}") } }));
-        }
-        None => {
-            servers.insert("ddg-search".into(), serde_json::json!({
-                "type": "stdio", "command": "npx", "args": ["-y", "@oevortex/ddg_search"] }));
         }
     }
     if let Some(k) = tavily {
@@ -85,15 +97,16 @@ fn default_search_servers(zai: Option<&str>, tavily: Option<&str>, brave: Option
     serde_json::json!({ "mcpServers": servers })
 }
 
-/// search_mcp — 발굴/판정 에이전트의 --mcp-config + allowedTools 토큰(mcp__<서버>) 생성. 기본 배선은
-/// default_search_servers. SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override(서버명 파싱해 grant).
-fn search_mcp() -> Option<(String, Vec<String>)> {
+/// search_mcp — 발굴/판정 에이전트의 --mcp-config + allowedTools 토큰(mcp__<서버>) 생성. zai=프로필.
+/// SOKSAK_WORKFLOW_MCP_CONFIG(파일 경로 또는 raw JSON)로 전면 override(서버명 파싱해 grant).
+fn search_mcp(zai: bool) -> Option<(String, Vec<String>)> {
     let cfg: Value = match std::env::var("SOKSAK_WORKFLOW_MCP_CONFIG").ok().filter(|v| !v.trim().is_empty()) {
         Some(v) => {
             let raw = if std::path::Path::new(&v).is_file() { std::fs::read_to_string(&v).ok()? } else { v };
             serde_json::from_str(&raw).ok()?
         }
         None => default_search_servers(
+            zai,
             zai_token().as_deref(),
             std::env::var("TAVILY_API_KEY").ok().filter(|k| !k.is_empty()).as_deref(),
             std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.is_empty()).as_deref(),
@@ -110,21 +123,33 @@ fn search_mcp() -> Option<(String, Vec<String>)> {
     Some((cfg.to_string(), tokens))
 }
 
-/// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
+/// claude_args — AgentRequest → claude CLI 인자 벡터. 실행 프로필로 도구 정책 분기(is_zai_profile).
 fn claude_args(req: &AgentRequest) -> Vec<String> {
-    // 도구 정책. text_only(저작)=파일/실행/검색 전면 차단(순수 텍스트). 그 외 발굴/판정 에이전트=파일·셸 배회
-    // 차단(Bash 를 안 막으면 git/ls 로 배회하다 대형 출력에서 타임아웃 — 실측). 검색은 배선된 MCP 로 하고
-    // Anthropic WebSearch 는 -p 에서 grant 못 해 hang 이라 차단(대신 ddg web-search 사용).
-    let (disallowed, mcp): (&str, Option<(String, Vec<String>)>) = if req.text_only {
-        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit WebFetch WebSearch TodoWrite", None)
+    claude_args_impl(req, is_zai_profile())
+}
+
+/// claude_args_impl — 순수(프로필 명시, 테스트 가능). 도구 정책:
+///   text_only(저작): 파일·실행·검색 전면 차단(순수 텍스트만 반환).
+///   z.ai/glm: Anthropic WebSearch 미지원(요청 시 -p grant hang) → 차단, z.ai web_search_prime+context7 로 검색.
+///   real claude: native WebSearch 사용(차단 안 하고 명시 grant) + context7 보강. 두 경우 파일·셸 배회는 차단
+///                (Bash 를 안 막으면 git/ls 로 배회하다 대형 출력에서 타임아웃 — 실측).
+fn claude_args_impl(req: &AgentRequest, zai: bool) -> Vec<String> {
+    const WANDER: &str = "Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit TodoWrite WebFetch";
+    let (disallowed, mcp, grant_websearch): (String, Option<(String, Vec<String>)>, bool) = if req.text_only {
+        (format!("{WANDER} WebSearch"), None, false)
+    } else if zai {
+        (format!("{WANDER} WebSearch"), search_mcp(true), false)
     } else {
-        ("Task Bash Read Write Edit MultiEdit Glob Grep NotebookEdit TodoWrite WebFetch WebSearch", search_mcp())
+        (WANDER.to_string(), search_mcp(false), true)
     };
-    // allowedTools = req 명시분 + 배선된 검색 MCP 서버 도구 명시 grant(-p 에서 권한 프롬프트 없이 즉시 사용,
-    // 위험 플래그 없이). StructuredOutput 은 --json-schema 강제라 영향 없음.
+    // allowedTools = req 명시분 + 배선 MCP 도구 + (real claude) native WebSearch — -p 에서 권한 프롬프트 없이
+    // 즉시 사용(위험 플래그 없이). StructuredOutput 은 --json-schema 강제라 영향 없음.
     let mut allowed = req.allowed_tools.clone();
     if let Some((_, ref tokens)) = mcp {
         allowed.extend(tokens.iter().cloned());
+    }
+    if grant_websearch {
+        allowed.push("WebSearch".into());
     }
     let mut args: Vec<String> = vec![
         "-p".into(),
@@ -136,7 +161,7 @@ fn claude_args(req: &AgentRequest) -> Vec<String> {
         "--allowedTools".into(),
         allowed.join(" "),
         "--disallowedTools".into(),
-        disallowed.into(),
+        disallowed,
         "--model".into(),
         req.model.into(),
     ];
@@ -768,45 +793,75 @@ mod tests {
         }
     }
 
-    /// 규칙(회귀): 프로브 검증된 서버만 배선. z.ai 토큰 있으면 context7(docs) + z.ai web_search_prime
-    /// (정식 웹검색), ddg/비전 아님. 토큰 없으면 ddg 폴백. 키 프리미엄은 옵트인. z.ai 비전 패키지 배선 금지.
+    /// is_zai_url — ANTHROPIC_BASE_URL 로 z.ai/glm 프로필 판별.
     #[test]
-    fn default_search_servers_wires_probe_verified_only() {
-        let with = default_search_servers(Some("TOK"), None, None);
-        let s = with["mcpServers"].as_object().unwrap();
+    fn is_zai_url_detects_zai_endpoint() {
+        assert!(is_zai_url(Some("https://api.z.ai/api/anthropic")), "z.ai 엔드포인트");
+        assert!(is_zai_url(Some("https://open.bigmodel.cn/...")), "zhipu bigmodel");
+        assert!(!is_zai_url(Some("https://api.anthropic.com")), "real Anthropic");
+        assert!(!is_zai_url(None), "미설정 = real claude");
+    }
+
+    /// 규칙(회귀): 프로브 검증된 서버만 배선. z.ai 프로필 → context7 + z.ai web_search_prime(native WebSearch
+    /// 미지원 대체). real claude → context7 만(native WebSearch 사용). 두 경우 다 ddg/비전 배선 금지. 키 옵트인.
+    #[test]
+    fn default_search_servers_branches_by_profile() {
+        // z.ai/glm 프로필 → context7 + z.ai 정식 웹검색.
+        let zai = default_search_servers(true, Some("TOK"), None, None);
+        let s = zai["mcpServers"].as_object().unwrap();
         assert!(s.contains_key("context7"), "context7(docs/버전) 배선");
         assert!(s.contains_key("web-search-prime"), "z.ai 정식 웹검색 배선");
-        assert_eq!(with["mcpServers"]["web-search-prime"]["url"], "https://api.z.ai/api/mcp/web_search_prime/mcp");
-        assert_eq!(with["mcpServers"]["web-search-prime"]["headers"]["Authorization"], "Bearer TOK");
-        assert!(!s.contains_key("ddg-search"), "토큰 있으면 불안정 ddg 미사용");
-        assert!(!with.to_string().contains("@z_ai/mcp-server"), "z.ai 비전 패키지는 검색 아님 — 배선 금지");
-        // 토큰 없음 → ddg 폴백(키 없는 best-effort).
-        let without = default_search_servers(None, None, None);
-        let s2 = without["mcpServers"].as_object().unwrap();
-        assert!(s2.contains_key("context7") && s2.contains_key("ddg-search"), "토큰 없으면 context7+ddg 폴백");
-        assert!(!s2.contains_key("web-search-prime"), "토큰 없으면 z.ai 웹검색 없음");
-        // 키 프리미엄 옵트인.
-        let prem = default_search_servers(Some("T"), Some("TAV"), Some("BR"));
+        assert_eq!(zai["mcpServers"]["web-search-prime"]["url"], "https://api.z.ai/api/mcp/web_search_prime/mcp");
+        assert_eq!(zai["mcpServers"]["web-search-prime"]["headers"]["Authorization"], "Bearer TOK");
+        // real claude 프로필 → context7 만(웹검색은 native WebSearch). 웹검색 MCP·비전·ddg 없음.
+        let cl = default_search_servers(false, Some("TOK"), None, None);
+        let s2 = cl["mcpServers"].as_object().unwrap();
+        assert!(s2.contains_key("context7"), "real claude 도 context7(docs)은 유용");
+        assert!(!s2.contains_key("web-search-prime"), "real claude 는 native WebSearch — z.ai 웹검색 미배선");
+        assert!(!cl.to_string().contains("ddg") && !cl.to_string().contains("@z_ai/mcp-server"), "ddg·비전 배선 금지");
+        // 키 프리미엄 옵트인(두 프로필 공용).
+        let prem = default_search_servers(false, None, Some("TAV"), Some("BR"));
         let s3 = prem["mcpServers"].as_object().unwrap();
         assert!(s3.contains_key("tavily") && s3.contains_key("brave"), "키 있으면 프리미엄 추가");
     }
 
-    /// claude_args 통합: 발굴 에이전트는 --mcp-config(context7 포함) 배선 + MCP 도구 grant + WebSearch·Bash 차단.
+    /// z.ai/glm 발굴 에이전트: context7 배선·grant + WebSearch(미지원)·Bash 차단, native WebSearch grant 안 함.
+    /// (z.ai web_search_prime 배선 자체는 토큰 의존이라 default_search_servers 순수 테스트가 커버.)
     #[test]
-    fn claude_args_wires_search_and_blocks_wandering() {
-        let args = claude_args(&req(false));
-        let mi = args.iter().position(|a| a == "--mcp-config").expect("검색 에이전트엔 --mcp-config");
+    fn claude_args_zai_blocks_websearch_wires_zai_mcp() {
+        let args = claude_args_impl(&req(false), true);
+        let mi = args.iter().position(|a| a == "--mcp-config").expect("--mcp-config");
         assert!(args[mi + 1].contains("@upstash/context7-mcp"), "context7 배선: {}", args[mi + 1]);
         let ai = args.iter().position(|a| a == "--allowedTools").expect("allowedTools");
-        assert!(args[ai + 1].contains("mcp__context7"), "MCP 도구 명시 grant(권한 hang 방지): {}", args[ai + 1]);
+        assert!(args[ai + 1].contains("mcp__context7"), "MCP grant: {}", args[ai + 1]);
+        assert!(!di_has_websearch(&args[ai + 1]), "glm 은 native WebSearch grant 안 함: {}", args[ai + 1]);
         let di = args.iter().position(|a| a == "--disallowedTools").expect("disallowedTools");
         assert!(args[di + 1].contains("WebSearch") && args[di + 1].contains("Bash"), "WebSearch·Bash 차단");
     }
 
-    /// text_only(저작) 에이전트엔 검색 MCP 를 배선하지 않는다(순수 텍스트 반환).
+    /// real claude 발굴 에이전트: native WebSearch 허용(grant, 차단 안 함) + context7 배선. z.ai 웹검색 없음.
+    #[test]
+    fn claude_args_real_claude_allows_native_websearch() {
+        let args = claude_args_impl(&req(false), false);
+        let mi = args.iter().position(|a| a == "--mcp-config").expect("--mcp-config");
+        assert!(args[mi + 1].contains("@upstash/context7-mcp"), "context7 배선");
+        assert!(!args[mi + 1].contains("web_search_prime"), "real claude 엔 z.ai 웹검색 미배선");
+        let ai = args.iter().position(|a| a == "--allowedTools").expect("allowedTools");
+        assert!(args[ai + 1].contains("WebSearch") && args[ai + 1].contains("mcp__context7"), "native WebSearch + context7 grant: {}", args[ai + 1]);
+        let di = args.iter().position(|a| a == "--disallowedTools").expect("disallowedTools");
+        assert!(!di_has_websearch(&args[di + 1]) && args[di + 1].contains("Bash"), "WebSearch 차단 안 함, Bash 는 차단: {}", args[di + 1]);
+    }
+
+    fn di_has_websearch(disallowed: &str) -> bool {
+        disallowed.split_whitespace().any(|t| t == "WebSearch")
+    }
+
+    /// text_only(저작) 에이전트엔 검색 MCP 를 배선하지 않는다(순수 텍스트 반환), 프로필 무관.
     #[test]
     fn search_mcp_absent_for_text_only() {
-        let args = claude_args(&req(true));
-        assert!(!args.iter().any(|a| a == "--mcp-config"), "저작 에이전트엔 검색 MCP 미배선");
+        for zai in [true, false] {
+            let args = claude_args_impl(&req(true), zai);
+            assert!(!args.iter().any(|a| a == "--mcp-config"), "저작 에이전트엔 검색 MCP 미배선(zai={zai})");
+        }
     }
 }
