@@ -43,12 +43,12 @@ pub struct AgentRequest<'a> {
 /// claude_args — AgentRequest → claude CLI 인자 벡터(순수, 테스트 가능).
 /// run_agent_text 가 timeout 래퍼로 이 args 를 `claude` 에 적용한다. system_prompt 가 Some 이면
 /// `--append-system-prompt <내용>` 추가(user prompt 와 분리 — claude CLI 공식 플래그).
-/// zai_token — z.ai API 키(= glm 인증 토큰 재사용, 별도 키 불요). Z_AI_API_KEY 우선, 없으면 ANTHROPIC_AUTH_TOKEN.
+/// zai_token — z.ai API 키(= glm 인증 토큰 재사용, 별도 키 불요). 이름 관례가 여럿이라 순서대로 찾는다:
+/// ZAI_API_KEY(사용자 셸) → Z_AI_API_KEY(@z_ai/mcp-server 문서 관례) → ANTHROPIC_AUTH_TOKEN(ccglm 사이드카).
 fn zai_token() -> Option<String> {
-    std::env::var("Z_AI_API_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-        .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok().filter(|k| !k.is_empty()))
+    ["ZAI_API_KEY", "Z_AI_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
 }
 
 /// is_zai_url — Anthropic-compat base URL 이 z.ai(glm) 프로필인가(순수). z.ai 는 Anthropic 의 native WebSearch
