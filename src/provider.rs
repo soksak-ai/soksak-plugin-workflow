@@ -484,6 +484,14 @@ fn run_agent_text_once(req: &AgentRequest, env: &[(String, String)]) -> Result<S
     for (k, v) in env {
         cmd.env(k, v);
     }
+    // 중첩 claude 가드(공식 nesting guard, claude-code#32618 · agent-sdk#573): 이 사이드카가 Claude Code 세션
+    // 안에서 스폰되면 자식 claude 가 부모의 CLAUDECODE/CLAUDE_CODE_* 를 상속해 "cannot launch inside another
+    // Claude Code session" 로 hang 한다. 자식 env 에서 그 신호를 자동 제거 → 앱 안이든 밖이든 신선 인스턴스로
+    // 실행(env_remove 는 미설정 시 no-op). stdin=null 로 손자 hang(stdin 대기) 방지.
+    for k in ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_EXECPATH"] {
+        cmd.env_remove(k);
+    }
+    cmd.stdin(Stdio::null());
     let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
     let stdout = child.stdout.take().ok_or("claude stdout 없음")?;
     // stream-json 소비는 리더 스레드에서 — 메인 스레드는 wait_timeout 으로 하드캡을 건다.
