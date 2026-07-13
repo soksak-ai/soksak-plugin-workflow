@@ -1049,9 +1049,9 @@ mod tests {
             ] }))
         };
         let (cev, _cr) = run(&doc, "design-criteria", &design_args, &mut crit_agent).expect("design-criteria 실행");
-        assert_eq!(cev.len(), 2, "criterion fact 1 + plan task 1");
+        assert_eq!(cev.len(), 2, "criterion fact 1 + design-audit task 1");
         let NodeEvent::Add { id, stage, .. } = &cev[1];
-        assert_eq!((id.as_str(), stage.as_deref()), ("plan", Some("plan")), "체인 말미 → plan");
+        assert_eq!((id.as_str(), stage.as_deref()), ("design-audit", Some("design-audit")), "design 뒤 보완/감사(수렴 시 → plan)");
 
         // plan stage — 요건 원장+fact 원장 렌더 → plan-unit 발행.
         let mut plan_agent = |prompt: &str, schema: Option<&Json>, _l: &str| -> Result<Json, String> {
@@ -1136,6 +1136,35 @@ mod tests {
         let s3 = stages(&ev3);
         assert!(s3.iter().any(|x| x == "design-interface"), "상한 라운드는 갭 잔존해도 진행: {s3:?}");
         assert!(!s3.iter().any(|x| x == "research-audit-4"), "R4 없음(상한 3): {s3:?}");
+    }
+
+    /// [번들 정본] design-audit = design 뒤 보완/감사 수렴 루프(research-audit 와 동형). 갭 있으면 재감사,
+    /// 갭 0 이면 plan 진행, 상한(R3) 도달 시 갭 잔존해도 plan(무한루프 금지). 각 스테이지가 자기 층 갭을 만든다.
+    #[test]
+    fn bundled_design_audit_converges_or_bounds() {
+        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let args = json!({ "directive": "정련 지시", "chunkRef": "K-7",
+            "facts": [{ "id": "fact0", "title": "SessionAuthority 인터페이스", "badge": "o", "category": "interface" }] });
+        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
+        // 갭 있음 → 재감사(design-audit-2), plan 보류.
+        let mut gap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [
+            { "title": "누락: 동시 재고갱신 충돌 제어(설계 미반영)", "description": "낙관적 잠금 설계 부재 — 구현 재발명",
+              "area": "methodology", "origin": "agent", "reason": "운영 견고성 갭" } ] }));
+        let (ev, _) = run(&doc, "design-audit", &args, &mut gap).expect("design-audit R1(gap)");
+        let s = stages(&ev);
+        assert!(s.iter().any(|x| x == "design-audit-2"), "갭 있으면 재감사 발행: {s:?}");
+        assert!(!s.iter().any(|x| x == "plan"), "갭 있으면 plan 보류: {s:?}");
+        // 갭 0 → plan 진행, 재감사 없음(수렴).
+        let mut nogap = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
+        let (ev2, _) = run(&doc, "design-audit", &args, &mut nogap).expect("design-audit R1(no gap)");
+        let s2 = stages(&ev2);
+        assert!(s2.iter().any(|x| x == "plan"), "갭 0 이면 plan 진행: {s2:?}");
+        assert!(!s2.iter().any(|x| x.starts_with("design-audit")), "갭 0 이면 재감사 없음(수렴): {s2:?}");
+        // 상한(R3) — 갭 잔존해도 plan, R4 없음.
+        let (ev3, _) = run(&doc, "design-audit-3", &args, &mut gap).expect("design-audit R3(gap)");
+        let s3 = stages(&ev3);
+        assert!(s3.iter().any(|x| x == "plan"), "상한은 갭 잔존해도 plan: {s3:?}");
+        assert!(!s3.iter().any(|x| x == "design-audit-4"), "R4 없음(상한 3): {s3:?}");
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
