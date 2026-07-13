@@ -3,6 +3,7 @@
 //! 발행 wire = NodeEvent(emit_host), generate 산출 = DraftDoc(draft_doc, validator 인증).
 //! 레거시 interp(ESTree)/skeleton 경로는 backup/legacy-interp/ 에 보존(M5e).
 
+pub mod consensus;
 pub mod derive_directive;
 pub mod directive_loop;
 pub mod doc_exec;
