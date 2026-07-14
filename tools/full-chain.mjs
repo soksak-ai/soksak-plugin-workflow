@@ -58,104 +58,96 @@ function resultOf(text) {
   return {};
 }
 
-// 합의 루프 하나 — 같은 review 스테이지를 이견0(add·remove 둘 다 0)까지 반복 호출. 종료는 수렴이 정상.
-// 낮은 상한이 정당한 발견을 끊으면 안 되므로 여유(하드 20) + 라운드 10 초과부터 reviewer 에 횟수 압박
-// (한 번에 소진하라, {{round}} 로 전달). 20 에서 하드 스톱. draft·research·design 재사용.
-function reviewLoop({ stage, onConverge, addKind, buildArgs, apply, outPrefix }) {
+// 확정 문서 규약 — items(id, state, title, description, history[]) 를 ledger 로 넘겨 {{document}} 로 읽히고,
+// reviewer 가 changes[{op,id?,title?,description?,reason}] 를 낸다. changes 비면 수렴, 있으면 자기재발행.
+// 상한 20 + 라운드 10 초과부터 횟수 압박(자초 무한 방지). draft·research·design 재사용.
+let nextId = 0;
+function applyChanges(items, changes, round) {
+  for (const c of changes) {
+    if (c.op === "add") {
+      if (!c.title) continue;
+      items.push({ id: `a${nextId++}`, state: "o", title: c.title, description: c.description || "",
+        history: [{ round, action: "add", reason: c.reason || "" }] });
+    } else if (c.op === "remove" || c.op === "reraise") {
+      const it = items.find((x) => x.id === c.id);
+      if (!it) continue;
+      const from = c.op === "remove" ? "o" : "x", to = c.op === "remove" ? "x" : "o";
+      if (it.state !== from) continue; // 전이 불일치 방어
+      it.state = to;
+      it.history.push({ round, action: c.op, reason: c.reason || "" });
+    }
+  }
+}
+function reviewLoop({ stage, onConverge, items, buildArgs, outPrefix }) {
   const HARD = 20, WARN = 10;
   for (let round = 1; round <= HARD; round++) {
     const out = execStage(buildArgs(round), `${outPrefix}-r${round}.jsonl`);
-    const added = nodes(out, addKind);
-    const removals = resultOf(out).removals || [];
-    const nextStages = nodes(out).filter((n) => n.kind === "task").map((n) => n.stage);
-    apply(added, removals);
-    log(`   ${stage} R${round}: +${added.length} 추가 · −${removals.length} 제거${round >= WARN ? "  ⚠횟수압박" : ""}`);
-    added.forEach((a) => log(`      + ${a.title}`));
-    removals.forEach((r) => log(`      − 제거 [${r.id}]: ${r.reason}`));
-    if (nextStages.includes(onConverge)) { log(`      ⇒ 이견0 수렴(${round}R) → ${onConverge}`); break; }
-    if (round === HARD) { log(`      ⇒ 하드 상한 ${HARD} 도달 — 강제 진행 → ${onConverge}`); break; }
-    log(`      ⇒ 이견 잔존 → 재검(R${round + 1})`);
+    const changes = resultOf(out).changes || [];
+    applyChanges(items, changes, round);
+    const n = (op) => changes.filter((c) => c.op === op).length;
+    log(`   ${stage} R${round}: +${n("add")} · -${n("remove")} · ^${n("reraise")}${round >= WARN ? "  [횟수압박]" : ""}`);
+    changes.forEach((c) => log(`      ${c.op === "add" ? "+" : c.op === "remove" ? "-" : "^"} ${c.title || c.id}: ${c.reason}`));
+    if (changes.length === 0) { log(`      => 이견0 수렴(${round}R) -> ${onConverge}`); break; }
+    if (round === HARD) { log(`      => 하드 상한 ${HARD} -> ${onConverge}`); break; }
+    log(`      => 이견 잔존 -> 재검(R${round + 1})`);
   }
 }
+const live = (items) => items.filter((i) => i.state === "o");
 
-// ── DRAFT: generate(LLM 저작 skeleton) → generate stage(DraftDoc) → hunt → classify → audit ──
+// -- DRAFT: generate -> draft-review(합의 루프) -> classify -> audit(seal) --
 log(`START — idea: ${directive.slice(0, 40)}… | model ${MODEL}`);
-
-log("① generate-skeleton (LLM 저작)");
+log("(1) generate-skeleton (LLM 저작)");
 const docJson = execFileSync(BIN, ["generate-skeleton", "--idea", directive, "--model", MODEL, "--lang", LANG, "--gen-out", join(OUT, "authored.txt")], { maxBuffer: 64 * 1024 * 1024, timeout: 25 * 60 * 1000 }).toString();
 writeFileSync(join(OUT, "doc.json"), docJson);
 const draftDoc = JSON.parse(docJson);
 
-log("② generate stage → DraftDoc(요건)");
+log("(2) generate stage -> 요건 items");
 const genOut = execStage({ skeleton: draftDoc, stage: "generate", args: { directive } }, "01-generate.jsonl");
-const draftChunk = JSON.parse(genOut);
-let requirements = (draftChunk.requirements || []).map((r) => ({ id: r.id, title: r.title, badge: "o" }));
-log(`   요건 ${requirements.length}개`);
+const draftItems = (JSON.parse(genOut).requirements || []).map((r) => ({ id: r.id, state: "o", title: r.title, description: r.description || "", history: [{ round: 0, action: "add", reason: "generate" }] }));
+log(`   요건 ${draftItems.length}개`);
 
-log("③ draft-review (완전성 합의 루프 — hunt+audit 대체)");
+log("(3) draft-review (완전성 합의 루프)");
 reviewLoop({
-  stage: "draft-review", onConverge: "classify", addKind: "item", outPrefix: "02-draft-review",
-  buildArgs: (round) => ({ skeleton: draftDoc, stage: "draft-review", args: { directive, ledger: requirements, round, chunkRef: "chunk" } }),
-  apply: (added, removals) => {
-    requirements = requirements.concat(added.map((a) => ({ id: a.id, title: a.title, badge: "o" })));
-    const rem = new Map(removals.map((r) => [r.id, r.reason]));
-    // 제거는 삭제 아님 — badge x 로 원장에 남겨 다음 라운드 reviewer 가 [x] 로 봄(진동 차단).
-    requirements = requirements.map((r) => (rem.has(r.id) ? { ...r, badge: "x", result: rem.get(r.id) } : r));
-  },
+  stage: "draft-review", onConverge: "classify", items: draftItems, outPrefix: "02-draft-review",
+  buildArgs: (round) => ({ skeleton: draftDoc, stage: "draft-review", args: { directive, ledger: draftItems, round, chunkRef: "chunk" } }),
 });
-const liveReq = requirements.filter((r) => r.badge !== "x");
-log(`   요건(수렴 후, x 제외) ${liveReq.length}개`);
+const reqLedger = live(draftItems).map((i) => ({ id: i.id, title: i.title, badge: "o" }));
+log(`   요건(수렴 후, live) ${reqLedger.length}개`);
 
-log("④ classify stage");
-execStage({ skeleton: draftDoc, stage: "classify", args: { directive, ledger: liveReq, chunkRef: "chunk" } }, "03-classify.jsonl");
+log("(4) classify stage");
+execStage({ skeleton: draftDoc, stage: "classify", args: { directive, ledger: reqLedger, chunkRef: "chunk" } }, "03-classify.jsonl");
+log("(5) audit stage (seal)");
+execStage({ skeleton: draftDoc, stage: "audit", args: { directive, ledger: reqLedger, chunkRef: "chunk" } }, "04-audit.jsonl");
 
-log("⑤ audit stage (완결 인증 seal)");
-const auditOut = execStage({ skeleton: draftDoc, stage: "audit", args: { directive, ledger: liveReq, chunkRef: "chunk" } }, "04-audit.jsonl");
-log(`   audit 산출 ${auditOut.length}B`);
-requirements = liveReq; // downstream(research/design/plan)은 수렴한 live 요건만
+// -- PLAN: research -> research-audit -> design -> design-audit -> plan --
+log("(6) research stage");
+const researchOut = execStage({ workflow: "research", stage: "research", args: { directive, ledger: reqLedger, chunkRef: "chunk" } }, "05-research.jsonl");
+const factItems = nodes(researchOut, "fact").map((f) => ({ id: f.id, state: "o", title: f.title, description: f.description || "", category: f.category, history: [{ round: 0, action: "add", reason: "research" }] }));
+log(`   research fact ${factItems.length}개`);
 
-// ── PLAN: research → research-audit 수렴루프 → design(if/dom/crit) → plan ──
-log("⑥ research stage");
-const researchOut = execStage({ workflow: "research", stage: "research", args: { directive, ledger: requirements, chunkRef: "chunk" } }, "05-research.jsonl");
-let facts = factsLedger(researchOut);
-log(`   research fact ${facts.length}개`);
-
-// research-audit 합의 루프 (동일 헬퍼 재사용). add=fact 누적, remove=회수 + removed 히스토리 주입.
-let removed = [];
+log("(7) research-audit (합의 루프)");
 reviewLoop({
-  stage: "research-audit", onConverge: "design-interface", addKind: "fact", outPrefix: "06-research-audit",
-  buildArgs: (round) => ({ workflow: "research", stage: "research-audit", args: { directive, facts, removed, round, chunkRef: "chunk" } }),
-  apply: (added, removals) => {
-    facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
-    const rem = new Set(removals.map((r) => r.id));
-    removed = removed.concat(removals.map((r) => ({ id: r.id, title: (facts.find((f) => f.id === r.id) || {}).title || "", reason: r.reason })));
-    facts = facts.filter((f) => !rem.has(f.id));
-  },
+  stage: "research-audit", onConverge: "design-interface", items: factItems, outPrefix: "06-research-audit",
+  buildArgs: (round) => ({ workflow: "research", stage: "research-audit", args: { directive, ledger: factItems, round, chunkRef: "chunk" } }),
 });
 
-log("⑦ design (interface/domain/criteria)");
+const factLedger = () => live(factItems).map((i) => ({ id: i.id, title: i.title, description: i.description, badge: "o", category: i.category }));
+log("(8) design (interface/domain/criteria)");
 for (const s of ["design-interface", "design-domain", "design-criteria"]) {
-  const dOut = execStage({ workflow: "research", stage: s, args: { directive, ledger: requirements, facts, chunkRef: "chunk" } }, `07-${s}.jsonl`);
-  facts = facts.concat(factsLedger(dOut));
-  log(`   ${s}: 누적 fact ${facts.length}개`);
+  const dOut = execStage({ workflow: "research", stage: s, args: { directive, ledger: reqLedger, facts: factLedger(), chunkRef: "chunk" } }, `07-${s}.jsonl`);
+  nodes(dOut, "fact").forEach((f) => factItems.push({ id: f.id, state: "o", title: f.title, description: f.description || "", category: f.category, history: [{ round: 0, action: "add", reason: s }] }));
+  log(`   ${s}: 누적 fact ${live(factItems).length}개`);
 }
 
-// design-audit 합의 루프 (동일 헬퍼 재사용) — 이견0이면 plan.
-let removedD = [];
+log("(9) design-audit (합의 루프)");
 reviewLoop({
-  stage: "design-audit", onConverge: "plan", addKind: "fact", outPrefix: "07b-design-audit",
-  buildArgs: (round) => ({ workflow: "research", stage: "design-audit", args: { directive, facts, removed: removedD, round, chunkRef: "chunk" } }),
-  apply: (added, removals) => {
-    facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
-    const rem = new Set(removals.map((r) => r.id));
-    removedD = removedD.concat(removals.map((r) => ({ id: r.id, title: (facts.find((f) => f.id === r.id) || {}).title || "", reason: r.reason })));
-    facts = facts.filter((f) => !rem.has(f.id));
-  },
+  stage: "design-audit", onConverge: "plan", items: factItems, outPrefix: "07b-design-audit",
+  buildArgs: (round) => ({ workflow: "research", stage: "design-audit", args: { directive, ledger: factItems, round, chunkRef: "chunk" } }),
 });
 
-log("⑧ plan stage");
-const planOut = execStage({ workflow: "research", stage: "plan", args: { directive, ledger: requirements, facts, chunkRef: "chunk" } }, "08-plan.jsonl");
+log("(10) plan stage");
+const planOut = execStage({ workflow: "research", stage: "plan", args: { directive, ledger: reqLedger, facts: factLedger(), chunkRef: "chunk" } }, "08-plan.jsonl");
 const planUnits = nodes(planOut, "plan-unit");
 log(`   plan-unit ${planUnits.length}개`);
 
-log(`DONE — 요건 ${requirements.length} · fact ${facts.length} · plan-unit ${planUnits.length}. 산출: ${OUT}`);
+log(`DONE — 요건 ${reqLedger.length} · fact ${live(factItems).length} · plan-unit ${planUnits.length}. 산출: ${OUT}`);
