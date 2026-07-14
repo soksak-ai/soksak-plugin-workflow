@@ -139,7 +139,8 @@ pub fn validate(doc: &Json) -> Result<(), Vec<String>> {
                     || args_decl.is_some_and(|m| m.contains_key(&ph))
                     || ph == "ledger"
                     || ph == "facts"
-                    || ph == "removed";
+                    || ph == "removed"
+                    || ph == "round";
                 if !known {
                     v.push(format!("[prompts] {pname:?} 플레이스홀더 {{{{{ph}}}}} 미해석(values/args/ledger 아님)"));
                 }
@@ -367,6 +368,11 @@ impl Scope<'_> {
                 Some(ledger_view(&self.args, "facts"))
             } else if ph == "removed" {
                 Some(removed_view(&self.args))
+            } else if ph == "round" {
+                Some(self.args.get("round").map(|v| match v {
+                    Json::String(s) => s.clone(),
+                    o => o.to_string(),
+                }).unwrap_or_else(|| "1".into()))
             } else {
                 self.lookup(&ph)
                     .or_else(|| self.lookup(&format!("args.{ph}")))

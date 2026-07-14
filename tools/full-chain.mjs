@@ -58,21 +58,22 @@ function resultOf(text) {
   return {};
 }
 
-// 합의 루프 하나 — 같은 review 스테이지를 이견0까지 반복 호출. 매 라운드 add/remove 를 apply 로 원장에 반영,
-// review 가 onConverge 스테이지를 발행하면(이견0 수렴) 종료. 상한 cap(자초 무한 방지). draft·research·design 재사용.
-function reviewLoop({ stage, onConverge, addKind, buildArgs, apply, outPrefix, cap = 8 }) {
-  for (let round = 1; round <= cap; round++) {
-    const out = execStage(buildArgs(), `${outPrefix}-r${round}.jsonl`);
+// 합의 루프 하나 — 같은 review 스테이지를 이견0(add·remove 둘 다 0)까지 반복 호출. 종료는 수렴이 정상.
+// 낮은 상한이 정당한 발견을 끊으면 안 되므로 여유(하드 20) + 라운드 10 초과부터 reviewer 에 횟수 압박
+// (한 번에 소진하라, {{round}} 로 전달). 20 에서 하드 스톱. draft·research·design 재사용.
+function reviewLoop({ stage, onConverge, addKind, buildArgs, apply, outPrefix }) {
+  const HARD = 20, WARN = 10;
+  for (let round = 1; round <= HARD; round++) {
+    const out = execStage(buildArgs(round), `${outPrefix}-r${round}.jsonl`);
     const added = nodes(out, addKind);
     const removals = resultOf(out).removals || [];
     const nextStages = nodes(out).filter((n) => n.kind === "task").map((n) => n.stage);
     apply(added, removals);
-    log(`   ${stage} R${round}: +${added.length} 추가 · −${removals.length} 제거`);
+    log(`   ${stage} R${round}: +${added.length} 추가 · −${removals.length} 제거${round >= WARN ? "  ⚠횟수압박" : ""}`);
     added.forEach((a) => log(`      + ${a.title}`));
     removals.forEach((r) => log(`      − 제거 [${r.id}]: ${r.reason}`));
-    const converged = nextStages.includes(onConverge);
-    if (converged) { log(`      ⇒ 이견0 수렴(${round}R) → ${onConverge}`); break; }
-    if (round === cap) { log(`      ⇒ 상한 ${cap} 도달 — 강제 진행 → ${onConverge}`); break; }
+    if (nextStages.includes(onConverge)) { log(`      ⇒ 이견0 수렴(${round}R) → ${onConverge}`); break; }
+    if (round === HARD) { log(`      ⇒ 하드 상한 ${HARD} 도달 — 강제 진행 → ${onConverge}`); break; }
     log(`      ⇒ 이견 잔존 → 재검(R${round + 1})`);
   }
 }
@@ -94,7 +95,7 @@ log(`   요건 ${requirements.length}개`);
 log("③ draft-review (완전성 합의 루프 — hunt+audit 대체)");
 reviewLoop({
   stage: "draft-review", onConverge: "classify", addKind: "item", outPrefix: "02-draft-review",
-  buildArgs: () => ({ skeleton: draftDoc, stage: "draft-review", args: { directive, ledger: requirements, chunkRef: "chunk" } }),
+  buildArgs: (round) => ({ skeleton: draftDoc, stage: "draft-review", args: { directive, ledger: requirements, round, chunkRef: "chunk" } }),
   apply: (added, removals) => {
     requirements = requirements.concat(added.map((a) => ({ id: a.id, title: a.title, badge: "o" })));
     const rem = new Map(removals.map((r) => [r.id, r.reason]));
@@ -123,7 +124,7 @@ log(`   research fact ${facts.length}개`);
 let removed = [];
 reviewLoop({
   stage: "research-audit", onConverge: "design-interface", addKind: "fact", outPrefix: "06-research-audit",
-  buildArgs: () => ({ workflow: "research", stage: "research-audit", args: { directive, facts, removed, chunkRef: "chunk" } }),
+  buildArgs: (round) => ({ workflow: "research", stage: "research-audit", args: { directive, facts, removed, round, chunkRef: "chunk" } }),
   apply: (added, removals) => {
     facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
     const rem = new Set(removals.map((r) => r.id));
@@ -143,7 +144,7 @@ for (const s of ["design-interface", "design-domain", "design-criteria"]) {
 let removedD = [];
 reviewLoop({
   stage: "design-audit", onConverge: "plan", addKind: "fact", outPrefix: "07b-design-audit",
-  buildArgs: () => ({ workflow: "research", stage: "design-audit", args: { directive, facts, removed: removedD, chunkRef: "chunk" } }),
+  buildArgs: (round) => ({ workflow: "research", stage: "design-audit", args: { directive, facts, removed: removedD, round, chunkRef: "chunk" } }),
   apply: (added, removals) => {
     facts = facts.concat(added.map((a) => ({ id: a.id, title: a.title, description: a.description, badge: "o", category: a.category })));
     const rem = new Set(removals.map((r) => r.id));
