@@ -295,13 +295,53 @@
           }
         }
       }
+    },
+    "CHANGES_SCHEMA": {
+      "type": "object",
+      "required": [
+        "changes"
+      ],
+      "properties": {
+        "changes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "op",
+              "reason"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "add",
+                  "remove",
+                  "reraise"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   },
   "prompts": {
     "gen": "{{COMMON}}\n\nYOUR ROLE — GENERATOR: turn the directive into a BACKLOG CHUNK (덩어리) — a title for the whole + the full FLAT set of REQUIREMENTS. **You do NOT classify.** Categorization is a LATER review step (classify), run after the set is complete; here you only DISCOVER.\n\n1) CHUNK TITLE: if the directive states or clearly implies a name for the whole, EXTRACT it (titleOrigin \"user\"); else GENERATE a short faithful title from its real intent (titleOrigin \"agent\"). One short noun phrase in the directive's language — the name a practitioner files this backlog under.\n2) REQUIREMENTS — **INTERPRET, do NOT echo.** Read the directive's real intent; never pass surface phrasing through verbatim. A terse directive bundles several DISTINCT requirements in one run-on clause — split each into its OWN atomic item (title = the imperative requirement in 입력 언어, description = one line of what it must do and why it is make-or-break, never a restatement of the title). ATOMIC: split bundled DISTINCT requirements; never split ONE requirement into its implementation beats.\n   **GENERATION IS GENEROUS — cast WIDE.** Include EVERY plausible make-or-break (content, structural/craft, operational, regulated, the back-side, and every actor — on-stage users, external counterparties who transact through it, and above all the off-stage actor who runs the result, a part the requester has never played — each drawn through its OWN named surface, not only its scattered functions). AND every DATA ENTITY the result stores, counts, or edits (each noun the directive treats as kept or managed — not only the ones whose creation it spells out) needs its OWN create / enter / edit / list surface: a rule ABOUT an entity (its constraint, its price, its identity, how it is classified) is NOT the surface that CREATES and maintains that entity. These entity-entry surfaces — above all the CENTRAL entity every other requirement revolves around — are the MOST-MISSED requirements, dropped because they seem too obvious to state; yet the result cannot be operated without them, and an entity's own registration/entry screen is owed as much as any flow or rule. Generosity is SAFE: the per-item verifier grounds each and rejects (x) any that does not hold — better to slightly OVER-include than to miss one. No cap, no stinginess; this set must be COMPLETE. Obey the INVARIANTS. origin = \"user\" if the directive states/implies it, \"agent\" if you derive it as a make-or-break the directive never stated. You cannot search here. There is NO optional tier — a nice-to-have is NOT a requirement.\n   **DO NOT group, do NOT invent a category dimension, do NOT prune to fit a frame.** Pre-classifying prunes topics outside the frame and breaks completeness — emit requirements[] FLAT. The classify step (after hunt completes the set) invents the dimension and assigns categories then.\n\nDirective: \"{{directive}}\"",
     "classify": "{{COMMON}}\n\nYOUR ROLE — CLASSIFIER (검토·분류). 생성·누락탐색이 끝났다 — 아래 원장이 **완성된 전체 요건**이다. 새 요건을 만들지 마라(그건 hunt 몫). 전체를 senior practitioner 로서 읽고, 이 도메인에 맞는 분류 차원 하나를 INVENT 한 뒤, 모든 요건을 정확히 한 카테고리로 배정한다.\n  - DIMENSION: 이 도메인에 맞는 차원 하나를 발명(a system: 기능 영역; a novel: 막/장; a plan: 국면; a climb: 구간 — 고정 분류법 금지, directive 와 실제 요건들에서 도출). **집합이 이미 완성됐으니(hunt 후) 프레임 밖 토픽이 잘릴 위험이 없다 — 그래서 생성이 아니라 여기서 분류한다.**\n  - ASSIGN: 원장의 모든 항목을 그 차원의 카테고리로. assignments[] 각 원소 = {id(원장 줄 맨 앞 [id]), category}. 모든 id 를 정확히 한 번씩, 정확히 한 카테고리로. category 는 짧은 명사구(입력 언어). 카테고리 수는 집합이 정하게 — 억지로 늘리거나 줄이지 마라.\n\n완성된 전체 원장(각 줄 맨 앞 [id] 로 배정):\n{{ledger}}\n\nDirective: \"{{directive}}\"\n\nFINAL message = ONLY this JSON.",
     "audit": "{{COMMON}}\n\nYOUR ROLE — AUDITOR (the backlog chunk's parent certification). The per-item badges are already set. Your job is NOT to re-judge items one by one — CERTIFY THE WHOLE ASSEMBLED SET (부품 아닌 전체): does this set, taken together, deliver the directive's goal completely and coherently? Judge four axes, give ONE verdict:\n  - 누락 (gaps): any make-or-break MISSING that the goal cannot stand without? List each (empty if none).\n  - 모순 (contradictions): any two requirements conflict so a builder is blocked until one is overruled? List each (empty if none).\n  - 충분 (sufficiency): assembled, does the set REACH the goal — not just cover the surface? State plainly whether it suffices and why.\n  - 운영 견고성 (operational robustness): 조립된 set 이 실제 운영을 견디나 — 동일 상태에 대한 동시/충돌 입력의 승자·불일치 조정, 규모에서의 findability(다수 중 하나 찾기), 의존 단계 부분실패의 폴백, 역할→보호동작 경계가 요건에 있나? happy-path·demo 규모·전부 성공 가정에만 서면 미완. 빠진 것 나열(empty if none).\nSet complete=true ONLY if no goal-breaking gaps, no unresolved contradictions, and the set genuinely suffices. verdict = one paragraph: what the assembled draft achieves and the single most important thing still missing or wrong (or \"완결\" if none). Do NOT pad. Stay inside the directive's stated scope.\n\ngaps is ALWAYS present: empty array when complete=true, one entry per missing make-or-break when false. A complete=false verdict REQUIRES gaps: every missing make-or-break becomes its own gaps entry — one line, the requirement the set lacks. Prose that describes the lack while leaving gaps empty is a broken deliverable; the correction loop can only act on gaps entries, never on prose.\n\nREMOVE (removals) — self-correction, not only addition: the loop must also eject what should not be there, or a human has to delete it by hand. Scan the ledger for items that are refuted/wrong, redundant with another item, or outside the directive's stated scope. Each such item = one removals entry {\"id\": the exact ledger id, \"reason\": why it goes}. Do NOT remove an item because it is small or you would word it differently — remove ONLY wrong/redundant/out-of-scope. Items already badged x were removed in a prior round (reason shown in the ledger) — do NOT re-flag them and do NOT re-add them as gaps. removals is ALWAYS present: empty array when nothing currently in the set is wrong. Consensus = a round with no gaps AND no removals.\n\nFull ledger (CERTIFY this whole):\n{{ledger}}\n\nDirective: \"{{directive}}\"\n\nDo any needed search first. FINAL message = ONLY this JSON.",
-    "draft-review": "{{COMMON}}\n\nYOUR ROLE — VERIFIER (hostile). CERTIFY THE WHOLE, not the parts. A part-by-part \"o\" does NOT mean the result works — certify the ASSEMBLED set delivers the goal. The generator is an LLM; DISTRUST the list. Run ALL EIGHT checks; request what each surfaces (→ additions, each a new requirement: title + description + category):\n  - GOAL-REACH: state, in your reasoning, what the result must ACHIEVE for the requester beneath the surface, then check the ledger reaches it. If the core outcome rests on an impossible/unverified premise, VERIFY it (search if external) and request the feasibility precondition. Never assume the premise holds.\n  - CONTRADICTION: mentally BUILD the whole toward that goal. Where two requirements conflict so a builder is BLOCKED until one is overruled, request the requirement that RESOLVES which wins.\n  - SEAM: where the JOIN between two requirements is owned by neither and a builder must GUESS a make-or-break decision, request the rule that OWNS the join.\n  - DEPTH: apply EXPERT STANCE + LEGAL LENS to every named/regulated requirement — does it state the SPECIFIC obligation/trigger the law compels, or stop at the category? If only the category, request the specific one.\n  - DOMAIN-FAILURE: as the senior practitioner, put the result as-built into ACTUAL use over time — beyond logical reach, what FAILS in PRACTICE that a part-by-part check misses? Request the make-or-break that prevents it. The boundary is necessity, not mention. A surface the directive never names is still in scope when the result cannot genuinely operate, or cannot be held to account, without it. Only what is merely nice to have stays out.\n  - ACTOR-SWEEP: walk every actor the result implies — its users, its counterparties, and above all the off-stage actor who runs it (by domain: the platform operator, live-ops, the deployer, or the administrator). Ask which actor the requester never played, and which of that actor's make-or-breaks are missing — including whether each has its OWN named surface, not only scattered capabilities.\n  - OPERATIONAL ROBUSTNESS: put the result under the REAL operating conditions the goal implies and request what a happy-path list omits — CONCURRENT or CONFLICTING inputs to the same state (which write wins, how a discrepancy between two sources of the same fact is reconciled), SCALE (finding one item among the many the result will hold — not only single-item views), PARTIAL FAILURE of a step the flow depends on (fallback/retry/degraded path so one failure does not strand the flow), and the ACTOR-ROLE boundary stated not assumed (which role may do each guarded action). A result that only holds on the happy path, at demo scale, with every step succeeding is not built for use.\n  - INPUT / ENTITY-CRUD: walk every DATA ENTITY the ledger references as stored, counted, classified, or edited (each such noun), and check that the set can CREATE, ENTER, EDIT, and LIST each — not only state rules ABOUT it. A rule about an entity (its constraint, its price, its identity) is NOT the surface that creates and maintains it. The MOST-MISSED requirement is the CENTRAL entity's own registration/entry surface — the one every other requirement revolves around — dropped because it seems too obvious to state; request it, and any other entity left with rules but no way to bring it into being. This is make-or-break, not a nice-to-have — the result cannot be operated without the surfaces that enter its own data.\nDo NOT request nice-to-haves. Do NOT re-request what the ledger covers (NO DUPLICATE — by MEANING). Additions are FLAT requirements (title + description + origin) — do NOT categorize; the classify step (which runs AFTER you) invents the dimension over the COMPLETE set. ZERO additions is the correct, expected answer for a complete ledger — a forced requirement is worse than none. Over-enumeration of nice-to-haves is failure, but a BORDERLINE load-bearing item should be added — a later round removes it if wrong.\n\nREMOVE (removals) — this is a LOOP to consensus, not a single pass: also EJECT what should not be there, or a human must. Scan the ledger for items refuted/wrong, redundant with another BY MEANING, or outside the directive's scope. Each = {\"id\": the exact ledger id, \"reason\": why it goes}. Items marked [x] in the ledger were removed in a prior round — do NOT re-add them. removals is ALWAYS present (empty array when nothing standing is wrong). The loop CONVERGES only when a round adds NOTHING and removes NOTHING — a real gap left unrequested is the worse failure, and over-reach is recoverable (a later round removes it).\n\nCONVERGENCE DISCIPLINE — you are on round {{round}} of this audit (hard limit 20 rounds). Treat THIS round as the one that must FINISH it: if you are past round 1, earlier rounds left gaps behind — do not dribble one or two more, find ALL remaining gaps in this single round at once. BIAS TOWARD COMPLETENESS — when an item is BORDERLINE load-bearing, ADD it: over-reach is recoverable because a later round removes what does not belong, but a genuine gap you leave out may never be found. Allowing borderline adds is what gives the loop something to prune. Equally, actively REMOVE what a prior round wrongly added. EVERY add and EVERY remove MUST carry its 근거 (reason): for an add, why it is load-bearing (cite external evidence where relevant); for a remove, why it does not belong. Items shown [x] (with their 제거사유) were taken out WITH a 근거 — that history is preserved so you can DELIBERATE, not to forbid you: you MAY re-raise a removed item, but ONLY with a 근거 that directly COUNTERS the reason it was removed (state that counter-근거 as its reason). Re-adding without countering the removal 근거 is oscillation — the loop's enemy. The signal you judged well is that the NEXT round changes NOTHING; if later rounds keep adding or removing what you touched, you were not thorough — you mis-judged. So think exhaustively now, both sides — everything to add AND everything to remove — and drive the loop to a no-change round. Do not dribble; do not pad to look busy.\n\nFull ledger (propose ONLY missing make-or-breaks; do NOT re-verify these):\n{{ledger}}\n\nDirective: \"{{directive}}\"\n\nDo any needed search first. FINAL message = ONLY this JSON."
+    "draft-review": "{{COMMON}}\n\nYOUR ROLE — CONSENSUS REVIEWER (완전성 합의 루프, round {{round}} of max 20).\n\nYou are given a DOCUMENT: a JSON list of items, each with a `state` (o=accepted, x=removed) and a full decision `history` (add/remove/reraise, each with its reason). Deliberate against it and output CHANGES; the loop repeats until a round makes no change (consensus).\n\nTHE DOCUMENT (items with history):\n{{document}}\n\nDirective: \"{{directive}}\"\n\nDELIBERATE over the requirements, then output changes[]:\n- ADD (op:add, title, description, reason) — every make-or-break still MISSING. Lenses: goal-reach · contradiction · seam(경계 소유) · depth(regulated → the SPECIFIC obligation) · domain-failure(what breaks in real use) · actor-sweep(every actor incl. the off-stage operator, each with its OWN named surface) · operational robustness(concurrency·scale/findability·partial failure·role boundary) · INPUT/ENTITY-CRUD(every stored data entity needs create/enter/edit/list; the central entity's registration is the most-missed — too obvious to state). BIAS TOWARD COMPLETENESS: when borderline load-bearing, ADD it — over-reach is corrected by a later remove; a gap left out may never be found (allowing borderline adds is what gives the loop something to prune).\n- REMOVE (op:remove, id, reason) — any accepted [o] item that is refuted/wrong, redundant with another BY MEANING, or outside the directive's scope. State why in reason.\n- RERAISE (op:reraise, id, reason) — a removed [x] item may be brought back ONLY with a reason that directly COUNTERS the reason it was removed (in its history). Re-raising on already-countered grounds is oscillation — forbidden.\n\nEVERY change MUST carry its reason (근거) — it is appended to the item's history. CONVERGENCE DISCIPLINE: this round must FINISH it — surface EVERY remaining change at once, do not dribble one or two per round; if you are past round 1, prior rounds left gaps, close them ALL now. If the NEXT round still changes what you touched, you mis-judged. When the set is complete and correct, output an EMPTY changes array — that is consensus. Do any needed search first.\n\nFINAL message = ONLY {\"changes\":[...]}."
   },
   "stages": {
     "": [
@@ -501,72 +541,13 @@
       {
         "op": "agent",
         "prompt": "draft-review",
-        "schema": "DRAFT_REVIEW_SCHEMA",
+        "schema": "CHANGES_SCHEMA",
         "label": "완전성 합의 루프",
-        "bind": "r"
-      },
-      {
-        "op": "forEach",
-        "in": "r.additions",
-        "when": "item.title",
-        "do": [
-          {
-            "op": "publish",
-            "node": {
-              "id": {
-                "auto": "add"
-              },
-              "kind": "item",
-              "parent": {
-                "$": "args.chunkRef",
-                "or": "chunk"
-              },
-              "title": {
-                "$": "item.title"
-              },
-              "description": {
-                "$": "item.description",
-                "or": ""
-              },
-              "origin": {
-                "$": "item.origin"
-              },
-              "badge": {
-                "$": "values.PENDING"
-              },
-              "schema": "VERIFY_SCHEMA",
-              "promptRole": "verify",
-              "vars": {
-                "title": {
-                  "$": "item.title"
-                },
-                "description": {
-                  "$": "item.description",
-                  "or": ""
-                }
-              },
-              "varRefs": {
-                "directive": "directive"
-              },
-              "registerPromptsOnce": {
-                "verify": {
-                  "$": "values.VERIFY_TMPL"
-                },
-                "directive": {
-                  "$": "args.directive"
-                }
-              }
-            }
-          }
-        ],
-        "collect": "reviewIds"
+        "bind": "a"
       },
       {
         "op": "publish",
-        "when": [
-          "r.additions",
-          "r.removals"
-        ],
+        "when": "a.changes",
         "node": {
           "id": "draft-review-again",
           "kind": "task",
@@ -576,19 +557,12 @@
             "or": "chunk"
           },
           "title": "재검(이견 잔존)",
-          "blockedBy": [
-            {
-              "$": "reviewIds"
-            }
-          ]
+          "blockedBy": []
         }
       },
       {
         "op": "publish",
-        "unless": [
-          "r.additions",
-          "r.removals"
-        ],
+        "unless": "a.changes",
         "node": {
           "id": "classify",
           "kind": "task",
@@ -597,19 +571,15 @@
             "$": "args.chunkRef",
             "or": "chunk"
           },
-          "title": "차원 배정",
-          "blockedBy": [
-            {
-              "$": "reviewIds"
-            }
-          ]
+          "title": "진행",
+          "blockedBy": []
         }
       },
       {
         "op": "return",
         "value": {
-          "removals": {
-            "$": "r.removals",
+          "changes": {
+            "$": "a.changes",
             "or": []
           }
         }

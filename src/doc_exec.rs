@@ -140,7 +140,8 @@ pub fn validate(doc: &Json) -> Result<(), Vec<String>> {
                     || ph == "ledger"
                     || ph == "facts"
                     || ph == "removed"
-                    || ph == "round";
+                    || ph == "round"
+                    || ph == "document";
                 if !known {
                     v.push(format!("[prompts] {pname:?} 플레이스홀더 {{{{{ph}}}}} 미해석(values/args/ledger 아님)"));
                 }
@@ -373,6 +374,10 @@ impl Scope<'_> {
                     Json::String(s) => s.clone(),
                     o => o.to_string(),
                 }).unwrap_or_else(|| "1".into()))
+            } else if ph == "document" {
+                // 확정 규약 — 항목 문서(items with history)를 JSON 정본 그대로. 렌더 없음.
+                let empty = Json::Array(vec![]);
+                Some(serde_json::to_string_pretty(self.args.get("ledger").unwrap_or(&empty)).unwrap_or_default())
             } else {
                 self.lookup(&ph)
                     .or_else(|| self.lookup(&format!("args.{ph}")))
@@ -1154,71 +1159,35 @@ mod tests {
         assert_eq!(br, json!({ "file": "src/inventory/deduct.ts" }));
     }
 
-    /// [번들 정본] 합의 루프 = 자기반복 단일 review. 이견(add·remove 어느 하나) 있으면 같은 스테이지를
-    /// 재발행(루프), add·remove 둘 다 0이면 다음 스테이지(수렴). research-audit·design-audit 동형(하나 재사용).
+    /// [번들 정본] 확정 문서 규약 — review 는 changes[] 를 낸다. changes 비면 다음 스테이지(수렴), 있으면
+    /// 자기재발행. {{document}} 로 items(history 포함) JSON 을 읽는다. draft-review·research-audit·design-audit 동형.
     #[test]
-    fn bundled_review_loop_selfloops_until_consensus() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "d", "chunkRef": "K-7",
-            "facts": [{ "id": "f0", "title": "t", "badge": "o", "category": "framework" }] });
+    fn bundled_review_loop_changes_model() {
         let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        for (stage, onconv) in [("research-audit", "design-interface"), ("design-audit", "plan")] {
-            // 이견0(add·remove 둘 다 0) → 다음 스테이지 수렴, 자기재발행 없음.
-            let mut ac = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
-            let (e, _) = run(&doc, stage, &args, &mut ac).unwrap();
-            assert!(stages(&e).iter().any(|x| x == onconv), "{stage}: 이견0 → {onconv} 수렴: {:?}", stages(&e));
-            assert!(!stages(&e).iter().any(|x| x == stage), "{stage}: 이견0 이면 자기재발행 없음");
-            // add 있음 → 같은 스테이지 자기재발행(루프), 진행 금지.
-            let mut aa = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "새 갭", "description": "", "area": "framework", "origin": "agent" }], "removals": [] }));
-            let (e2, _) = run(&doc, stage, &args, &mut aa).unwrap();
-            assert!(stages(&e2).iter().any(|x| x == stage), "{stage}: add 있으면 자기재발행(루프): {:?}", stages(&e2));
-            assert!(!stages(&e2).iter().any(|x| x == onconv), "{stage}: 변경 있으면 진행 금지");
-            // remove 만 있어도 이견 → 자기재발행(when 배열 OR 결합).
-            let mut ar = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "f0", "reason": "범위밖" }] }));
-            let (e3, _) = run(&doc, stage, &args, &mut ar).unwrap();
-            assert!(stages(&e3).iter().any(|x| x == stage), "{stage}: remove 만 있어도 자기재발행: {:?}", stages(&e3));
-        }
-    }
-
-    /// [번들 정본] draft 도 동일 자기반복 루프 — generate 뒤 draft-review 가 이견0까지 자기재발행, 수렴 시 classify.
-    /// hunt+audit(단일 패스) 를 대체.
-    #[test]
-    fn bundled_draft_review_selfloops_until_consensus() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/draft.doc.json")).unwrap();
-        let args = json!({ "directive": "d", "chunkRef": "chunk",
-            "ledger": [{ "id": "i0", "title": "t", "badge": "o" }] });
-        let stages = |ev: &[NodeEvent]| ev.iter().filter_map(|NodeEvent::Add { stage, .. }| stage.clone()).collect::<Vec<_>>();
-        // 이견0 → classify 수렴, 자기재발행 없음.
-        let mut ac = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [] }));
-        let (e, _) = run(&doc, "draft-review", &args, &mut ac).unwrap();
-        assert!(stages(&e).iter().any(|x| x == "classify"), "이견0 → classify 수렴: {:?}", stages(&e));
-        assert!(!stages(&e).iter().any(|x| x == "draft-review"), "이견0 이면 자기재발행 없음");
-        // add 있음 → draft-review 자기재발행, classify 진행 금지.
-        let mut aa = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [{ "title": "약 등록면", "description": "", "origin": "agent" }], "removals": [] }));
-        let (e2, _) = run(&doc, "draft-review", &args, &mut aa).unwrap();
-        assert!(stages(&e2).iter().any(|x| x == "draft-review"), "add 있으면 자기재발행: {:?}", stages(&e2));
-        assert!(!stages(&e2).iter().any(|x| x == "classify"), "변경 있으면 진행 금지");
-        // remove 만 있어도 자기재발행.
-        let mut ar = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [], "removals": [{ "id": "i0", "reason": "범위밖" }] }));
-        let (e3, _) = run(&doc, "draft-review", &args, &mut ar).unwrap();
-        assert!(stages(&e3).iter().any(|x| x == "draft-review"), "remove 만 있어도 자기재발행: {:?}", stages(&e3));
-    }
-
-    /// [번들 정본] 합의 루프 remove — reviewer removals 를 stage return 이 통과(reconcile 가 badge→x). research·design.
-    #[test]
-    fn bundled_review_loop_returns_removals() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "d", "chunkRef": "K-7",
-            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
-        let mut agent = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({
-            "additions": [], "removals": [{ "id": "fact0", "reason": "지시서 범위밖 — 자기교정" }]
-        }));
-        for stage in ["research-audit", "design-audit"] {
-            let (_ev, ret) = run(&doc, stage, &args, &mut agent).expect(stage);
-            let removals = ret.get("removals").and_then(|r| r.as_array())
-                .unwrap_or_else(|| panic!("{stage}: return 에 removals 없음: {ret}"));
-            assert_eq!(removals.len(), 1, "{stage}: removals 통과");
-            assert_eq!(removals[0]["id"], "fact0", "{stage}: 대상 id 보존");
+        let research: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
+        let draft: Json = serde_json::from_str(include_str!("../workflows/draft.doc.json")).unwrap();
+        for (doc, stage, onconv) in [
+            (&research, "research-audit", "design-interface"),
+            (&research, "design-audit", "plan"),
+            (&draft, "draft-review", "classify"),
+        ] {
+            let args = json!({ "directive": "d", "chunkRef": "chunk",
+                "ledger": [{ "id": "x0", "state": "o", "title": "t", "description": "", "history": [] }] });
+            // changes 비면 → onConverge 수렴, 자기재발행 없음. {{document}} 가 items JSON 렌더.
+            let mut empty = |p: &str, _s: Option<&Json>, _l: &str| {
+                assert!(p.contains("CONSENSUS REVIEWER"), "{stage}: reviewer 프롬프트");
+                assert!(p.contains("\"x0\""), "{stage}: document 가 items JSON 렌더: {p}");
+                Ok(json!({ "changes": [] }))
+            };
+            let (e, ret) = run(doc, stage, &args, &mut empty).unwrap();
+            assert!(stages(&e).iter().any(|x| x == onconv), "{stage}: changes 0 → {onconv} 수렴: {:?}", stages(&e));
+            assert!(!stages(&e).iter().any(|x| x == stage), "{stage}: 수렴이면 자기재발행 없음");
+            assert!(ret.get("changes").and_then(|c| c.as_array()).is_some(), "{stage}: changes return");
+            // changes 있으면 → 자기재발행, 진행 금지.
+            let mut ch = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "changes": [{ "op": "add", "title": "g", "reason": "r" }] }));
+            let (e2, _) = run(doc, stage, &args, &mut ch).unwrap();
+            assert!(stages(&e2).iter().any(|x| x == stage), "{stage}: changes 있으면 자기재발행: {:?}", stages(&e2));
+            assert!(!stages(&e2).iter().any(|x| x == onconv), "{stage}: 이견 있으면 진행 금지");
         }
     }
 
@@ -1288,27 +1257,6 @@ mod tests {
         assert_eq!(removals.len(), 1);
         assert_eq!(removals[0]["id"], "u1");
         assert_eq!(removals[0]["reason"], "지시서 범위밖 유닛 — 자기교정");
-    }
-
-    /// [번들 정본] 합의 루프 히스토리 채널 — audit 프롬프트의 {{removed}} 가 이미 뺀 fact 를 사유와 함께
-    /// 렌더한다(다음 라운드가 되돌려 넣지 않게). 미주입(첫 라운드)이면 빈 문자열로 안전.
-    #[test]
-    fn bundled_audit_removed_history_renders_into_prompt() {
-        let doc: Json = serde_json::from_str(include_str!("../workflows/research.doc.json")).unwrap();
-        let args = json!({ "directive": "d", "chunkRef": "K-7",
-            "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }],
-            "removed": [{ "id": "fact9", "title": "역할 경계 중복 사실", "reason": "fact3 과 중복 — 자기교정" }] });
-        let mut agent = |p: &str, _s: Option<&Json>, _l: &str| {
-            assert!(p.contains("역할 경계 중복 사실"), "{{{{removed}}}} 가 뺀 fact 제목 렌더: {p}");
-            assert!(p.contains("fact3 과 중복"), "제거 사유도 렌더(진동 차단 근거)");
-            assert!(p.contains("do NOT re-add"), "되돌림 금지 지시 존재");
-            Ok(json!({ "additions": [], "removals": [] }))
-        };
-        run(&doc, "research-audit", &args, &mut agent).expect("render");
-        // 미주입(첫 라운드)이어도 안전 — {{removed}} 빈 문자열, 에러 없음.
-        let args0 = json!({ "directive": "d", "chunkRef": "K-7", "facts": [{ "id": "fact0", "title": "t", "badge": "o", "category": "framework" }] });
-        let mut agent0 = |_p: &str, _s: Option<&Json>, _l: &str| Ok(json!({ "additions": [] }));
-        run(&doc, "research-audit", &args0, &mut agent0).expect("미주입도 렌더 성공");
     }
 
     /// [번들 정본] workflows/draft.doc.json — 정련 주입(inject_refinement) 후 유효 doc 이 되는지.
