@@ -405,14 +405,21 @@ fn ledger_view(args: &Json, key: &str) -> String {
             let cat = g("category");
             let vv = g("verified_value");
             let desc = g("description");
+            // [x](제거됨) 항목은 제거사유(result)를 함께 렌더 — reviewer 가 근거를 보고 반박(재상정) 판단.
+            let removed_why = if badge == "x" && !g("result").is_empty() {
+                format!(" | 제거사유: {}", g("result"))
+            } else {
+                String::new()
+            };
             format!(
-                "- [{}] [{}]{} {}{}{}",
+                "- [{}] [{}]{} {}{}{}{}",
                 g("id"),
                 badge,
                 if cat.is_empty() { String::new() } else { format!(" ({cat})") },
                 g("title"),
                 if desc.is_empty() { String::new() } else { format!(" — {desc}") },
-                if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") }
+                if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") },
+                removed_why
             )
         })
         .collect::<Vec<_>>()
