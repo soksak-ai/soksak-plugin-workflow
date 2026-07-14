@@ -139,7 +139,6 @@ pub fn validate(doc: &Json) -> Result<(), Vec<String>> {
                     || args_decl.is_some_and(|m| m.contains_key(&ph))
                     || ph == "ledger"
                     || ph == "facts"
-                    || ph == "removed"
                     || ph == "round"
                     || ph == "document";
                 if !known {
@@ -367,8 +366,6 @@ impl Scope<'_> {
                 Some(ledger_view(&self.args, "ledger"))
             } else if ph == "facts" {
                 Some(ledger_view(&self.args, "facts"))
-            } else if ph == "removed" {
-                Some(removed_view(&self.args))
             } else if ph == "round" {
                 Some(self.args.get("round").map(|v| match v {
                     Json::String(s) => s.clone(),
@@ -410,43 +407,14 @@ fn ledger_view(args: &Json, key: &str) -> String {
             let cat = g("category");
             let vv = g("verified_value");
             let desc = g("description");
-            // [x](제거됨) 항목은 제거사유(result)를 함께 렌더 — reviewer 가 근거를 보고 반박(재상정) 판단.
-            let removed_why = if badge == "x" && !g("result").is_empty() {
-                format!(" | 제거사유: {}", g("result"))
-            } else {
-                String::new()
-            };
             format!(
-                "- [{}] [{}]{} {}{}{}{}",
+                "- [{}] [{}]{} {}{}{}",
                 g("id"),
                 badge,
                 if cat.is_empty() { String::new() } else { format!(" ({cat})") },
                 g("title"),
                 if desc.is_empty() { String::new() } else { format!(" — {desc}") },
-                if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") },
-                removed_why
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// removed_view — 합의 루프 히스토리 채널({{removed}}=args.removed). 이미 뺀 fact 를 사유와 함께 렌더해
-/// 다음 라운드가 되돌려 넣지(re-add) 않게 한다. 없으면 빈 문자열(첫 라운드·미주입 안전).
-fn removed_view(args: &Json) -> String {
-    let Some(items) = args.get("removed").and_then(|l| l.as_array()) else {
-        return String::new();
-    };
-    items
-        .iter()
-        .map(|t| {
-            let g = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("");
-            let reason = g("reason");
-            format!(
-                "- [{}] {}{}",
-                g("id"),
-                g("title"),
-                if reason.is_empty() { String::new() } else { format!(" — 제거 사유: {reason}") }
+                if vv.is_empty() { String::new() } else { format!(" | 근거: {vv}") }
             )
         })
         .collect::<Vec<_>>()

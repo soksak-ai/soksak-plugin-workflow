@@ -240,62 +240,6 @@
         }
       }
     },
-    "DRAFT_REVIEW_SCHEMA": {
-      "type": "object",
-      "required": [
-        "additions"
-      ],
-      "properties": {
-        "additions": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": [
-              "title",
-              "description",
-              "origin",
-              "reason"
-            ],
-            "properties": {
-              "title": {
-                "type": "string"
-              },
-              "description": {
-                "type": "string"
-              },
-              "origin": {
-                "type": "string",
-                "enum": [
-                  "agent",
-                  "search"
-                ]
-              },
-              "reason": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        "removals": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": [
-              "id",
-              "reason"
-            ],
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "reason": {
-                "type": "string"
-              }
-            }
-          }
-        }
-      }
-    },
     "CHANGES_SCHEMA": {
       "type": "object",
       "required": [
