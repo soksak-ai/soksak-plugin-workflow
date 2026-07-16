@@ -17,18 +17,30 @@
     "process"
   ],
   "consumes": [
-    "soksak-spec-plugin-issue-board",
-    "soksak-spec-plugin-prompt-store"
+    {
+      "id": "soksak-spec-plugin-issue-board",
+      "range": "0.0.1"
+    },
+    {
+      "id": "soksak-spec-plugin-prompt-store",
+      "range": "0.0.1"
+    }
   ],
   "sidecars": [
     {
       "name": "workflow",
-      \"interface\": { \"id\": \"soksak-spec-sidecar-workflow\", \"range\": \"0.0.1\" }
+      "interface": {
+        "id": "soksak-spec-sidecar-workflow",
+        "range": "0.0.1"
+      }
     }
   ],
   "service": {
     "sidecar": "workflow",
-    \"interface\": { \"id\": \"soksak-spec-service\", \"range\": \"0.0.1\" },
+    "interface": {
+      "id": "soksak-spec-service",
+      "range": "0.0.1"
+    },
     "subscribe": [
       "bus:issue-board:changed"
     ]
