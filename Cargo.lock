@@ -82,27 +82,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "soksak-protocol"
-version = "0.0.1"
-
-[[package]]
-name = "soksak-service-proto"
-version = "0.0.1"
-dependencies = [
- "serde",
- "serde_json",
- "soksak-protocol",
-]
-
-[[package]]
 name = "soksak-sidecar-workflow"
 version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
- "soksak-service-proto",
+ "soksak-spec-service",
  "wait-timeout",
 ]
+
+[[package]]
+name = "soksak-spec-service"
+version = "0.0.1"
+source = "git+https://github.com/soksak-ai/soksak.git?branch=main#a3d85185ea2bc743c71ab67748725bd833db41b6"
+dependencies = [
+ "serde",
+ "serde_json",
+ "soksak-spec-socket",
+]
+
+[[package]]
+name = "soksak-spec-socket"
+version = "0.0.1"
+source = "git+https://github.com/soksak-ai/soksak.git?branch=main#a3d85185ea2bc743c71ab67748725bd833db41b6"
 
 [[package]]
 name = "syn"

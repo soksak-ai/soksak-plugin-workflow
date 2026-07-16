@@ -6,7 +6,7 @@
 //! 보드는 계약으로 발견한다(consumes) — 구현체 이름은 이 파일 어디에도 없다.
 
 use serde_json::{json, Map, Value};
-use soksak_service_proto::{serve_stdio, Emit, ErrCode, OpCtx, Outcome, ServiceHandler};
+use soksak_spec_service::{serve_stdio, Emit, ErrCode, OpCtx, Outcome, ServiceHandler};
 use std::collections::HashMap;
 use std::sync::Mutex;
 

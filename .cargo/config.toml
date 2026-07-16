@@ -1,0 +1,5 @@
+# 코어 wire 크레이트(soksak-spec-service)는 private 코어 repo 에서 git 의존으로 가져온다
+# (crates.io 발행은 성숙 후 — DEPLOY.md). cargo 의 git fetch 를 시스템 git 자격증명에 위임해야
+# private repo 인증이 성립한다: 로컬은 개발자의 git 자격, CI 는 checkout 토큰(GH_TOKEN)을 쓴다.
+[net]
+git-fetch-with-cli = true
