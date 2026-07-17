@@ -2,7 +2,7 @@
   "name": "soksak-plugin-workflow",
   "private": true,
   "type": "module",
-  "description": "soksak workflow plugin — the JS half: the issue ledger (lease/receipts/drift) and its blocking gates",
+  "description": "soksak workflow plugin \u2014 the JS half: the issue ledger (lease/receipts/drift) and its blocking gates",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
@@ -10,5 +10,12 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.2"
+  },
+  "version": "0.0.1",
+  "soksakRelease": {
+    "kind": "plugin",
+    "id": "soksak-plugin-workflow",
+    "repository": "https://github.com/soksak-ai/soksak-plugin-workflow",
+    "manifest": "release.json"
   }
 }

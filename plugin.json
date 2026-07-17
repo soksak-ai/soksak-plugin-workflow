@@ -3,7 +3,7 @@
   "id": "soksak-plugin-workflow",
   "name": "Workflow",
   "version": "0.0.1",
-  "description": "드래프트 파이프라인 — 아이디어를 LLM 저작 워크플로로 이슈 보드의 노드 DAG 에 발행하고, 코어 스케줄러 reconcile 로 실행·추적한다. item=exec-one 검증(badge o/x/f), task=exec-stage(generate/hunt/classify/audit 실행·자식 발행), blockedBy 의존.",
+  "description": "\ub4dc\ub798\ud504\ud2b8 \ud30c\uc774\ud504\ub77c\uc778 \u2014 \uc544\uc774\ub514\uc5b4\ub97c LLM \uc800\uc791 \uc6cc\ud06c\ud50c\ub85c\ub85c \uc774\uc288 \ubcf4\ub4dc\uc758 \ub178\ub4dc DAG \uc5d0 \ubc1c\ud589\ud558\uace0, \ucf54\uc5b4 \uc2a4\ucf00\uc904\ub7ec reconcile \ub85c \uc2e4\ud589\u00b7\ucd94\uc801\ud55c\ub2e4. item=exec-one \uac80\uc99d(badge o/x/f), task=exec-stage(generate/hunt/classify/audit \uc2e4\ud589\u00b7\uc790\uc2dd \ubc1c\ud589), blockedBy \uc758\uc874.",
   "entry": "main.js",
   "permissions": [
     "service",
@@ -50,24 +50,24 @@
       {
         "name": "run",
         "title": {
-          "ko": "워크플로를 발행합니다",
+          "ko": "\uc6cc\ud06c\ud50c\ub85c\ub97c \ubc1c\ud589\ud569\ub2c8\ub2e4",
           "en": "Publishes the workflow"
         },
         "bind": "service",
         "description": "Publish a workflow DAG to the issue board from an idea or a pre-authored skeleton. Give `idea` to have the provider author a skeleton (LLM), or `skeleton` (a JSON-serialized workflow-doc) to publish directly with no LLM. Returns the published node summary.",
         "triggers": {
-          "ko": "워크플로 발행 실행 아이디어 시작"
+          "ko": "\uc6cc\ud06c\ud50c\ub85c \ubc1c\ud589 \uc2e4\ud589 \uc544\uc774\ub514\uc5b4 \uc2dc\uc791"
         },
         "params": {
           "idea": {
             "type": "string",
             "required": false,
-            "description": "Idea text — the provider authors a skeleton from it (LLM). Mutually exclusive with skeleton; one is required."
+            "description": "Idea text \u2014 the provider authors a skeleton from it (LLM). Mutually exclusive with skeleton; one is required."
           },
           "skeleton": {
             "type": "string",
             "required": false,
-            "description": "Pre-authored workflow-doc as a JSON string — published directly, no LLM. Mutually exclusive with idea."
+            "description": "Pre-authored workflow-doc as a JSON string \u2014 published directly, no LLM. Mutually exclusive with idea."
           },
           "directive": {
             "type": "string",
@@ -85,13 +85,13 @@
       {
         "name": "ping",
         "title": {
-          "ko": "프로바이더 상태를 점검합니다",
+          "ko": "\ud504\ub85c\ubc14\uc774\ub354 \uc0c1\ud0dc\ub97c \uc810\uac80\ud569\ub2c8\ub2e4",
           "en": "Probes the provider"
         },
         "bind": "service",
         "description": "Probe the LLM provider end to end by running one exec-one judgement, confirming auth and reachability. Returns the verdict oxf.",
         "triggers": {
-          "ko": "프로바이더 점검 상태 확인 헬스"
+          "ko": "\ud504\ub85c\ubc14\uc774\ub354 \uc810\uac80 \uc0c1\ud0dc \ud655\uc778 \ud5ec\uc2a4"
         },
         "params": {},
         "returns": "{ ok, oxf }"
@@ -99,13 +99,13 @@
       {
         "name": "reconcile",
         "title": {
-          "ko": "준비된 워크플로 노드를 실행합니다",
+          "ko": "\uc900\ube44\ub41c \uc6cc\ud06c\ud50c\ub85c \ub178\ub4dc\ub97c \uc2e4\ud589\ud569\ub2c8\ub2e4",
           "en": "Runs ready workflow nodes"
         },
         "bind": "service",
-        "description": "Advance the DAG one reconcile tick: run every ready node (item=exec-one verify, task=exec-stage), publish children, stamp badges, and poke for the next tick. Idempotent — a spent tick is a no-op. The reconcile schedule fires this.",
+        "description": "Advance the DAG one reconcile tick: run every ready node (item=exec-one verify, task=exec-stage), publish children, stamp badges, and poke for the next tick. Idempotent \u2014 a spent tick is a no-op. The reconcile schedule fires this.",
         "triggers": {
-          "ko": "실행 진행 틱 조정"
+          "ko": "\uc2e4\ud589 \uc9c4\ud589 \ud2f1 \uc870\uc815"
         },
         "params": {},
         "returns": "{ ran, published, ... }"
@@ -113,13 +113,13 @@
       {
         "name": "research",
         "title": {
-          "ko": "조사 워크플로를 발행합니다",
+          "ko": "\uc870\uc0ac \uc6cc\ud06c\ud50c\ub85c\ub97c \ubc1c\ud589\ud569\ub2c8\ub2e4",
           "en": "Publishes the research workflow"
         },
         "bind": "service",
-        "description": "Publish the research workflow for a plan chunk — gathers evidence (facts) before the plan turn. Requires the chunk to have passed its research gate.",
+        "description": "Publish the research workflow for a plan chunk \u2014 gathers evidence (facts) before the plan turn. Requires the chunk to have passed its research gate.",
         "triggers": {
-          "ko": "조사 리서치 발행"
+          "ko": "\uc870\uc0ac \ub9ac\uc11c\uce58 \ubc1c\ud589"
         },
         "params": {
           "chunk": {
@@ -133,13 +133,13 @@
       {
         "name": "issuerize",
         "title": {
-          "ko": "계획을 개발 이슈로 승격합니다",
+          "ko": "\uacc4\ud68d\uc744 \uac1c\ubc1c \uc774\uc288\ub85c \uc2b9\uaca9\ud569\ub2c8\ub2e4",
           "en": "Promotes plans to issues"
         },
         "bind": "service",
         "description": "Promote a confirmed plan chunk into development issues (unlock issues). Requires the chunk's audit to have passed.",
         "triggers": {
-          "ko": "이슈 승격 발행 계획"
+          "ko": "\uc774\uc288 \uc2b9\uaca9 \ubc1c\ud589 \uacc4\ud68d"
         },
         "params": {
           "chunk": {
@@ -153,13 +153,13 @@
       {
         "name": "next",
         "title": {
-          "ko": "검증 노드의 실행 패키지를 발급합니다",
+          "ko": "\uac80\uc99d \ub178\ub4dc\uc758 \uc2e4\ud589 \ud328\ud0a4\uc9c0\ub97c \ubc1c\uae09\ud569\ub2c8\ub2e4",
           "en": "Issues a verification work package"
         },
         "bind": "service",
         "description": "Issue the next work package for an external executor (pull v2): the {prompt, schema} for a verification node or an authoring turn, leased so the spawn path skips it. Optionally scoped to a chunk.",
         "triggers": {
-          "ko": "다음 패키지 발급 검증"
+          "ko": "\ub2e4\uc74c \ud328\ud0a4\uc9c0 \ubc1c\uae09 \uac80\uc99d"
         },
         "params": {
           "chunk": {
@@ -173,13 +173,13 @@
       {
         "name": "submit",
         "title": {
-          "ko": "검증 판정을 제출합니다",
+          "ko": "\uac80\uc99d \ud310\uc815\uc744 \uc81c\ucd9c\ud569\ub2c8\ub2e4",
           "en": "Submits a verification verdict"
         },
         "bind": "service",
-        "description": "Submit an external executor's output for a node — extracted into the same pipe as the spawn path (oxf verdict -> badge/result -> poke). No retry latitude: submission is an explicit act.",
+        "description": "Submit an external executor's output for a node \u2014 extracted into the same pipe as the spawn path (oxf verdict -> badge/result -> poke). No retry latitude: submission is an explicit act.",
         "triggers": {
-          "ko": "제출 판정 검증"
+          "ko": "\uc81c\ucd9c \ud310\uc815 \uac80\uc99d"
         },
         "params": {
           "node": {
@@ -198,13 +198,13 @@
       {
         "name": "export",
         "title": {
-          "ko": "확정 코드를 파일로 내보냅니다",
+          "ko": "\ud655\uc815 \ucf54\ub4dc\ub97c \ud30c\uc77c\ub85c \ub0b4\ubcf4\ub0c5\ub2c8\ub2e4",
           "en": "Exports confirmed code to files"
         },
         "bind": "service",
         "description": "Write a chunk's confirmed code to files under `dir`. Materializes the ledger and emits each confirmed body to its path.",
         "triggers": {
-          "ko": "내보내기 익스포트 파일 확정"
+          "ko": "\ub0b4\ubcf4\ub0b4\uae30 \uc775\uc2a4\ud3ec\ud2b8 \ud30c\uc77c \ud655\uc815"
         },
         "params": {
           "chunk": {
@@ -223,49 +223,49 @@
       {
         "name": "entry.add",
         "title": {
-          "ko": "이슈를 원장에 등록합니다",
+          "ko": "\uc774\uc288\ub97c \uc6d0\uc7a5\uc5d0 \ub4f1\ub85d\ud569\ub2c8\ub2e4",
           "en": "Puts an issue on the ledger"
         }
       },
       {
         "name": "lease.acquire",
         "title": {
-          "ko": "이슈 디스패치 리스를 취득합니다",
+          "ko": "\uc774\uc288 \ub514\uc2a4\ud328\uce58 \ub9ac\uc2a4\ub97c \ucde8\ub4dd\ud569\ub2c8\ub2e4",
           "en": "Takes the dispatch lease on an issue"
         }
       },
       {
         "name": "lease.renew",
         "title": {
-          "ko": "보유한 리스를 갱신합니다",
+          "ko": "\ubcf4\uc720\ud55c \ub9ac\uc2a4\ub97c \uac31\uc2e0\ud569\ub2c8\ub2e4",
           "en": "Extends a lease you hold"
         }
       },
       {
         "name": "lease.release",
         "title": {
-          "ko": "보유한 리스를 해제합니다",
+          "ko": "\ubcf4\uc720\ud55c \ub9ac\uc2a4\ub97c \ud574\uc81c\ud569\ub2c8\ub2e4",
           "en": "Releases a lease you hold"
         }
       },
       {
         "name": "lease.list",
         "title": {
-          "ko": "원장 항목을 조회합니다",
+          "ko": "\uc6d0\uc7a5 \ud56d\ubaa9\uc744 \uc870\ud68c\ud569\ub2c8\ub2e4",
           "en": "Lists the ledger entries"
         }
       },
       {
         "name": "receipt.add",
         "title": {
-          "ko": "검증 가능한 증적을 기록합니다",
+          "ko": "\uac80\uc99d \uac00\ub2a5\ud55c \uc99d\uc801\uc744 \uae30\ub85d\ud569\ub2c8\ub2e4",
           "en": "Records verifiable evidence"
         }
       },
       {
         "name": "entry.remove",
         "title": {
-          "ko": "원장 항목을 삭제합니다",
+          "ko": "\uc6d0\uc7a5 \ud56d\ubaa9\uc744 \uc0ad\uc81c\ud569\ub2c8\ub2e4",
           "en": "Drops a ledger entry"
         },
         "danger": "destructive"
@@ -273,28 +273,28 @@
       {
         "name": "board.sync",
         "title": {
-          "ko": "원장을 이슈 보드에 투영합니다",
+          "ko": "\uc6d0\uc7a5\uc744 \uc774\uc288 \ubcf4\ub4dc\uc5d0 \ud22c\uc601\ud569\ub2c8\ub2e4",
           "en": "Projects the ledger onto the issue board"
         }
       },
       {
         "name": "gate.dispatch",
         "title": {
-          "ko": "리스 보유를 디스패치 게이트로 검사합니다",
+          "ko": "\ub9ac\uc2a4 \ubcf4\uc720\ub97c \ub514\uc2a4\ud328\uce58 \uac8c\uc774\ud2b8\ub85c \uac80\uc0ac\ud569\ub2c8\ub2e4",
           "en": "Gates a dispatch on a live lease"
         }
       },
       {
         "name": "gate.transition",
         "title": {
-          "ko": "증적을 완료 전이 게이트로 검사합니다",
+          "ko": "\uc99d\uc801\uc744 \uc644\ub8cc \uc804\uc774 \uac8c\uc774\ud2b8\ub85c \uac80\uc0ac\ud569\ub2c8\ub2e4",
           "en": "Gates a transition on evidence"
         }
       },
       {
         "name": "drift.check",
         "title": {
-          "ko": "원장과 저장소의 어긋남을 보고합니다",
+          "ko": "\uc6d0\uc7a5\uacfc \uc800\uc7a5\uc18c\uc758 \uc5b4\uae0b\ub0a8\uc744 \ubcf4\uace0\ud569\ub2c8\ub2e4",
           "en": "Reports ledger-vs-repository drift"
         }
       }
@@ -317,10 +317,10 @@
       {
         "id": "ledger",
         "title": {
-          "ko": "원장",
+          "ko": "\uc6d0\uc7a5",
           "en": "Ledger"
         },
-        "icon": "▤",
+        "icon": "\u25a4",
         "placements": [
           "sidebar-right",
           "content"
@@ -338,28 +338,28 @@
       {
         "id": "refresh",
         "description": {
-          "ko": "새로고침 버튼",
+          "ko": "\uc0c8\ub85c\uace0\uce68 \ubc84\ud2bc",
           "en": "Refresh button"
         }
       },
       {
         "id": "check",
         "description": {
-          "ko": "드리프트 검사 버튼",
+          "ko": "\ub4dc\ub9ac\ud504\ud2b8 \uac80\uc0ac \ubc84\ud2bc",
           "en": "Drift check button"
         }
       },
       {
         "id": "entry",
         "description": {
-          "ko": "원장 항목 행. data-node=\"entry/<키>\"",
+          "ko": "\uc6d0\uc7a5 \ud56d\ubaa9 \ud589. data-node=\"entry/<\ud0a4>\"",
           "en": "Ledger entry row. data-node=\"entry/<key>\""
         }
       },
       {
         "id": "drift",
         "description": {
-          "ko": "드리프트 행. data-node=\"drift/<키>\"",
+          "ko": "\ub4dc\ub9ac\ud504\ud2b8 \ud589. data-node=\"drift/<\ud0a4>\"",
           "en": "Drift row. data-node=\"drift/<key>\""
         }
       }
