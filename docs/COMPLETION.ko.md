@@ -3,6 +3,10 @@
 build-directives 작업의 범위와 완료 정의의 단일 진실입니다. 목록 밖을 완료라 부르지 않고,
 목록 안을 조용히 건너뛰지 않습니다. 임계 약화는 원칙 6 위반입니다.
 
+Grounding: Rust 엔진은 사이드카 정본 repo `soksak-sidecar-workflow` 에 있고, 이 repo 는 이제 순수
+JS 다. 여기 나오는 `src/…`·`workflows/…`·`references/…`·`e2e/…`·`tools/…` 경로는 그 사이드카
+repo 를 가리킨다.
+
 ## 1. 개발 대상
 | # | 산출물 | 위치 |
 |---|---|---|

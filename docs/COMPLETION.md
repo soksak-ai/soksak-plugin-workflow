@@ -5,6 +5,10 @@ Nothing outside this list is called done; nothing on it is skipped silently. Wea
 criterion violates PRINCIPLES rule 6 — if a criterion is wrong, correct this document in an
 explicit commit.
 
+Grounding: the Rust engine lives in the sidecar repo `soksak-sidecar-workflow` (canonical); this
+repo is now pure JS. Any `src/…`, `workflows/…`, `references/…`, `e2e/…`, or `tools/…` path named
+here refers to that sidecar repo.
+
 ## 1. Deliverables
 
 | # | Deliverable | Where |

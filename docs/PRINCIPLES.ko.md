@@ -4,6 +4,10 @@
 규칙이 어긋나면 코드를 고칩니다. 규칙 자체가 틀렸으면 조용히 완화하지 말고 이 문서를 명시적
 커밋으로 정정합니다.
 
+Grounding: Rust 엔진은 사이드카 정본 repo `soksak-sidecar-workflow` 에 있고, 이 repo 는 이제 순수
+JS 다. 여기 나오는 `src/…`·`workflows/…`·`references/…`·`e2e/…`·`tools/…` 경로는 그 사이드카
+repo 를 가리킨다.
+
 ## 1. directive 단일 진실
 저작 게이트를 통과한 정련본이 정본입니다. 사람이 보는 표면(보드의 덩어리 설명)과 기계가 쓰는
 검증 기준(exec 주입 directive)은 같은 문자열이어야 합니다. 유일한 예외는 사용자가 명시로 준

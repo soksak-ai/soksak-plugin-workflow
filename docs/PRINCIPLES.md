@@ -4,6 +4,10 @@ These rules bind every implementation and change in this repository. Rules come 
 follows them. When code and a rule disagree, fix the code. When the rule itself is wrong, do
 not quietly relax it — correct this document in an explicit commit.
 
+Grounding: the Rust engine lives in the sidecar repo `soksak-sidecar-workflow` (canonical); this
+repo is now pure JS. Any `src/…`, `workflows/…`, `references/…`, `e2e/…`, or `tools/…` path named
+here refers to that sidecar repo.
+
 ## 1. Directive single source of truth
 
 The refined directive that passed the authoring gate is canonical. The human-facing surface
