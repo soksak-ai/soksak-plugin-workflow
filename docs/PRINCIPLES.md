@@ -84,8 +84,8 @@ An injected ledger or `{{facts}}` ground carries **o-confirmed entries only** wh
 BUILDS on it (design chain, plan, body). f (fatal) and x (rejected) entries are not ground —
 injecting them hands the model a contradictory foundation (measured: a plan turn fed 111
 mixed-badge facts emitted one garbage unit; the same turn on o-only ground emitted 39 real
-file units). Stages that need the full ledger for their own duty keep it: hunt (duplicate
-avoidance), classify (assign everything), audit (f tally).
+file units). Stages that need the full ledger for their own duty keep it: classify (assign
+everything), audit (f tally).
 
 ## 13. Two-axis certification at every layer
 

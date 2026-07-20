@@ -22,8 +22,8 @@ repo 를 가리킨다.
   x3)→hunt(+3)→classify→audit 인증(부결→재감사 1회)→fact 111(research+design 체인)→plan 51
   유닛→plan-audit 조립 인증(부결→patch 2라운드로 파일 38→48 성장 — 운영 표면 보강)→파일별
   body+재작업 루프(반려 사유 주입 재생성 5/5 성공)→**48/48 파일 확정**. 전 판정 실 LLM oxf,
-  강화 게이트(o 유닛마다 o 코드) 통과. 증거 잠금: evidence/(REPORT+스냅샷)+run catalog+
-  export 파일 트리 48개.
+  강화 게이트(o 유닛마다 o 코드) 통과. 증거(런 산출물, repo 에 없음): evidence/(REPORT+스냅샷)+
+  run catalog+export 파일 트리 48개.
 - **C1b 앱 연결** ✅ (2026-07-08): 접속 절차(창 발견→ping 재주입→reconcile poke)가 라이브
   전이(o 6→7)를 만들었고 확정 노드에 판정 전문(oxf=o·origin·구체 근거) — 스케줄러 spawn
   경로의 끝까지 전진. 관찰 사이 자율 전진 4건(2→6)은 무인 지속성 증거. 증거: 보드 카운트+

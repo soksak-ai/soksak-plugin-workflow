@@ -143,7 +143,7 @@ completeness point — draft, research, design, plan — reuses this one loop.
 
 Ground carried into a building stage is **o-confirmed only** — x and f are not ground (`docs/PRINCIPLES.md`
 rule 12; `src/reconcile.rs:626,642-666` `o_only` filter). Stages that need the full ledger for their
-own duty (hunt, classify, audit) keep it.
+own duty (classify, audit) keep it.
 
 ## 9. The board model
 
