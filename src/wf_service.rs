@@ -53,7 +53,7 @@ pub fn pick_implementer(boards: &Value, stores: &Value) -> Option<String> {
 /// 캐시 무효화 추측이 필요 없다(비용 = op 당 발견 왕복 2회, 그 안의 수십 노드 호출은 이 id 를 공유).
 fn resolve_implementer(emit: &Emit) -> Result<String, String> {
     let ask = |contract: &str| -> Value {
-        let env = emit.call("plugin.implementers", json!({ "contract": contract }), None);
+        let env = emit.call("plugin.implementers", json!({ "id": contract }), None);
         if env.get("ok").and_then(|v| v.as_bool()) == Some(true) {
             env.get("data").cloned().unwrap_or(Value::Null)
         } else {

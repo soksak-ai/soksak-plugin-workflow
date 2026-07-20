@@ -64,7 +64,7 @@ function viewsOf(win) {
 // let the harness pass while the projection quietly pinned an implementer the contract never
 // promised — the test has to be as ignorant of the board as the code it tests.
 function boardId(win) {
-  const d = must(sok("plugin.implementers", { contract: CONTRACT }, { window: win }), "plugin.implementers");
+  const d = must(sok("plugin.implementers", { id: CONTRACT }, { window: win }), "plugin.implementers");
   const found = (d.implementers || []).find((i) => i.status === "enabled");
   assert.ok(found, `nothing enabled implements ${CONTRACT} — the projection has nowhere to go`);
   return found.id;

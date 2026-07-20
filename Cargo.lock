@@ -92,19 +92,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "soksak-spec-contract"
+version = "0.0.1"
+source = "git+https://github.com/soksak-ai/soksak.git?branch=main#8af2ad25f71b6ce26ee8b6a3d65cb2c646a8fa66"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "soksak-spec-service"
 version = "0.0.1"
-source = "git+https://github.com/soksak-ai/soksak.git?branch=main#a3d85185ea2bc743c71ab67748725bd833db41b6"
+source = "git+https://github.com/soksak-ai/soksak.git?branch=main#8af2ad25f71b6ce26ee8b6a3d65cb2c646a8fa66"
 dependencies = [
  "serde",
  "serde_json",
+ "soksak-spec-contract",
  "soksak-spec-socket",
 ]
 
 [[package]]
 name = "soksak-spec-socket"
 version = "0.0.1"
-source = "git+https://github.com/soksak-ai/soksak.git?branch=main#a3d85185ea2bc743c71ab67748725bd833db41b6"
+source = "git+https://github.com/soksak-ai/soksak.git?branch=main#8af2ad25f71b6ce26ee8b6a3d65cb2c646a8fa66"
 
 [[package]]
 name = "syn"

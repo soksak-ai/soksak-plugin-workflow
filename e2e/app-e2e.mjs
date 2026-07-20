@@ -78,7 +78,7 @@ async function discoverWindow() {
 /** 두 계약을 모두 구현한 활성 플러그인 — 플러그인이 하는 해소를 하니스가 독립으로 되풀이한다. */
 async function resolveBoard() {
   const of = async (contract) => {
-    const r = unwrap(await call("plugin.implementers", { contract }));
+    const r = unwrap(await call("plugin.implementers", { id: contract }));
     return (r.implementers || []).filter((i) => i.status === "enabled").map((i) => i.id);
   };
   const stores = new Set(await of(PROMPT_CONTRACT));

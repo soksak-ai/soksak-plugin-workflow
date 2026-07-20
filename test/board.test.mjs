@@ -48,7 +48,7 @@ function harness({ implementers = [{ id: "some-board", status: "enabled" }], sto
       async execute(name, params) {
         calls.push({ name, params });
         if (name === "plugin.implementers") {
-          return { ok: true, data: { implementers: params.contract === PROMPT_CONTRACT ? stores : implementers } };
+          return { ok: true, data: { implementers: params.id === PROMPT_CONTRACT ? stores : implementers } };
         }
         if (name.endsWith(".node.add")) return { ok: true, data: { nodeId: "n-1" } };
         if (name.endsWith(".node.edit")) return { ok: true, data: {} };
@@ -75,7 +75,7 @@ test("the board is found by contract, and addressed by whatever id that discover
   const r = await board.project(entry(), "absent");
   assert.equal(r.projected, true);
   assert.equal(calls[0].name, "plugin.implementers");
-  assert.equal(calls[0].params.contract, BOARD_CONTRACT);
+  assert.equal(calls[0].params.id, BOARD_CONTRACT);
   assert.ok(
     calls.some((c) => c.name === "plugin.a-completely-different-board.node.add"),
     "the projection must address the implementer discovery returned, not a board it had in mind",

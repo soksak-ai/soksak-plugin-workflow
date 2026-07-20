@@ -171,8 +171,8 @@ var ROOT_KEY = "\0root";
 function makeBoard(app, store) {
   const exec = (name, params) => app.commands.execute(name, params);
   async function implementer() {
-    const b = await exec("plugin.implementers", { contract: BOARD_CONTRACT });
-    const p = await exec("plugin.implementers", { contract: PROMPT_CONTRACT });
+    const b = await exec("plugin.implementers", { id: BOARD_CONTRACT });
+    const p = await exec("plugin.implementers", { id: PROMPT_CONTRACT });
     if (!b?.ok || !p?.ok) return { id: null };
     const boards = b.data?.implementers || [];
     const id = pickImplementer(boards, p.data?.implementers);
