@@ -14,7 +14,7 @@ import {
   leaseState, checkDispatch, checkRenew, receiptVerifiable, checkEvidence, detectDrift,
 } from "./gate.js";
 import { makeGit } from "./git.js";
-import { makeBoard, PROMPT_CONTRACT } from "./board.js";
+import { makeBoard, acceptable, PROMPT_CONTRACT } from "./board.js";
 
 const COLL = "entry"; // one ledger entry per issue
 const COLL_CARD = "card"; // issue → the board card projecting it (the board issues the id, we remember it)
@@ -93,7 +93,7 @@ const index_default = {
       const rows = await app.data.query(COLL, { scope: SCOPE, order: "updatedAt" });
       return Array.isArray(rows) ? rows : [];
     };
-    const blank = (issue) => ({ issue: String(issue), lease: null, owner: null, branch: null, receipts: [], done: false, updatedAt: 0 });
+    const blank = (issue) => ({ issue: String(issue), title: null, lease: null, owner: null, branch: null, receipts: [], done: false, updatedAt: 0 });
     const save = async (e) => {
       const rec = { ...e, owner: e.lease?.owner ?? null, updatedAt: now() };
       await app.data.put(COLL, rec, { scope: SCOPE, id: rec.issue });
@@ -310,6 +310,39 @@ const index_default = {
           else skipped.push({ issue: e.issue, reason: r.reason });
         }
         return { board: id, root, projected, skipped };
+      },
+    });
+
+    reg("board.accept", {
+      description:
+        "Observe the board and take the issuerized work onto the ledger. The Rust side fans out a completed spec into unlocked work tasks under its done Draft; this reads them back through the contract path (node.list, never a named board) and find-or-creates one ledger entry per task — so the JS execution axis (lease/receipt/gate/drift) now owns each. This is the only seam between the two runtimes: nobody calls across, both meet on the board. Idempotent — a task already on the ledger is re-adopted, never doubled. A task under a chunk that is not done, a locked spec frame, and a non-task node are all left alone. No board is a lawful answer, not an error.",
+      triggers: { ko: "보드 관찰 수용 작업 이슈라이즈 원장 팬인" },
+      params: {},
+      returns: "{ board, accepted: [{issue, nodeId, created}] }",
+      examples: ["sok plugin.soksak-plugin-workflow.board.accept"],
+      message: (d) =>
+        d.board
+          ? msg(`${(d.accepted ?? []).length} work task(s) accepted off ${d.board}`, `${d.board} 에서 작업 ${(d.accepted ?? []).length}건 수용`)
+          : msg("no board to observe", "관찰할 보드 없음"),
+      handler: async () => {
+        const { id, nodes } = await board.observe();
+        if (!id) return { board: null, accepted: [] };
+        const accepted = [];
+        for (const pick of acceptable(nodes)) {
+          const existing = await load(pick.issue);
+          // Adopt the producer's card first, so the projection that save() fires edits it in place
+          // instead of minting a second card for the same work.
+          await board.adopt(pick.issue, pick.nodeId, id);
+          if (existing) {
+            accepted.push({ issue: pick.issue, nodeId: pick.nodeId, created: false });
+            continue;
+          }
+          const e = blank(pick.issue);
+          e.title = pick.title ?? null;
+          await save(e); // enters unleased and unreceipted — both gates refuse it until someone earns them
+          accepted.push({ issue: pick.issue, nodeId: pick.nodeId, created: true });
+        }
+        return { board: id, accepted };
       },
     });
 

@@ -221,6 +221,64 @@ test("a refusal is written in the caller's language — the gates are pure, the 
   assert.ok(!/[가-힣]/.test((await run(en, "gate.dispatch", { issue: "i-42", owner: "a" })).message));
 });
 
+// ── the seam: accepting issuerized work tasks off the board ─────────────────
+// The Rust sidecar publishes unlocked work tasks under a done Draft. The JS ledger observes the
+// board through the contract path (node.list) and find-or-creates one entry per task — idempotent,
+// so the same task accepted twice is still one entry.
+
+const BOARD = "kb";
+// A board whose node.list returns the fanned-out tree: a done Draft with two unlocked work tasks,
+// plus a locked spec frame and a task under an unfinished chunk that must both be left alone.
+function boardHost(nodes) {
+  return (name, params) => {
+    if (name === "plugin.implementers") return { ok: true, data: { implementers: [{ id: BOARD, status: "enabled" }] } };
+    if (name === `plugin.${BOARD}.node.list`) return { ok: true, data: { nodes } };
+    if (name === `plugin.${BOARD}.node.get`) return { ok: true, data: {} };
+    if (name.startsWith(`plugin.${BOARD}.node.`)) return { ok: true, data: { nodeId: "new" } };
+    return { ok: true, data: {} };
+  };
+}
+const fanout = [
+  { id: "d", title: "Draft", status: "done", kind: "chunk", locked: false },
+  { id: "t1", title: "실코드화: a.rs", status: "todo", kind: "task", locked: false, parentId: "d" },
+  { id: "t2", title: "실코드화: b.rs", status: "todo", kind: "task", locked: false, parentId: "d" },
+  { id: "frame", title: "spec frame", status: "done", kind: "chunk", locked: true, parentId: "d" },
+  { id: "unfinished", title: "Draft 2", status: "review", kind: "chunk", locked: false },
+  { id: "t3", title: "실코드화: c.rs", status: "todo", kind: "task", locked: false, parentId: "unfinished" },
+];
+
+test("accepts each unlocked work task under a done Draft as a ledger entry, keyed by the board's id", async () => {
+  const m = boot({ executeCommand: boardHost(fanout) });
+  const r = await run(m, "board.accept");
+  assert.equal(r.board, BOARD);
+  assert.deepEqual(r.accepted.map((a) => a.issue).sort(), ["t1", "t2"], "only the two unlocked tasks under the done Draft");
+  const entries = (await run(m, "lease.list")).entries.map((e) => e.issue).sort();
+  assert.deepEqual(entries, ["t1", "t2"], "an entry exists for each accepted task, and for nothing else");
+});
+
+test("accepting is idempotent — the same task seen twice is still one entry", async () => {
+  const m = boot({ executeCommand: boardHost(fanout) });
+  await run(m, "board.accept");
+  const second = await run(m, "board.accept");
+  assert.equal((await run(m, "lease.list")).entries.length, 2, "a second pass must not double the ledger");
+  assert.ok(second.accepted.every((a) => a.created === false), "the second pass creates nothing — it only re-adopts");
+});
+
+test("an accepted task lands unleased and unreceipted — both gates still refuse it", async () => {
+  const m = boot({ executeCommand: boardHost(fanout) });
+  await run(m, "board.accept");
+  assert.equal((await run(m, "gate.dispatch", { issue: "t1", owner: "agent-1" })).code, "LEASE_STALE");
+  assert.equal((await run(m, "gate.transition", { issue: "t1" })).code, "EVIDENCE_REQUIRED");
+});
+
+test("no board is a lawful answer — accept does nothing and refuses nothing", async () => {
+  const m = boot({ executeCommand: () => ({ ok: true, data: { implementers: [] } }) });
+  const r = await run(m, "board.accept");
+  assert.equal(r.board, null);
+  assert.deepEqual(r.accepted, []);
+  assert.equal((await run(m, "lease.list")).entries.length, 0);
+});
+
 // ── drift: ledger vs repository ─────────────────────────────────────────────
 
 const repo = "/repo";

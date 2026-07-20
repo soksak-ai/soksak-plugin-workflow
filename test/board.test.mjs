@@ -2,7 +2,7 @@
 // care when there is none.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { cardOf, makeBoard, pickImplementer, BOARD_CONTRACT, PROMPT_CONTRACT, LEDGER_CARD } from "../js/board.js";
+import { cardOf, makeBoard, acceptable, pickImplementer, BOARD_CONTRACT, PROMPT_CONTRACT, LEDGER_CARD } from "../js/board.js";
 
 const entry = (o = {}) => ({ issue: "i-42", lease: null, branch: null, receipts: [], done: false, ...o });
 const commit = (v) => ({ kind: "commit", value: v, at: 1 });
@@ -34,6 +34,51 @@ test("done, with the receipts that earned it visible on the card", () => {
   assert.equal(c.status, "done");
   assert.match(c.description, /2 receipts/);
   assert.match(c.description, /0dc2d14/, "a commit receipt is worth showing — it is what a human re-checks");
+});
+
+test("the human title the producer wrote survives a re-projection — the card is not renamed to its id", () => {
+  const c = cardOf(entry({ issue: "kb-7", title: "실코드화: parser.rs" }), "absent");
+  assert.equal(c.title, "실코드화: parser.rs", "an adopted card keeps the title a human reads, not the raw issue id");
+});
+
+// ── the seam: which board nodes the ledger accepts ───────────────────────────
+// Issuerize fans out unlocked work tasks under a done Draft. The JS ledger accepts exactly those:
+// kind=task, unlocked, parent chunk done. A spec frame (locked), a task under an unfinished chunk,
+// or a non-task node is left alone — accepting them would pull half-built spec into the run.
+
+const node = (o = {}) => ({ id: "n", title: "t", status: "todo", ...o });
+const doneDraft = { id: "d", title: "Draft", status: "done", kind: "chunk" };
+
+test("an unlocked work task under a done Draft is accepted, keyed and adopted by the board's own id", () => {
+  const picks = acceptable([doneDraft, node({ id: "t1", title: "실코드화: a.rs", kind: "task", locked: false, parentId: "d" })]);
+  assert.deepEqual(picks, [{ issue: "t1", nodeId: "t1", title: "실코드화: a.rs" }], "the issue id is the board node id, and the human title rides along");
+});
+
+test("a task under a chunk that is not done is left alone — half-built spec must not enter the run", () => {
+  const picks = acceptable([{ id: "d", status: "review", kind: "chunk" }, node({ id: "t1", kind: "task", locked: false, parentId: "d" })]);
+  assert.deepEqual(picks, []);
+});
+
+test("a locked node is a spec frame, never a work task — the ledger never adopts it", () => {
+  const picks = acceptable([doneDraft, node({ id: "t1", kind: "task", locked: true, parentId: "d" })]);
+  assert.deepEqual(picks, []);
+});
+
+test("a non-task node under a done Draft is not work — chunks, groups, facts are passed over", () => {
+  const picks = acceptable([doneDraft, node({ id: "g", kind: "group", locked: false, parentId: "d" }), node({ id: "f", kind: "fact", locked: false, parentId: "d" })]);
+  assert.deepEqual(picks, []);
+});
+
+test("a task with no parent, or a parent not on the board, is not under any done Draft", () => {
+  const picks = acceptable([node({ id: "orphan", kind: "task", locked: false }), node({ id: "lost", kind: "task", locked: false, parentId: "ghost" })]);
+  assert.deepEqual(picks, []);
+});
+
+test("a board that answers node.list with only the contract fields yields nothing — the axis to filter on is absent", () => {
+  // The contract guarantees only {id,title,status,description}. Without kind/locked/parentId there is
+  // no way to tell a work task from a spec frame, so the honest answer is to accept nothing.
+  const picks = acceptable([{ id: "a", title: "실코드화: a.rs", status: "done", description: "" }]);
+  assert.deepEqual(picks, [], "no kind/locked/parent axis means no basis to accept — never a guess");
 });
 
 // ── discovery + upsert ──────────────────────────────────────────────────────

@@ -38,7 +38,39 @@ export function cardOf(entry, leaseState) {
   parts.push(receipts.length === 1 ? "1 receipt" : `${receipts.length} receipts`);
   const commits = receipts.filter((r) => r.kind === "commit").map((r) => String(r.value).slice(0, 7));
   if (commits.length > 0) parts.push(commits.join(" "));
-  return { title: entry.issue, description: parts.join(" · "), status };
+  // An entry the ledger minted knows only its issue id; an entry adopted off the board carries the
+  // human title the producer wrote. Re-projecting must edit the card in place, never rename it to a
+  // raw id — so the title the producer chose wins, and the issue id is only the fallback.
+  return { title: entry.title || entry.issue, description: parts.join(" · "), status };
+}
+
+// The seam between the two axes: which board nodes the JS ledger accepts as work.
+//
+// Issuerize (the Rust side) fans out unlocked work tasks under a done Draft chunk — an individual card
+// per piece, `kind=task`, `locked=false`, parented to the Draft. Those, and only those, are the run's
+// work: a locked node is a spec frame, a task under an unfinished chunk is half-built spec, a non-task
+// node is not an issue at all. Accepting any of them would pull unfinished work into the ledger.
+//
+// Pure, so the decision is judged from the node list alone, without a board. The issue id is the
+// board's own node id — the board issues it and never repeats it, where a title can collide or be
+// edited (the contract itself warns of this). The human title rides along so the adopted card keeps
+// the name a human reads.
+//
+// CONTRACT NOTE — the fields this reads (`kind`, `locked`, `parentId`) are NOT guaranteed by
+// soksak-spec-plugin-issue-board: `node.list` promises only {id,title,status,description}. A board
+// that returns just the contract fields yields nothing here, on purpose — there is no axis to tell a
+// work task from a spec frame, and guessing would be worse than accepting nothing.
+export function acceptable(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const byId = new Map(list.map((n) => [n.id, n]));
+  const picks = [];
+  for (const n of list) {
+    if (n.kind !== "task" || n.locked === true) continue;
+    const parent = n.parentId != null ? byId.get(n.parentId) : undefined;
+    if (!parent || parent.status !== "done") continue;
+    picks.push({ issue: String(n.id), nodeId: String(n.id), title: n.title });
+  }
+  return picks;
 }
 
 // Discovery + upsert against whatever implements the contract. The consumer owns the issue→card
@@ -94,6 +126,25 @@ export function makeBoard(app, store) {
   return {
     implementer,
     ledgerCard,
+
+    /** Read the board back through the contract path. No board → no nodes, and that is lawful: the
+     *  ledger runs unobserved exactly as before. This never names an implementer — it addresses
+     *  whatever discovery returned, so a swapped board is read without a code change. */
+    async observe() {
+      const { id } = await implementer();
+      if (!id) return { id: null, nodes: [] };
+      const res = await exec(`plugin.${id}.node.list`, {});
+      const nodes = res?.ok ? res.data?.nodes ?? [] : [];
+      return { id, nodes };
+    },
+
+    /** Adopt a card the producer already put on the board as this issue's own projection surface, so
+     *  a later projection edits it in place instead of minting a duplicate. The two axes meet on one
+     *  card: the producer authored its content, the ledger now drives its status. */
+    async adopt(issue, nodeId, boardId) {
+      await store.put(String(issue), { nodeId, board: boardId ?? (await implementer()).id ?? null });
+      return { adopted: true, issue: String(issue), nodeId };
+    },
 
     /** Put the entry on the board (create or update). No board → nothing happens, and that is fine. */
     async project(entry, leaseState) {

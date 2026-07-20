@@ -164,7 +164,19 @@ function cardOf(entry, leaseState2) {
   parts.push(receipts.length === 1 ? "1 receipt" : `${receipts.length} receipts`);
   const commits = receipts.filter((r) => r.kind === "commit").map((r) => String(r.value).slice(0, 7));
   if (commits.length > 0) parts.push(commits.join(" "));
-  return { title: entry.issue, description: parts.join(" \xB7 "), status };
+  return { title: entry.title || entry.issue, description: parts.join(" \xB7 "), status };
+}
+function acceptable(nodes) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const byId = new Map(list.map((n) => [n.id, n]));
+  const picks = [];
+  for (const n of list) {
+    if (n.kind !== "task" || n.locked === true) continue;
+    const parent = n.parentId != null ? byId.get(n.parentId) : void 0;
+    if (!parent || parent.status !== "done") continue;
+    picks.push({ issue: String(n.id), nodeId: String(n.id), title: n.title });
+  }
+  return picks;
 }
 var LEDGER_CARD = "workflow ledger";
 var ROOT_KEY = "\0root";
@@ -199,6 +211,23 @@ function makeBoard(app, store) {
   return {
     implementer,
     ledgerCard,
+    /** Read the board back through the contract path. No board → no nodes, and that is lawful: the
+     *  ledger runs unobserved exactly as before. This never names an implementer — it addresses
+     *  whatever discovery returned, so a swapped board is read without a code change. */
+    async observe() {
+      const { id } = await implementer();
+      if (!id) return { id: null, nodes: [] };
+      const res = await exec(`plugin.${id}.node.list`, {});
+      const nodes = res?.ok ? res.data?.nodes ?? [] : [];
+      return { id, nodes };
+    },
+    /** Adopt a card the producer already put on the board as this issue's own projection surface, so
+     *  a later projection edits it in place instead of minting a duplicate. The two axes meet on one
+     *  card: the producer authored its content, the ledger now drives its status. */
+    async adopt(issue, nodeId, boardId) {
+      await store.put(String(issue), { nodeId, board: boardId ?? (await implementer()).id ?? null });
+      return { adopted: true, issue: String(issue), nodeId };
+    },
     /** Put the entry on the board (create or update). No board → nothing happens, and that is fine. */
     async project(entry, leaseState2) {
       const { id, code, reason } = await implementer();
@@ -299,7 +328,7 @@ var index_default = {
       const rows = await app.data.query(COLL, { scope: SCOPE, order: "updatedAt" });
       return Array.isArray(rows) ? rows : [];
     };
-    const blank = (issue) => ({ issue: String(issue), lease: null, owner: null, branch: null, receipts: [], done: false, updatedAt: 0 });
+    const blank = (issue) => ({ issue: String(issue), title: null, lease: null, owner: null, branch: null, receipts: [], done: false, updatedAt: 0 });
     const save = async (e) => {
       const rec = { ...e, owner: e.lease?.owner ?? null, updatedAt: now() };
       await app.data.put(COLL, rec, { scope: SCOPE, id: rec.issue });
@@ -490,6 +519,32 @@ var index_default = {
           else skipped.push({ issue: e.issue, reason: r.reason });
         }
         return { board: id, root, projected, skipped };
+      }
+    });
+    reg("board.accept", {
+      description: "Observe the board and take the issuerized work onto the ledger. The Rust side fans out a completed spec into unlocked work tasks under its done Draft; this reads them back through the contract path (node.list, never a named board) and find-or-creates one ledger entry per task \u2014 so the JS execution axis (lease/receipt/gate/drift) now owns each. This is the only seam between the two runtimes: nobody calls across, both meet on the board. Idempotent \u2014 a task already on the ledger is re-adopted, never doubled. A task under a chunk that is not done, a locked spec frame, and a non-task node are all left alone. No board is a lawful answer, not an error.",
+      triggers: { ko: "\uBCF4\uB4DC \uAD00\uCC30 \uC218\uC6A9 \uC791\uC5C5 \uC774\uC288\uB77C\uC774\uC988 \uC6D0\uC7A5 \uD32C\uC778" },
+      params: {},
+      returns: "{ board, accepted: [{issue, nodeId, created}] }",
+      examples: ["sok plugin.soksak-plugin-workflow.board.accept"],
+      message: (d) => d.board ? msg(`${(d.accepted ?? []).length} work task(s) accepted off ${d.board}`, `${d.board} \uC5D0\uC11C \uC791\uC5C5 ${(d.accepted ?? []).length}\uAC74 \uC218\uC6A9`) : msg("no board to observe", "\uAD00\uCC30\uD560 \uBCF4\uB4DC \uC5C6\uC74C"),
+      handler: async () => {
+        const { id, nodes } = await board.observe();
+        if (!id) return { board: null, accepted: [] };
+        const accepted = [];
+        for (const pick of acceptable(nodes)) {
+          const existing = await load(pick.issue);
+          await board.adopt(pick.issue, pick.nodeId, id);
+          if (existing) {
+            accepted.push({ issue: pick.issue, nodeId: pick.nodeId, created: false });
+            continue;
+          }
+          const e = blank(pick.issue);
+          e.title = pick.title ?? null;
+          await save(e);
+          accepted.push({ issue: pick.issue, nodeId: pick.nodeId, created: true });
+        }
+        return { board: id, accepted };
       }
     });
     reg("gate.dispatch", {
