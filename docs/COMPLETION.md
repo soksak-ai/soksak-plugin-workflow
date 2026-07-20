@@ -5,6 +5,10 @@ Nothing outside this list is called done; nothing on it is skipped silently. Wea
 criterion violates PRINCIPLES rule 6 — if a criterion is wrong, correct this document in an
 explicit commit.
 
+Grounding: the Rust engine lives in the sidecar repo `soksak-sidecar-workflow` (canonical); this
+repo is now pure JS. Any `src/…`, `workflows/…`, `references/…`, `e2e/…`, or `tools/…` path named
+here refers to that sidecar repo.
+
 ## 1. Deliverables
 
 | # | Deliverable | Where |
@@ -25,8 +29,9 @@ explicit commit.
   set 38→48, adding the operating surfaces) → per-file body with rework loops (rejected code
   regenerated with the verifier's findings injected; 5/5 rework successes) → **48/48 files
   confirmed**. Every verdict a real LLM oxf; the strict gate (every o unit backed by an o
-  code) passed. Evidence locked: e2e/out/full-chain/evidence/ (REPORT.md + board snapshot)
-  + run catalog + exported file tree (export/, 48 files).
+  code) passed. Evidence (run outputs, not present in the repo):
+  e2e/out/full-chain/evidence/ (REPORT.md + board snapshot) + run catalog + exported file
+  tree (export/, 48 files).
 - **C1b App attachment** ✅ (2026-07-08): attach sequence (window discovery → ping env
   re-seed → reconcile poke) produced a live transition observed as it happened (o 6→7), the
   confirmed node carrying a full verdict (oxf=o, origin, concrete reason) — the scheduler

@@ -4,6 +4,10 @@ These rules bind every implementation and change in this repository. Rules come 
 follows them. When code and a rule disagree, fix the code. When the rule itself is wrong, do
 not quietly relax it — correct this document in an explicit commit.
 
+Grounding: the Rust engine lives in the sidecar repo `soksak-sidecar-workflow` (canonical); this
+repo is now pure JS. Any `src/…`, `workflows/…`, `references/…`, `e2e/…`, or `tools/…` path named
+here refers to that sidecar repo.
+
 ## 1. Directive single source of truth
 
 The refined directive that passed the authoring gate is canonical. The human-facing surface
@@ -80,8 +84,8 @@ An injected ledger or `{{facts}}` ground carries **o-confirmed entries only** wh
 BUILDS on it (design chain, plan, body). f (fatal) and x (rejected) entries are not ground —
 injecting them hands the model a contradictory foundation (measured: a plan turn fed 111
 mixed-badge facts emitted one garbage unit; the same turn on o-only ground emitted 39 real
-file units). Stages that need the full ledger for their own duty keep it: hunt (duplicate
-avoidance), classify (assign everything), audit (f tally).
+file units). Stages that need the full ledger for their own duty keep it: classify (assign
+everything), audit (f tally).
 
 ## 13. Two-axis certification at every layer
 

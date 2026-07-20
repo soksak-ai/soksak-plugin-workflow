@@ -6,9 +6,11 @@ the design itself is wrong, do not quietly bend the rule to match a shortcut —
 in an explicit commit. The final section records the deltas between what runs now and what is ruled
 here; those are debts against the code, never licenses to lower the bar.
 
-Grounding: file references are `path:line` in this plugin repo (`src/…` is the Rust sidecar, `js/…`
-is the JS half) unless a sibling repo is named (`soksak-contract-*/SPEC.md`, `soksak-plugin-kanban/…`).
-A reference that no longer resolves is stale — fix the reference or the code, never delete the claim.
+Grounding: Rust `src/…` references are `path:line` in the sidecar repo `soksak-sidecar-workflow`
+(the canonical runtime; this plugin repo is now pure JS). `js/…` references are `path:line` in this
+plugin repo. Contract and kanban references name their own repo (`soksak-contract-*/SPEC.md`,
+`soksak-plugin-kanban/…`). A reference that no longer resolves is stale — fix the reference or the
+code, never delete the claim.
 
 ## 1. Three parts, coupled by contract alone
 
@@ -25,7 +27,7 @@ name (`plugin.json` `consumes`: `soksak-spec-plugin-issue-board`, `soksak-spec-p
 
 The core is plugin host + poke scheduler + `app.data` (namespace-isolated SQLite) + a service proxy.
 It is a broker, never a party: it holds no workflow state and knows no board. It mediates cross-plugin
-calls (`Emit::call`, e.g. `src/wf_service.rs:238`) and schedule pokes (`schedule.poke`), and that is
+calls (`Emit::call`, e.g. `src/wf_service.rs:306`) and schedule pokes (`schedule.poke`), and that is
 all.
 
 Reconcile is trigger-driven, never registered-into-existence. Registering a schedule does not fire it;
@@ -37,7 +39,7 @@ to it is a loop at rest, and rest is a correct state — not a stall to paper ov
 
 The kanban plugin implements both consumed contracts at once — `soksak-spec-plugin-issue-board` and
 `soksak-spec-plugin-prompt-store`. It is discovered as the **intersection** of the two, never as the
-first board that answers (`src/wf_service.rs:36` `pick_implementer`; `js/board.js:19` `pickImplementer`):
+first board that answers (`src/wf_service.rs:37` `pick_implementer`; `js/board.js:19` `pickImplementer`):
 a node carries the address of the prompt it runs, and an address minted by one store means nothing to
 another — so the board holding the card must be the store holding the text.
 
@@ -63,9 +65,9 @@ command, not a state cell. They are deliberately parallel, and the only place th
 (section 11).
 
 **(a) The Rust sidecar** — the content and verification engine. It binds `bind: "service"`; the core
-spawns it resident as `<bin> serve` (`src/wf_service.rs:596`). It finds its board by the contract
+spawns it resident as `<bin> serve` (`src/wf_service.rs:803`). It finds its board by the contract
 intersection, never by name (section 3). Its ops are `run`, `reconcile`, `next`, `submit`, `research`,
-`issuerize`, `export`, `ping` (`src/wf_service.rs:397`). It owns the two verification axes: `badge`
+`issuerize`, `export`, `ping` (`src/wf_service.rs:545`). It owns the two verification axes: `badge`
 (o/x/f), set per node, and `status` completion.
 
 **(b) The JS half** — the execution ledger and its blocking gates. Its entry is `main.js`
@@ -78,7 +80,7 @@ intentional parallel of the Rust engine — the same board, a different job.
 
 Every relationship is a contract dependency; there is no direct coupling anywhere:
 
-- **sidecar ↔ kanban** = `issue-board` + `prompt-store` (the intersection; `src/wf_service.rs:54`).
+- **sidecar ↔ kanban** = `issue-board` + `prompt-store` (the intersection; `src/wf_service.rs:57`).
 - **JS ↔ kanban** = `issue-board` (`js/board.js:10`, discovered, projection-only).
 - **sidecar ↔ JS** = no direct coupling. Their only seam is issuerize (section 11).
 - **core** mediates and nothing more (section 2).
@@ -97,12 +99,12 @@ DRAFT → RESEARCH → DESIGN → PLAN → ISSUERIZE → CODE/EXPORT
 ```
 
 - **DRAFT** — idea → spec: discover requirements, verify each cell (o/x/f), reach consensus.
-- **RESEARCH** — spec → facts, grounded by search (`src/wf_service.rs:467`).
+- **RESEARCH** — spec → facts, grounded by search (`src/wf_service.rs:666`).
 - **DESIGN** — interface → domain → criteria, inheriting the o-confirmed ground (`docs/PRINCIPLES.md`
   rule 12).
 - **PLAN** — → per-file pseudocode units (`plan-unit`).
-- **ISSUERIZE** — fan the finished plan out into per-file real work (`src/reconcile.rs:1069`).
-- **CODE / EXPORT** — codify and materialize files (`src/reconcile.rs:1041`).
+- **ISSUERIZE** — fan the finished plan out into per-file real work (`src/reconcile.rs:1287`).
+- **CODE / EXPORT** — codify and materialize files (`src/reconcile.rs:1243`).
 
 DRAFT through PLAN is one continuous journey over a single chunk. Real work begins at ISSUERIZE, and
 not before — that boundary is the issuerize gate (`docs/PRINCIPLES.md` rule 5), never bypassed.
@@ -110,17 +112,17 @@ not before — that boundary is the issuerize gate (`docs/PRINCIPLES.md` rule 5)
 ## 7. How the loop turns
 
 The engine is driven by the sidecar poking itself. `reconcile_tick` advances the DAG by **one node per
-tick** (`src/reconcile.rs:798`): an `item` runs exec-one and earns a cell verdict o/x/f
-(`src/reconcile.rs:840`); a `task` runs exec-stage and emits its children
-(`src/reconcile.rs:777,660`). On progress — a badge finalized, children published — the tick pokes:
-`deps.poke → schedule.poke → reconcile` re-fires (`src/reconcile.rs:866-868`; `src/wf_service.rs:270`).
+tick** (`src/reconcile.rs:936`): an `item` runs exec-one and earns a cell verdict o/x/f
+(`src/reconcile.rs:981`); a `task` runs exec-stage and emits its children
+(`src/reconcile.rs:925,795`). On progress — a badge finalized, children published — the tick pokes:
+`deps.poke → schedule.poke → reconcile` re-fires (`src/reconcile.rs:1010-1012`; `src/wf_service.rs:363`).
 On no progress it pokes nothing, and the loop rests. Progress is the fuel; absence of progress is the
 stop condition, not a bug.
 
 Stage-graph auto-advance stays **inside one workflow**: `blockedBy` gates order, and a stage that
-publishes the next stage's precondition lets the next tick pick it up (`src/reconcile.rs:197`
+publishes the next stage's precondition lets the next tick pick it up (`src/reconcile.rs:204`
 `pick_ready`). Transitions **between** workflows — `run → research → issuerize → export` — are never
-automatic; each is a caller-invoked op (`src/wf_service.rs:440-496`). The engine advances a workflow;
+automatic; each is a caller-invoked op (`src/wf_service.rs:647-696`). The engine advances a workflow;
 the caller advances between workflows.
 
 ## 8. The consensus loop
@@ -131,17 +133,17 @@ changes = consensus), reaching correction and termination with no third party
 (`src/consensus.rs:1-11`). Three elements are load-bearing and none may be dropped: `remove` (the loop
 retracts its own mistakes), the change history (what was added/removed and why, injected into the next
 round to block re-litigation and oscillation), and zero-change convergence
-(`src/consensus.rs:apply_review:30`, `apply_changes:86`).
+(`src/consensus.rs:apply_review:30`, `apply_changes:100`).
 
 A stage review that yields changes republishes itself (a new round); a review with no changes advances
-to the next stage (`converged`, `src/consensus.rs:59,122`). A `remove` never deletes — the removed
+to the next stage (`converged`, `src/consensus.rs:68,162`). A `remove` never deletes — the removed
 entry stays with its reason as `badge=x`, so the next round sees "already removed" and does not re-add
-it (`src/reconcile.rs:736-739`; removed-with-reason channel `src/reconcile.rs:587-602`). Every
+it (`src/reconcile.rs:854-860`; removed-with-reason channel `src/reconcile.rs:668-683`). Every
 completeness point — draft, research, design, plan — reuses this one loop.
 
 Ground carried into a building stage is **o-confirmed only** — x and f are not ground (`docs/PRINCIPLES.md`
-rule 12; `src/reconcile.rs:560,568-585` `o_only` filter). Stages that need the full ledger for their
-own duty (hunt, classify, audit) keep it.
+rule 12; `src/reconcile.rs:626,642-666` `o_only` filter). Stages that need the full ledger for their
+own duty (classify, audit) keep it.
 
 ## 9. The board model
 
@@ -149,9 +151,9 @@ own duty (hunt, classify, audit) keep it.
 hang stage sections — Spec, Research, Design, Plan — and under each section hang its frames
 (requirements, facts, plan-units). A frame is a **locked, collapsed** child: it can be neither
 promoted nor outdented, because it is a piece of the spec, not a unit of work
-(`locked: true` at `src/reconcile/draft.rs:59`, `src/reconcile.rs:444`; the board refuses to move a
+(`locked: true` at `src/reconcile/draft.rs:79`, `src/reconcile.rs:480`; the board refuses to move a
 locked subtree, `soksak-plugin-kanban/src/commands.ts:89,395`). Each frame carries a verification
-comment: a `badge` (o/x/f) plus a `result` giving the reason (`src/reconcile.rs:738,864`).
+comment: a `badge` (o/x/f) plus a `result` giving the reason (`src/reconcile.rs:859,1009`).
 
 The chunk is alive and sequential. A draft grows a Spec section and its frames, verification comments
 accrete; when Spec closes, a Research node attaches and its sub-work restarts; then Design; then Plan.
@@ -164,19 +166,19 @@ real work. The finished spec is the epic header.
 ## 10. The two verification axes, never mixed
 
 Verification axis = `badge` (검수전 → o/x/f); completion axis = `status`. A node that carries a badge is
-done by badge alone (`is_done`, `src/reconcile.rs:169-176`; `docs/PRINCIPLES.md` rule 4). Any new
+done by badge alone (`is_done`, `src/reconcile.rs:175-183`; `docs/PRINCIPLES.md` rule 4). Any new
 verification-target kind reuses the badge axis. No second completion mechanism is ever invented beside
 it.
 
 The sidecar publishes badge-bearing frames and verifies both axes to closure; the audit rolls the
 chunk badge to `o` only when the set is complete and no `f` remains, else `f`
-(`src/reconcile.rs:759-763`).
+(`src/reconcile.rs:891-895`).
 
 ## 11. The one seam: issuerize
 
 Issuerize is the only join between the two axes. The Rust engine builds the spec (one chunk); issuerize
 decomposes it into JS-ledger work items (`lease/receipt/gate/done`). Its gate is absolute
-(`docs/PRINCIPLES.md` rule 5; `src/reconcile.rs:1069-1111`): chunk `badge='o'` AND every fact confirmed
+(`docs/PRINCIPLES.md` rule 5; `src/reconcile.rs:1296-1359`): chunk `badge='o'` AND every fact confirmed
 AND every plan-unit confirmed. No bypass path.
 
 Each decomposed piece is an **unlocked work task parented under the Draft** — an individual card moving
@@ -195,7 +197,7 @@ the ledger against the repository from the outside — reported loud, never repa
 The board changes under a human's hands — a card dragged, an issue closed. The contract owns the
 topic, not the implementer: `issue-board:changed`, subscribed on the bus axis as
 `bus:issue-board:changed` (`soksak-contract-issue-board/SPEC.md:111-131`; `plugin.json` `service.subscribe`;
-`src/wf_service.rs:400-404`). The signal is a notification, never a diff: on it the consumer re-reads
+`src/wf_service.rs:585-588`). The signal is a notification, never a diff: on it the consumer re-reads
 `node.list` and reconciles against what it finds. A payload the consumer trusted would become a second,
 weaker copy of the board's state. A topic named after the implementer would be an id smuggled into a
 string — swapping the board would silence the consumer without a single error.
@@ -206,7 +208,7 @@ These are debts the code owes this document, listed so no one mistakes the prese
 is fixed by moving the code up, never by moving a rule down.
 
 - **badge crosses the board seam outside the contract.** `badge`/`category`/`isDraft`/`origin` travel
-  through `node.add`/`node.edit` (`src/reconcile.rs:458,738`; `src/reconcile/draft.rs:62`), but the
+  through `node.add`/`node.edit` (`src/reconcile.rs:494,859`; `src/reconcile/draft.rs:82`), but the
   `issue-board` contract's `node.edit` defines only `{title?, description?, status?}`
   (`soksak-contract-issue-board/SPEC.md:76-81`). It works today only because the kanban implementer
   natively models the badge axis (`soksak-plugin-kanban/src/commands.ts:263`); a different board
@@ -215,17 +217,17 @@ is fixed by moving the code up, never by moving a rule down.
 
 - **The change model is not materialized.** `apply_changes` — the confirmed-doc protocol where each
   item carries `history[]{round, action, reason}` — is fully written and tested
-  (`src/consensus.rs:86-124`) but unwired. The live path calls only `apply_review`
-  (`src/reconcile.rs:736`), so the history that blocks oscillation lives in transient stage inputs, not
+  (`src/consensus.rs:100-168`) but unwired. The live path calls only `apply_review`
+  (`src/reconcile.rs:857`), so the history that blocks oscillation lives in transient stage inputs, not
   on the board.
 
 - **The round is fixed.** The one wired consensus call passes `round = 1` literally
-  (`src/reconcile.rs:736` `apply_review(res, 1)`). Rounds do not advance, so the injected `{{history}}`
+  (`src/reconcile.rs:857` `apply_review(res, 1)`). Rounds do not advance, so the injected `{{history}}`
   cannot accumulate across them. Target: the round is threaded through the self-republish so each round
   sees every prior round's changes.
 
 - **Work cards flood the board, ungrouped.** Issuerize currently fans out to locked Rust `kind:task`
-  exec nodes routed back through exec-stage (`src/reconcile.rs:1126-1140`), not to unlocked JS-ledger
+  exec nodes routed back through exec-stage (`src/reconcile.rs:1392-1410`), not to unlocked JS-ledger
   work items under the Draft epic; and the JS ledger projects each entry as an individual card under a
   single `workflow ledger` card (`js/board.js:49,99-115`). Neither yet groups the issued work under the
   completed spec as its epic header (section 11). Target: one Draft-rooted tree of unlocked work tasks,
