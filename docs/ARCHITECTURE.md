@@ -67,8 +67,9 @@ command, not a state cell. They are deliberately parallel, and the only place th
 **(a) The Rust sidecar** — the content and verification engine. It binds `bind: "service"`; the core
 spawns it resident as `<bin> serve` (`src/wf_service.rs:803`). It finds its board by the contract
 intersection, never by name (section 3). Its ops are `run`, `reconcile`, `next`, `submit`, `research`,
-`issuerize`, `export`, `ping` (`src/wf_service.rs:545`). It owns the two verification axes: `badge`
-(o/x/f), set per node, and `status` completion.
+`issuerize`, `export`, `proof`, `ping` (`src/interface.rs:6` `SERVICE_OPS`). It owns the static
+verification axes — `badge` (o/x/f), set per node, and `status` completion — and, distinct from both,
+the execution axis `proof` (section 10).
 
 **(b) The JS half** — the execution ledger and its blocking gates. Its entry is `main.js`
 (`plugin.json` `entry`). Its lifecycle is `entry → lease → gate.dispatch → receipt → gate.transition →
@@ -104,7 +105,9 @@ DRAFT → RESEARCH → DESIGN → PLAN → ISSUERIZE → CODE/EXPORT
   rule 12).
 - **PLAN** — → per-file pseudocode units (`plan-unit`).
 - **ISSUERIZE** — fan the finished plan out into per-file real work (`src/reconcile.rs:1287`).
-- **CODE / EXPORT** — codify and materialize files (`src/reconcile.rs:1243`).
+- **CODE / EXPORT** — codify and materialize files (`src/reconcile.rs:1243`), then optionally `proof`
+  runs each confirmed file's PROOF commands against the exported tree and records pass/fail on the
+  node — the execution axis, gated off by default (section 10; `src/reconcile.rs:1802` `proof_tick`).
 
 DRAFT through PLAN is one continuous journey over a single chunk. Real work begins at ISSUERIZE, and
 not before — that boundary is the issuerize gate (`docs/PRINCIPLES.md` rule 5), never bypassed.
@@ -174,6 +177,14 @@ The sidecar publishes badge-bearing frames and verifies both axes to closure; th
 chunk badge to `o` only when the set is complete and no `f` remains, else `f`
 (`src/reconcile.rs:891-895`).
 
+Distinct from both static axes is the **execution axis** `proof`. `badge`/`status` are the static
+judgement — a human or an LLM reading the code — and `proof` is whether the code actually runs: `proof`
+runs the confirmed code's PROOF commands and records `{status, reason, commands}` on the node's own
+`proof` field, never touching `badge` (`src/reconcile.rs:1802` `proof_tick`, `proof_edit_fields`). It
+is not a second completion mechanism — a node stays done-by-badge — and it is gated off by default
+(`SOKSAK_PROOF_EXEC`; the arbitrary-command sandbox is undesigned, so every node reports `gated` until
+it is enabled).
+
 ## 11. The one seam: issuerize
 
 Issuerize is the only join between the two axes. The Rust engine builds the spec (one chunk); issuerize
@@ -186,6 +197,12 @@ Each decomposed piece is an **unlocked work task parented under the Draft** — 
 spec (the Draft chunk) is the epic header those work tasks hang under; a producer with many issues MUST
 group them, because a board is shared and scattered issues are unreadable
 (`soksak-contract-issue-board/SPEC.md:70-73`; grouping via `parentId`, `js/board.js:49,109`).
+
+The two axes are stitched by `board.accept`: the JS ledger observes the board through the contract
+path (`node.list`) and find-or-creates one entry per unlocked work task under a done Draft — idempotent,
+so the same task adopted twice is still one entry, keyed by the board's own node id
+(`js/index.js:316`; `js/board.js:63` `acceptable`). It reads only what the sidecar wrote; it never
+reaches back into the engine.
 
 The JS half then owns each work item's life: `lease.acquire` guards single-ownership, `receipt.add`
 records verifiable evidence, `gate.dispatch`/`gate.transition` block on it, and `drift.check` audits
@@ -207,28 +224,48 @@ string — swapping the board would silence the consumer without a single error.
 These are debts the code owes this document, listed so no one mistakes the present for the design. Each
 is fixed by moving the code up, never by moving a rule down.
 
-- **badge crosses the board seam outside the contract.** `badge`/`category`/`isDraft`/`origin` travel
-  through `node.add`/`node.edit` (`src/reconcile.rs:494,859`; `src/reconcile/draft.rs:82`), but the
-  `issue-board` contract's `node.edit` defines only `{title?, description?, status?}`
-  (`soksak-contract-issue-board/SPEC.md:76-81`). It works today only because the kanban implementer
-  natively models the badge axis (`soksak-plugin-kanban/src/commands.ts:263`); a different board
-  implementing only the contract would silently drop every verdict. Target: the verification axis
-  reaches the board through a contract-legal channel.
+- **badge is a board field outside the contract's declaration.** The wire defect is fixed: change
+  fields now flatten to top-level so the board reads plaintext `{node, badge?, result?, status?…}`
+  rather than a wrapper the board silently drops (`src/wf_service.rs:317-320` `node_edit_params`). What
+  remains is that `badge`/`category`/`isDraft`/`origin` are still fields the `issue-board` contract's
+  `node.edit` does not declare — it names only `{title?, description?, status?}`
+  (`soksak-contract-issue-board/SPEC.md:76-81`). It works because the kanban implementer natively
+  models the badge axis (`soksak-plugin-kanban/src/commands.ts:263`); a different board implementing
+  only the contract would accept the write and drop the verdict. Target: the verification axis reaches
+  the board through a contract-declared channel.
 
-- **The change model is not materialized.** `apply_changes` — the confirmed-doc protocol where each
-  item carries `history[]{round, action, reason}` — is fully written and tested
-  (`src/consensus.rs:100-168`) but unwired. The live path calls only `apply_review`
-  (`src/reconcile.rs:857`), so the history that blocks oscillation lives in transient stage inputs, not
-  on the board.
+- **`board.accept` reads board fields the contract does not guarantee** — same family as the badge
+  debt, the mirror image on the JS side. It selects work by `kind`/`locked`/`parentId`
+  (`js/board.js:63` `acceptable`), but `node.list` promises only `{id, title, status, description}`.
+  A board returning just the contract fields yields nothing — on purpose, since there is no axis to
+  tell a work task from a spec frame — so the seam works only against the kanban implementer. Target:
+  the work-vs-frame distinction crosses the seam through a contract-declared field.
 
-- **The round is fixed.** The one wired consensus call passes `round = 1` literally
-  (`src/reconcile.rs:857` `apply_review(res, 1)`). Rounds do not advance, so the injected `{{history}}`
-  cannot accumulate across them. Target: the round is threaded through the self-republish so each round
-  sees every prior round's changes.
+- **RESOLVED — the change model is materialized.** `apply_changes` — the confirmed-doc protocol where
+  each item carries `history[]{round, action, reason}` — is now wired for the three completeness stages
+  (`src/reconcile.rs:1199` `apply_changes(&doc, changes, round)`; consensus-stage gate at
+  `src/reconcile.rs:846`). The legacy `apply_review` remains only for the non-consensus
+  audit/classify/generate returns (`src/reconcile.rs:1237`).
 
-- **Work cards flood the board, ungrouped.** Issuerize currently fans out to locked Rust `kind:task`
-  exec nodes routed back through exec-stage (`src/reconcile.rs:1392-1410`), not to unlocked JS-ledger
-  work items under the Draft epic; and the JS ledger projects each entry as an individual card under a
-  single `workflow ledger` card (`js/board.js:49,99-115`). Neither yet groups the issued work under the
-  completed spec as its epic header (section 11). Target: one Draft-rooted tree of unlocked work tasks,
-  the finished spec as the header.
+- **RESOLVED — the round advances.** `reconcile` owns the counter (the doc engine cannot do
+  arithmetic): each self-republish reads `args.round` and injects `round + 1`
+  (`src/reconcile.rs:917` `read_round`, `932` `inject_round`, `1129`), so the injected `{{history}}`
+  accumulates across rounds until zero-change convergence or the `CONSENSUS_ROUND_MAX` seal to `badge=f`
+  (`src/reconcile.rs:1282-1288`).
+
+- **A per-item verify can overwrite a consensus frame's add-history** (Step 5 follow-up). `apply_changes`
+  CREATEs pre-review frames carrying their `history`, but the per-item verify then writes
+  `{badge, result}` onto the same node (`src/reconcile.rs:1231`), which can clobber the history the
+  round injected. Target: the two writers compose on one node without one erasing the other.
+
+- **RESOLVED — issued work is one Draft-rooted tree.** Issuerize fans out unlocked work tasks parented
+  under the done Draft (section 11), and the JS ledger adopts exactly those through `board.accept`
+  (`js/index.js:316`; `js/board.js:63`), grouping the issued work under the completed spec as its epic
+  header rather than scattering individual cards.
+
+- **PROOF runs arbitrary commands, so it is gated off.** The execution axis is implemented and its
+  deterministic core is tested — `parse_proof`, `evaluate_pass_condition`, `proof_edit_fields`
+  (`src/reconcile.rs:1802` `proof_tick`) — but running a confirmed file's PROOF commands means spawning
+  arbitrary shell, whose sandbox/environment is undesigned. So it spawns only under `SOKSAK_PROOF_EXEC`
+  and otherwise reports every node `gated` (`src/wf_service.rs:420-434`). Target: a sandbox design that
+  lets the execution axis run by default.

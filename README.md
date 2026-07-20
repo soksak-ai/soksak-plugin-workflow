@@ -4,7 +4,7 @@ One soksak plugin, two runtimes that share nothing. The plugin **exposes** a wor
 engine and **implements** an issue-execution ledger; their only seam is `issuerize`.
 
 - **The workflow engine** — the content and verification runtime. Its commands
-  (`run`/`reconcile`/`next`/`submit`/`research`/`issuerize`/`export`/`ping`) bind to a
+  (`run`/`reconcile`/`next`/`submit`/`research`/`issuerize`/`export`/`proof`/`ping`) bind to a
   resident sidecar service (`bind: "service"`); the core spawns it from the sidecar repo
   `soksak-sidecar-workflow` and routes to it. This repo declares those commands but does
   not implement them.
@@ -46,6 +46,7 @@ Call as `sok plugin.soksak-plugin-workflow.<command>` or via MCP.
 | `next` | CLI executor pull — one ready verification node's execution package (leased) |
 | `submit` | CLI executor submit — verdict back into the same badge pipeline (idempotent) |
 | `export` | Write confirmed code nodes to a real file tree (PROOF stays on the node) |
+| `proof` | Run a confirmed chunk's PROOF commands and record pass/fail on the node's `proof` field (execution axis; gated off unless `SOKSAK_PROOF_EXEC`) |
 | `reconcile` | Execute ready workflow nodes (scheduler trigger — runs automatically) |
 | `ping` | Provider health probe — one fixed mini prompt through the real exec path |
 
@@ -61,6 +62,7 @@ Call as `sok plugin.soksak-plugin-workflow.<command>` or via MCP.
 | `gate.transition` | Carry an issue to `done` — only on a verifiable receipt |
 | `drift.check` | Audit the ledger against the repository; report, never repair |
 | `board.sync` | Project the ledger onto the issue board (discovered by contract) |
+| `board.accept` | Observe the board and adopt each unlocked work task under a done Draft as a ledger entry (idempotent — the seam issuerize opens into the ledger) |
 | `entry.remove` | Drop a ledger entry (refuses under a live lease) |
 
 ## The issue ledger (the JS half)

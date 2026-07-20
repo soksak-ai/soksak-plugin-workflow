@@ -1,8 +1,8 @@
 // The plugin as the app sees it: what the manifest declares must be exactly what activate()
 // registers, and the gates must refuse through the command surface — not only in gate.js.
 //
-// The manifest declares two kinds of command. The eight bind:"service" ones are answered by the
-// Rust service; the JS entry must register the other eight and no more. Registering a command the
+// The manifest declares two kinds of command. The nine bind:"service" ones are answered by the
+// Rust service; the JS entry must register the rest and no more. Registering a command the
 // manifest does not declare, or declaring one nothing answers, is the failure this checks.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -36,7 +36,7 @@ test("the JS entry registers exactly the commands the manifest declares for it",
 
 test("the service commands stay the service's — the JS entry must not shadow them", () => {
   const { registered } = boot();
-  assert.equal(serviceCommands.length, 8, "the eight existing service commands are still declared");
+  assert.equal(serviceCommands.length, 9, "the nine existing service commands are still declared");
   for (const name of serviceCommands) {
     assert.ok(!registered.has(name), `${name} is answered by the service, not by JS`);
   }

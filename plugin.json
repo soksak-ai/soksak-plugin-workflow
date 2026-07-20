@@ -221,6 +221,31 @@
         "returns": "{ ok, written }"
       },
       {
+        "name": "proof",
+        "title": {
+          "ko": "확정 코드의 PROOF 를 실행해 검증합니다",
+          "en": "Runs confirmed code's PROOF to verify it"
+        },
+        "bind": "service",
+        "description": "Run a chunk's confirmed (badge 'o') code's PROOF commands under `dir` and record the pass/fail on each node's `proof` field — the execution axis, parallel to and never mixed with the static badge axis. Gated off by default: running arbitrary commands is unsandboxed, so it only spawns when SOKSAK_PROOF_EXEC is set, else every node reports `gated`.",
+        "triggers": {
+          "ko": "증명 실행 proof 빌드 테스트 검증"
+        },
+        "params": {
+          "chunk": {
+            "type": "string",
+            "required": true,
+            "description": "Chunk id whose confirmed code nodes are proven."
+          },
+          "dir": {
+            "type": "string",
+            "required": true,
+            "description": "Working directory (absolute) the PROOF commands run in — the exported file tree."
+          }
+        },
+        "returns": "{ ok, passed, failed, gated, results }"
+      },
+      {
         "name": "entry.add",
         "title": {
           "ko": "\uc774\uc288\ub97c \uc6d0\uc7a5\uc5d0 \ub4f1\ub85d\ud569\ub2c8\ub2e4",

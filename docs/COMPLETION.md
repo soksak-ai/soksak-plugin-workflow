@@ -63,10 +63,14 @@ here refers to that sidecar repo.
 
 ## 3. Explicitly out of scope (stated as remainder in the completion report)
 
-- **PROOF execution (build/test)**: running arbitrary commands needs sandbox/environment
-  design — a separate axis (the builder stage in the cc2 lineage). Until PROOF runs, "the
-  code works" is unproven, and the report says so; body-verify's static judgement is not a
-  substitute.
+- **PROOF execution (build/test)** — partially in scope now. The execution path exists: the
+  `proof` op runs a confirmed chunk's PROOF commands against the exported tree and records
+  pass/fail on each node's `proof` field, and its deterministic core (`parse_proof`,
+  `evaluate_pass_condition`, `proof_edit_fields`) is unit-tested. What stays out of scope is
+  the sandbox: running arbitrary shell needs a sandbox/environment design that is not built,
+  so `proof` is gated off by default (`SOKSAK_PROOF_EXEC`) and reports every node `gated`
+  otherwise. Until the sandbox lets it run by default, body-verify's static judgement remains
+  the only always-on check, and it is not a substitute for the code actually running.
 - **Stage tasks over CLI (v2)**: submitting publish side-effects needs its own contract;
   C2's idempotency proof stands on verification nodes.
 - **Tournament re-run through the app**: the tournament lives on frozen input by design; the

@@ -44,7 +44,12 @@ repo 를 가리킨다.
 - **C5 결정적 게이트 전량 GREEN**: cargo+node 전량+doc validate.
 
 ## 3. 명시적 범위 밖 (완료 보고에 잔여 기재)
-- PROOF 실행(빌드/테스트): 샌드박스 설계가 필요한 별도 축 — 실행 전까지 "동작"은 미증명.
+- PROOF 실행(빌드/테스트): 이제 부분 편입. 실행 경로는 구현 — `proof` op 가 확정 덩어리의
+  PROOF 명령을 export 트리에서 실행해 노드 `proof` 필드에 pass/fail 을 기록하고, 결정적 코어
+  (`parse_proof`·`evaluate_pass_condition`·`proof_edit_fields`)는 유닛 테스트됨. 범위 밖으로
+  남는 것은 샌드박스 — 임의 셸 실행의 샌드박스/환경 설계가 미완이라 `proof` 는 기본 게이트 오프
+  (`SOKSAK_PROOF_EXEC`)이며 그 밖에는 모든 노드를 `gated` 로 보고한다. 샌드박스가 기본 실행을
+  허용하기 전까지 body-verify 의 정적 판단이 유일한 상시 검사이고, 코드 실동작의 대체물은 아니다.
 - stage task 의 CLI 수행(v2): 발행 부수효과의 제출 계약 별도 설계.
 - 대회의 앱-경유 재실측: 대회는 동결 입력이 생명 — 확정 방법론은 C1 에서 앱 실증.
 

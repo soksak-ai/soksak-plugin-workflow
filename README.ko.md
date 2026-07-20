@@ -4,7 +4,7 @@
 엔진을 **노출**하고 이슈 실행 원장을 **구현**한다; 둘의 유일한 이음새는 `issuerize`.
 
 - **워크플로 엔진** — 내용·검증 런타임. 명령
-  (`run`/`reconcile`/`next`/`submit`/`research`/`issuerize`/`export`/`ping`)은 상주
+  (`run`/`reconcile`/`next`/`submit`/`research`/`issuerize`/`export`/`proof`/`ping`)은 상주
   사이드카 서비스에 바인딩되고(`bind: "service"`), 코어가 사이드카 repo
   `soksak-sidecar-workflow` 에서 스폰해 라우팅한다. 이 repo 는 명령을 선언만 할 뿐
   구현하지 않는다.
@@ -45,6 +45,7 @@
 | `next` | CLI 실행자 pull — ready 검증 노드의 실행 패키지 발급(lease) |
 | `submit` | CLI 실행자 제출 — 판정을 동일 badge 파이프로(멱등) |
 | `export` | 확정 code 노드를 실제 파일 트리로 기록(PROOF 는 노드에 유지) |
+| `proof` | 확정 덩어리의 PROOF 명령을 실행해 노드 `proof` 필드에 pass/fail 기록(실행 축; `SOKSAK_PROOF_EXEC` 없으면 게이트 오프) |
 | `reconcile` | ready 워크플로 노드 실행(스케줄러 트리거 — 자동 실행) |
 | `ping` | provider 헬스 프로브 — 고정 미니 프롬프트를 실경로로 왕복 |
 
@@ -60,6 +61,7 @@
 | `gate.transition` | 검증 가능한 증적이 있어야만 `done` 으로 전이 |
 | `drift.check` | 원장을 저장소와 대조 감사 — 보고만, 수정 없음 |
 | `board.sync` | 원장을 이슈 보드에 투영(계약으로 발견) |
+| `board.accept` | 보드를 관찰해 done Draft 밑 unlocked 작업 task 를 원장 항목으로 수용(멱등 — issuerize 가 원장으로 여는 이음새) |
 | `entry.remove` | 원장 항목 삭제(라이브 리스 중이면 거부) |
 
 ## 이슈 원장 (JS 반쪽)
