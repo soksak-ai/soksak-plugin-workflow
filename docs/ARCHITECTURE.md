@@ -224,22 +224,20 @@ string — swapping the board would silence the consumer without a single error.
 These are debts the code owes this document, listed so no one mistakes the present for the design. Each
 is fixed by moving the code up, never by moving a rule down.
 
-- **badge is a board field outside the contract's declaration.** The wire defect is fixed: change
-  fields now flatten to top-level so the board reads plaintext `{node, badge?, result?, status?…}`
-  rather than a wrapper the board silently drops (`src/wf_service.rs:317-320` `node_edit_params`). What
-  remains is that `badge`/`category`/`isDraft`/`origin` are still fields the `issue-board` contract's
-  `node.edit` does not declare — it names only `{title?, description?, status?}`
-  (`soksak-contract-issue-board/SPEC.md:76-81`). It works because the kanban implementer natively
-  models the badge axis (`soksak-plugin-kanban/src/commands.ts:263`); a different board implementing
-  only the contract would accept the write and drop the verdict. Target: the verification axis reaches
-  the board through a contract-declared channel.
+- **By design, not a debt — the verification badge is a domain field.** The wire defect is fixed:
+  change fields flatten to top-level so the board reads plaintext rather than a wrapper it silently
+  drops (`src/wf_service.rs:317-320` `node_edit_params`). `badge`/`result`/`category`/`kind` are
+  *domain* fields, and the contract's two field classes make those the implementer's business —
+  round-tripped when the board models them, never a contract guarantee (`soksak-contract-issue-board/SPEC.md`).
+  The workflow depends on a verification-capable board and says so; a board that models no verdict
+  cannot run this loop — a stated dependency, not a contract violation.
 
-- **`board.accept` reads board fields the contract does not guarantee** — same family as the badge
-  debt, the mirror image on the JS side. It selects work by `kind`/`locked`/`parentId`
-  (`js/board.js:63` `acceptable`), but `node.list` promises only `{id, title, status, description}`.
-  A board returning just the contract fields yields nothing — on purpose, since there is no axis to
-  tell a work task from a spec frame — so the seam works only against the kanban implementer. Target:
-  the work-vs-frame distinction crosses the seam through a contract-declared field.
+- **RESOLVED — `board.accept` reads only contract-standard structural fields.** The issue-board
+  contract was re-ruled to standardize the structural fields (`parentId, order, locked, collapsed`)
+  with write-read symmetry — `node.add`/`node.edit` set them, `node.list`/`node.get` return them
+  (`soksak-contract-issue-board/SPEC.md`). `acceptable` now selects work by `locked` and the parent's
+  `status` alone (`js/board.js:63`), reading no domain field: board-neutral, so any conformant board
+  yields the same answer, not just the kanban implementer.
 
 - **RESOLVED — the change model is materialized.** `apply_changes` — the confirmed-doc protocol where
   each item carries `history[]{round, action, reason}` — is now wired for the three completeness stages

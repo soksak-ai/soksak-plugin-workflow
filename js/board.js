@@ -46,28 +46,27 @@ export function cardOf(entry, leaseState) {
 
 // The seam between the two axes: which board nodes the JS ledger accepts as work.
 //
-// Issuerize (the Rust side) fans out unlocked work tasks under a done Draft chunk — an individual card
-// per piece, `kind=task`, `locked=false`, parented to the Draft. Those, and only those, are the run's
-// work: a locked node is a spec frame, a task under an unfinished chunk is half-built spec, a non-task
-// node is not an issue at all. Accepting any of them would pull unfinished work into the ledger.
+// Issuerize (the Rust side) fans out real work under a done Draft chunk — an unlocked card per piece,
+// parented to the Draft. Those, and only those, are the run's work: an unlocked node under a completed
+// Draft. A locked node is a spec frame (the draft is indivisible, so its pieces are locked); an
+// unlocked node under an unfinished chunk is half-built spec. Accepting either would pull unfinished
+// work into the ledger.
 //
 // Pure, so the decision is judged from the node list alone, without a board. The issue id is the
 // board's own node id — the board issues it and never repeats it, where a title can collide or be
-// edited (the contract itself warns of this). The human title rides along so the adopted card keeps
-// the name a human reads.
+// edited. The human title rides along so the adopted card keeps the name a human reads.
 //
-// CONTRACT NOTE — the fields this reads (`kind`, `locked`, `parentId`) are NOT guaranteed by
-// soksak-spec-plugin-issue-board: `node.list` promises only {id,title,status,description}. A board
-// that returns just the contract fields yields nothing here, on purpose — there is no axis to tell a
-// work task from a spec frame, and guessing would be worse than accepting nothing.
+// This reads only the contract's structural fields — `locked`, `parentId`, and `status`, all
+// guaranteed by node.list under soksak-spec-plugin-issue-board's write-read symmetry — so it is
+// board-neutral: any conformant board yields the same answer, with no implementer-private knowledge.
 export function acceptable(nodes) {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map((n) => [n.id, n]));
   const picks = [];
   for (const n of list) {
-    if (n.kind !== "task" || n.locked === true) continue;
+    if (n.locked === true) continue; // a locked node is a spec frame, not work
     const parent = n.parentId != null ? byId.get(n.parentId) : undefined;
-    if (!parent || parent.status !== "done") continue;
+    if (!parent || parent.status !== "done") continue; // work lives only under a completed Draft
     picks.push({ issue: String(n.id), nodeId: String(n.id), title: n.title });
   }
   return picks;

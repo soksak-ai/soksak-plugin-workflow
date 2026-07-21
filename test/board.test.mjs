@@ -64,9 +64,16 @@ test("a locked node is a spec frame, never a work task — the ledger never adop
   assert.deepEqual(picks, []);
 });
 
-test("a non-task node under a done Draft is not work — chunks, groups, facts are passed over", () => {
-  const picks = acceptable([doneDraft, node({ id: "g", kind: "group", locked: false, parentId: "d" }), node({ id: "f", kind: "fact", locked: false, parentId: "d" })]);
-  assert.deepEqual(picks, []);
+test("acceptance reads the structural lock, not any domain kind — a locked frame is passed over, an unlocked node is taken", () => {
+  // kind is a domain field the contract does not guarantee; locked is the structural axis it does. A
+  // spec frame is locked whatever its kind; a work task is unlocked whatever its kind. So the seam
+  // filters on lock alone and never on kind.
+  const picks = acceptable([
+    doneDraft,
+    node({ id: "f", kind: "fact", locked: true, parentId: "d" }),
+    node({ id: "w", kind: "anything", locked: false, parentId: "d" }),
+  ]);
+  assert.deepEqual(picks.map((p) => p.nodeId), ["w"]);
 });
 
 test("a task with no parent, or a parent not on the board, is not under any done Draft", () => {
@@ -74,11 +81,11 @@ test("a task with no parent, or a parent not on the board, is not under any done
   assert.deepEqual(picks, []);
 });
 
-test("a board that answers node.list with only the contract fields yields nothing — the axis to filter on is absent", () => {
-  // The contract guarantees only {id,title,status,description}. Without kind/locked/parentId there is
-  // no way to tell a work task from a spec frame, so the honest answer is to accept nothing.
+test("a node with no parent hangs under no done Draft — passed over", () => {
+  // node.list returns the structural fields (parentId/locked) under the contract, so the seam has its
+  // axis. A node that carries no parentId hangs under no Draft at all, done or not — never work.
   const picks = acceptable([{ id: "a", title: "실코드화: a.rs", status: "done", description: "" }]);
-  assert.deepEqual(picks, [], "no kind/locked/parent axis means no basis to accept — never a guess");
+  assert.deepEqual(picks, [], "no parent means no done Draft to hang under — never a guess");
 });
 
 // ── discovery + upsert ──────────────────────────────────────────────────────

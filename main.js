@@ -171,7 +171,7 @@ function acceptable(nodes) {
   const byId = new Map(list.map((n) => [n.id, n]));
   const picks = [];
   for (const n of list) {
-    if (n.kind !== "task" || n.locked === true) continue;
+    if (n.locked === true) continue;
     const parent = n.parentId != null ? byId.get(n.parentId) : void 0;
     if (!parent || parent.status !== "done") continue;
     picks.push({ issue: String(n.id), nodeId: String(n.id), title: n.title });
