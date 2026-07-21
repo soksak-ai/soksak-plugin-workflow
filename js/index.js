@@ -15,6 +15,7 @@ import {
 } from "./gate.js";
 import { makeGit } from "./git.js";
 import { makeBoard, acceptable, PROMPT_CONTRACT } from "./board.js";
+import { registerRailContainer, railContainer, subscribeRail } from "./railBridge.js";
 
 const COLL = "entry"; // one ledger entry per issue
 const COLL_CARD = "card"; // issue → the board card projecting it (the board issues the id, we remember it)
@@ -444,6 +445,23 @@ const index_default = {
           wrap.append(bar, listEl, driftEl);
           container.append(wrap);
 
+          // Sidebar ejection: when the "runs" rail view registers a container for this content
+          // view, the run list moves there and the center keeps the toolbar and the drift report.
+          // No container (sidebar placement, a core without rails) keeps the list inline — the
+          // existing layout, unchanged. The list element is one and the same either way: state,
+          // rows and data-node addresses never fork.
+          const viewKey = vctx?.viewId ?? null;
+          let railHost = null;
+          const applyRail = () => {
+            const target = railContainer(viewKey, "runs");
+            if (target === railHost) return;
+            railHost = target;
+            if (target) target.append(listEl);
+            else wrap.insertBefore(listEl, driftEl);
+          };
+          const unRail = subscribeRail(viewKey, applyRail);
+          applyRail();
+
           async function render() {
             listEl.replaceChildren();
             report("loading", msg("Loading…", "불러오는 중…"));
@@ -499,12 +517,47 @@ const index_default = {
           void render();
 
           const sub = app.data.watch(COLL, { scope: SCOPE }, () => void render());
-          cleanups.set(container, () => sub.dispose());
+          cleanups.set(container, () => {
+            sub.dispose();
+            unRail();
+            listEl.remove(); // never leave the ejected list inside a rail this view no longer serves
+          });
         },
         unmount(container) {
           cleanups.get(container)?.();
           cleanups.delete(container);
           container.replaceChildren();
+        },
+      }),
+    );
+
+    // ── the runs rail view ──────────────────────────────────────────────────
+    // Owns only a container: the bound ledger view moves its run list here through the bridge,
+    // so state has a single owner and no duplicate truth. Unbound (no ledger content view), it
+    // renders a static notice.
+    const railCleanups = new Map();
+    ctx.subscriptions.push(
+      app.ui.registerView("runs", {
+        mount(container, vctx) {
+          railCleanups.get(container)?.();
+          container.replaceChildren();
+          const host = h("div", "display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;font-size:12px;color:var(--fg);background:var(--bg)");
+          container.append(host);
+          const bound = vctx?.boundViewId ?? null;
+          if (!bound) {
+            host.append(h("div", "padding:10px 12px;color:var(--fg3);font-size:11px", msg("No ledger view bound", "결부된 원장 뷰 없음")));
+            railCleanups.set(container, () => container.replaceChildren());
+            return;
+          }
+          const off = registerRailContainer(bound, "runs", host);
+          railCleanups.set(container, () => {
+            off();
+            container.replaceChildren();
+          });
+        },
+        unmount(container) {
+          railCleanups.get(container)?.();
+          railCleanups.delete(container);
         },
       }),
     );

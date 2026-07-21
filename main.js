@@ -96,19 +96,19 @@ function makeGit(processApi) {
       let done = false;
       let timer = null;
       processApi.spawn("git", args, { cwd, env: { ...ENV } }).then((handle) => {
-        const subs = [];
+        const subs2 = [];
         const finish = (fn, v) => {
           if (done) return;
           done = true;
           if (timer) clearTimeout(timer);
-          for (const s of subs) s.dispose();
+          for (const s of subs2) s.dispose();
           fn(v);
         };
         timer = setTimeout(() => {
           void processApi.kill(handle);
           finish(reject, new Error(`git ${args[0] ?? ""} timeout`));
         }, TIMEOUT_MS);
-        subs.push(
+        subs2.push(
           processApi.onData(handle, (b) => out += dec.decode(b, { stream: true })),
           processApi.onStderr(handle, (b) => err += new TextDecoder().decode(b)),
           processApi.onExit(handle, (code) => finish(resolve, { code, stdout: out, stderr: err.trim() }))
@@ -262,6 +262,46 @@ function makeBoard(app, store) {
       await store.del(issue);
       return { withdrawn: true, nodeId: mapped.nodeId };
     }
+  };
+}
+
+// js/railBridge.js
+var containers = /* @__PURE__ */ new Map();
+var subs = /* @__PURE__ */ new Map();
+function notify(viewId) {
+  for (const fn of subs.get(viewId) ?? []) fn();
+}
+function registerRailContainer(viewId, slot, el) {
+  const entry = containers.get(viewId) ?? {};
+  entry[slot] = el;
+  containers.set(viewId, entry);
+  notify(viewId);
+  return () => {
+    const cur = containers.get(viewId);
+    if (!cur || cur[slot] !== el) return;
+    delete cur[slot];
+    if (Object.keys(cur).length === 0) containers.delete(viewId);
+    notify(viewId);
+  };
+}
+function railContainer(viewId, slot) {
+  if (!viewId) return null;
+  return containers.get(viewId)?.[slot] ?? null;
+}
+function subscribeRail(viewId, fn) {
+  if (!viewId) return () => {
+  };
+  let set = subs.get(viewId);
+  if (!set) {
+    set = /* @__PURE__ */ new Set();
+    subs.set(viewId, set);
+  }
+  set.add(fn);
+  return () => {
+    const s = subs.get(viewId);
+    if (!s) return;
+    s.delete(fn);
+    if (s.size === 0) subs.delete(viewId);
   };
 }
 
@@ -631,6 +671,17 @@ var index_default = {
           const driftEl = h("div", "flex:0 0 auto;max-height:35%;overflow:auto;border-top:1px solid var(--bd);padding:4px 0;display:none");
           wrap.append(bar, listEl, driftEl);
           container.append(wrap);
+          const viewKey = vctx?.viewId ?? null;
+          let railHost = null;
+          const applyRail = () => {
+            const target = railContainer(viewKey, "runs");
+            if (target === railHost) return;
+            railHost = target;
+            if (target) target.append(listEl);
+            else wrap.insertBefore(listEl, driftEl);
+          };
+          const unRail = subscribeRail(viewKey, applyRail);
+          applyRail();
           async function render() {
             listEl.replaceChildren();
             report("loading", msg("Loading\u2026", "\uBD88\uB7EC\uC624\uB294 \uC911\u2026"));
@@ -683,12 +734,42 @@ var index_default = {
           driftBtn.onclick = () => void showDrift();
           void render();
           const sub = app.data.watch(COLL, { scope: SCOPE }, () => void render());
-          cleanups.set(container, () => sub.dispose());
+          cleanups.set(container, () => {
+            sub.dispose();
+            unRail();
+            listEl.remove();
+          });
         },
         unmount(container) {
           cleanups.get(container)?.();
           cleanups.delete(container);
           container.replaceChildren();
+        }
+      })
+    );
+    const railCleanups = /* @__PURE__ */ new Map();
+    ctx.subscriptions.push(
+      app.ui.registerView("runs", {
+        mount(container, vctx) {
+          railCleanups.get(container)?.();
+          container.replaceChildren();
+          const host = h("div", "display:flex;flex-direction:column;height:100%;min-height:0;overflow:hidden;font-size:12px;color:var(--fg);background:var(--bg)");
+          container.append(host);
+          const bound = vctx?.boundViewId ?? null;
+          if (!bound) {
+            host.append(h("div", "padding:10px 12px;color:var(--fg3);font-size:11px", msg("No ledger view bound", "\uACB0\uBD80\uB41C \uC6D0\uC7A5 \uBDF0 \uC5C6\uC74C")));
+            railCleanups.set(container, () => container.replaceChildren());
+            return;
+          }
+          const off = registerRailContainer(bound, "runs", host);
+          railCleanups.set(container, () => {
+            off();
+            container.replaceChildren();
+          });
+        },
+        unmount(container) {
+          railCleanups.get(container)?.();
+          railCleanups.delete(container);
         }
       })
     );

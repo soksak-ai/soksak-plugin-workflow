@@ -363,6 +363,25 @@
           "empty",
           "active",
           "error"
+        ],
+        "sidebar": {
+          "left": [
+            {
+              "ref": "self.runs",
+              "instance": "per-view"
+            }
+          ]
+        }
+      },
+      {
+        "id": "runs",
+        "title": {
+          "ko": "\ub7f0 \ubaa9\ub85d",
+          "en": "Runs"
+        },
+        "icon": "\u25a5",
+        "placements": [
+          "rail"
         ]
       }
     ],
